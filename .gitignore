@@ -2,6 +2,8 @@
 .cursor/
 .cursor-index/
 .index/
+.specstory
+.cursorindexingignore
 
 # Go
 # Binaries for programs and plugins
