@@ -1,10 +1,13 @@
 package executor
 
 import (
+	"bytes"
 	"context"
+	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/pkg/stdcopy"
 )
 
 type DockerExecutor struct {
@@ -12,7 +15,8 @@ type DockerExecutor struct {
 }
 
 func (e *DockerExecutor) Execute(code string, language string) (string, error) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
 	// 1. container create
 	resp, err := e.Client.ContainerCreate(ctx, &container.Config{
@@ -23,6 +27,13 @@ func (e *DockerExecutor) Execute(code string, language string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
+	// close and kill the container
+	defer func() {
+		_ = e.Client.ContainerRemove(ctx, resp.ID, container.RemoveOptions{
+			Force: true,
+		})
+	}()
 
 	// 2. container start
 
@@ -41,6 +52,8 @@ func (e *DockerExecutor) Execute(code string, language string) (string, error) {
 			return "", err
 		}
 	case <-statusCh:
+	case <-ctx.Done():
+		return "", ctx.Err()
 	}
 
 	// 4. get output (logs)
@@ -56,6 +69,15 @@ func (e *DockerExecutor) Execute(code string, language string) (string, error) {
 
 	// read output
 
+	defer output.Close()
+	var stdout, stderr bytes.Buffer
+	_, err = stdcopy.StdCopy(&stdout, &stderr, output)
+	if err != nil {
+		return "", err
+	}
+	finalOutput := stdout.String() + stderr.String()
+
+	return finalOutput, nil
 }
 
 func NewDockerExecutor(ctx context.Context) (*DockerExecutor, error) {
