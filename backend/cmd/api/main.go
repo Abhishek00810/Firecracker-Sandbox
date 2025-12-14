@@ -2,6 +2,7 @@ package main
 
 import (
 	"backend/internal/executor"
+	"backend/internal/handler"
 	"context"
 	"encoding/json"
 	"log"
@@ -27,7 +28,7 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 
 	ctx := context.Background()
-	_, err := executor.NewDockerExecutor(ctx)
+	dockerExec, err := executor.NewDockerExecutor(ctx)
 
 	if err != nil {
 		log.Fatal("Docker is required but not available:", err)
@@ -36,6 +37,7 @@ func main() {
 	}
 
 	http.HandleFunc("/health", healthHandler)
+	http.HandleFunc("/execute", handler.ExecuteHandler(dockerExec))
 
 	port := ":8080"
 
