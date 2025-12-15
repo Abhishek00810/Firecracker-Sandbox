@@ -12,9 +12,9 @@ type ExecuteRequest struct {
 }
 
 type ExecuteResponse struct {
-	Output string `json:"output"`
-	Error  string `json:"error,omitempty"`
-	Status string `json:"status"`
+	Output executor.ExecutionResult `json:"output"`
+	Error  string                   `json:"error,omitempty"`
+	Status string                   `json:"status"`
 }
 
 func ExecuteHandler(dockerExec *executor.DockerExecutor) http.HandlerFunc {

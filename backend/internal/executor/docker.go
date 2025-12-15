@@ -14,7 +14,12 @@ type DockerExecutor struct {
 	Client *client.Client
 }
 
-func (e *DockerExecutor) Execute(code string, language string) (string, error) {
+type ExecutionResult struct {
+	Output   string  `json:"output"`
+	Duration float64 `json:"duration"` // Changed to float64 for seconds
+}
+
+func (e *DockerExecutor) Execute(code string, language string) (ExecutionResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -22,10 +27,18 @@ func (e *DockerExecutor) Execute(code string, language string) (string, error) {
 	resp, err := e.Client.ContainerCreate(ctx, &container.Config{
 		Image: "python:alpine",
 		Cmd:   []string{"python", "-c", code},
-	}, nil, nil, nil, "")
+
+		//disable network for container
+		NetworkDisabled: true,
+	}, &container.HostConfig{
+		Resources: container.Resources{
+			Memory:   128 * 1024 * 1024,
+			NanoCPUs: 500000000,
+		},
+	}, nil, nil, "")
 
 	if err != nil {
-		return "", err
+		return ExecutionResult{}, err
 	}
 
 	// close and kill the container
@@ -39,8 +52,10 @@ func (e *DockerExecutor) Execute(code string, language string) (string, error) {
 
 	err = e.Client.ContainerStart(ctx, resp.ID, container.StartOptions{})
 	if err != nil {
-		return "", err
+		return ExecutionResult{}, err
 	}
+
+	startTime := time.Now()
 
 	// 3. container waiting
 
@@ -49,12 +64,14 @@ func (e *DockerExecutor) Execute(code string, language string) (string, error) {
 	select {
 	case err := <-errCh:
 		if err != nil {
-			return "", err
+			return ExecutionResult{}, err
 		}
 	case <-statusCh:
 	case <-ctx.Done():
-		return "", ctx.Err()
+		return ExecutionResult{}, ctx.Err()
 	}
+	//end timing here
+	executionTime := time.Since(startTime)
 
 	// 4. get output (logs)
 
@@ -64,7 +81,7 @@ func (e *DockerExecutor) Execute(code string, language string) (string, error) {
 	})
 
 	if err != nil {
-		return "", err
+		return ExecutionResult{}, err
 	}
 
 	// read output
@@ -73,11 +90,14 @@ func (e *DockerExecutor) Execute(code string, language string) (string, error) {
 	var stdout, stderr bytes.Buffer
 	_, err = stdcopy.StdCopy(&stdout, &stderr, output)
 	if err != nil {
-		return "", err
+		return ExecutionResult{}, err
 	}
 	finalOutput := stdout.String() + stderr.String()
 
-	return finalOutput, nil
+	return ExecutionResult{
+		Output:   finalOutput,
+		Duration: executionTime.Seconds(),
+	}, nil
 }
 
 func NewDockerExecutor(ctx context.Context) (*DockerExecutor, error) {
