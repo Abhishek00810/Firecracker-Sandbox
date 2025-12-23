@@ -30,10 +30,30 @@ func (e *DockerExecutor) Execute(code string, language string) (ExecutionResult,
 
 		//disable network for container
 		NetworkDisabled: true,
+		User:            "1000",
 	}, &container.HostConfig{
+		NetworkMode: "none", //silent prison network lockdown
+
+		// filesystem lockdown
+		ReadonlyRootfs: true, // read only filesystem but we need something for write for a user
+		// lets create a temp for that
+		Tmpfs: map[string]string{
+			"/tmp": "", // empty string = default tmpfs options where user will write
+		},
+
+		//privilege lockdown just like not giving chance for attacks such as dirty cow
+		Privileged:  false,           //this is default, but we wont give any chance god mode disabled
+		CapDrop:     []string{"ALL"}, // drop all root capabilities
+		SecurityOpt: []string{"no-new-privileges"},
+		//prevent to create more processed
+
 		Resources: container.Resources{
 			Memory:   128 * 1024 * 1024,
 			NanoCPUs: 500000000,
+			PidsLimit: func() *int64 {
+				i := int64(20) // Create the variable inside
+				return &i      // Return the pointer
+			}(),
 		},
 	}, nil, nil, "")
 
