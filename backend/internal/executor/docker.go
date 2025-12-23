@@ -8,6 +8,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
+	"github.com/docker/go-units"
 )
 
 type DockerExecutor struct {
@@ -54,6 +55,12 @@ func (e *DockerExecutor) Execute(code string, language string) (ExecutionResult,
 				i := int64(20) // Create the variable inside
 				return &i      // Return the pointer
 			}(),
+			Ulimits: []*units.Ulimit{
+				{Name: "nofile", Soft: 1024, Hard: 1024},        // Max Open files
+				{Name: "nproc", Soft: 20, Hard: 20},             // max processes (redundant wiht pidslimit)
+				{Name: "fsize", Soft: 10485760, Hard: 10485760}, // Max file size: 10MB}
+				{Name: "core", Soft: 0, Hard: 0},                // no core dumps
+			},
 		},
 	}, nil, nil, "")
 
