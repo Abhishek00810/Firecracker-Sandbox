@@ -70,7 +70,9 @@ func (e *DockerExecutor) Execute(code string, language string) (ExecutionResult,
 
 	// close and kill the container
 	defer func() {
-		_ = e.Client.ContainerRemove(ctx, resp.ID, container.RemoveOptions{
+		cleanupCtx := context.Background()
+		_ = e.Client.ContainerStop(cleanupCtx, resp.ID, container.StopOptions{})
+		_ = e.Client.ContainerRemove(cleanupCtx, resp.ID, container.RemoveOptions{
 			Force: true,
 		})
 	}()
