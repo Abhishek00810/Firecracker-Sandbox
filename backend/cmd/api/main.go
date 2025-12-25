@@ -3,6 +3,7 @@ package main
 import (
 	"backend/internal/executor"
 	"backend/internal/handler"
+	"backend/internal/queue"
 	"context"
 	"encoding/json"
 	"log"
@@ -29,15 +30,17 @@ func main() {
 
 	ctx := context.Background()
 	dockerExec, err := executor.NewDockerExecutor(ctx)
-
 	if err != nil {
 		log.Fatal("Docker is required but not available:", err)
 	} else {
 		log.Printf("Docker connected successfully!!")
 	}
 
+	JobQueue := queue.NewJobQueue(dockerExec, 10)
+	JobQueue.Start()
+
 	http.HandleFunc("/health", healthHandler)
-	http.HandleFunc("/execute", handler.ExecuteHandler(dockerExec))
+	http.HandleFunc("/execute", handler.ExecuteHandler(JobQueue))
 
 	port := ":8080"
 

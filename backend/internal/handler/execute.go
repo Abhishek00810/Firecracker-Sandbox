@@ -2,6 +2,7 @@ package handler
 
 import (
 	"backend/internal/executor"
+	"backend/internal/queue"
 	"encoding/json"
 	"net/http"
 )
@@ -17,30 +18,33 @@ type ExecuteResponse struct {
 	Status string                   `json:"status"`
 }
 
-func ExecuteHandler(dockerExec *executor.DockerExecutor) http.HandlerFunc {
+func ExecuteHandler(JobQueue *queue.JobQueue) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req ExecuteRequest
-
 		err := json.NewDecoder(r.Body).Decode(&req)
 
 		if err != nil {
-			http.Error(w, "Invalid Request", http.StatusBadRequest)
+			http.Error(w, "Invalid request", http.StatusBadRequest)
 		}
 
-		output, err := dockerExec.Execute(req.Code, req.Language)
+		resultCh, err := JobQueue.Submit(r.Context(), req.Code, req.Language)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		}
+
+		result := <-resultCh
 
 		resp := ExecuteResponse{
-			Output: output,
+			Output: result.Result,
 			Status: "success",
 		}
 
-		if err != nil {
-			resp.Error = err.Error()
+		if result.Err != nil {
+			resp.Error = result.Err.Error()
 			resp.Status = "error"
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
-
 	}
 }

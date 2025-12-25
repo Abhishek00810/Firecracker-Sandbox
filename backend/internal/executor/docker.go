@@ -20,9 +20,7 @@ type ExecutionResult struct {
 	Duration float64 `json:"duration"` // Changed to float64 for seconds
 }
 
-func (e *DockerExecutor) Execute(code string, language string) (ExecutionResult, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+func (e *DockerExecutor) Execute(ctx context.Context, code string, language string) (ExecutionResult, error) {
 
 	// 1. container create
 	resp, err := e.Client.ContainerCreate(ctx, &container.Config{
