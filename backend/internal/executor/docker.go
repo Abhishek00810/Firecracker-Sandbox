@@ -16,8 +16,10 @@ type DockerExecutor struct {
 }
 
 type ExecutionResult struct {
-	Output   string  `json:"output"`
-	Duration float64 `json:"duration"` // Changed to float64 for seconds
+	Output            string  `json:"output"`
+	Duration          float64 `json:"duration"` // Changed to float64 for seconds
+	ExitCode          int64   `json:"exit_code"`
+	TerminationReason string  `json:"termination_reason,omitempty"`
 }
 
 func (e *DockerExecutor) Execute(ctx context.Context, code string, language string) (ExecutionResult, error) {
@@ -55,7 +57,7 @@ func (e *DockerExecutor) Execute(ctx context.Context, code string, language stri
 			}(),
 			Ulimits: []*units.Ulimit{
 				{Name: "nofile", Soft: 1024, Hard: 1024},        // Max Open files
-				{Name: "nproc", Soft: 20, Hard: 20},             // max processes (redundant wiht pidslimit)
+				{Name: "nproc", Soft: 50, Hard: 50},             // max processes (redundant wiht pidslimit)
 				{Name: "fsize", Soft: 10485760, Hard: 10485760}, // Max file size: 10MB}
 				{Name: "core", Soft: 0, Hard: 0},                // no core dumps
 			},
@@ -87,15 +89,33 @@ func (e *DockerExecutor) Execute(ctx context.Context, code string, language stri
 	// 3. container waiting
 
 	statusCh, errCh := e.Client.ContainerWait(ctx, resp.ID, container.WaitConditionNotRunning)
+	var ExitCode int64 = -1
+	var TerminationReason string = ""
 
 	select {
 	case err := <-errCh:
 		if err != nil {
 			return ExecutionResult{}, err
 		}
-	case <-statusCh:
+	case status := <-statusCh:
+		ExitCode = status.StatusCode
+		switch ExitCode {
+		case 137:
+			TerminationReason = "oom_kill" // Docker killed it
+		case 143:
+			TerminationReason = "graceful_stop" // Docker stopped gracefully
+		case 0:
+			TerminationReason = "success"
+		default:
+			TerminationReason = "runtime_error"
+		}
 	case <-ctx.Done():
-		return ExecutionResult{}, ctx.Err()
+		TerminationReason = "timeout"
+		ExitCode = -1
+		return ExecutionResult{
+			ExitCode:          ExitCode,
+			TerminationReason: TerminationReason,
+		}, ctx.Err()
 	}
 	//end timing here
 	executionTime := time.Since(startTime)
@@ -122,8 +142,10 @@ func (e *DockerExecutor) Execute(ctx context.Context, code string, language stri
 	finalOutput := stdout.String() + stderr.String()
 
 	return ExecutionResult{
-		Output:   finalOutput,
-		Duration: executionTime.Seconds(),
+		Output:            finalOutput,
+		Duration:          executionTime.Seconds(),
+		ExitCode:          ExitCode,
+		TerminationReason: TerminationReason,
 	}, nil
 }
 

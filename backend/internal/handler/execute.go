@@ -4,6 +4,7 @@ import (
 	"backend/internal/executor"
 	"backend/internal/queue"
 	"encoding/json"
+	"fmt"
 	"net/http"
 )
 
@@ -30,6 +31,7 @@ func ExecuteHandler(JobQueue *queue.JobQueue) http.HandlerFunc {
 		resultCh, err := JobQueue.Submit(r.Context(), req.Code, req.Language)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
 		}
 
 		result := <-resultCh
@@ -42,6 +44,9 @@ func ExecuteHandler(JobQueue *queue.JobQueue) http.HandlerFunc {
 		if result.Err != nil {
 			resp.Error = result.Err.Error()
 			resp.Status = "error"
+		} else if result.Result.ExitCode != 0 {
+			resp.Status = "error"
+			resp.Error = fmt.Sprintf("Execution failed with exit code %d", result.Result.ExitCode)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
