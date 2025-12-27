@@ -3,9 +3,12 @@ package executor
 import (
 	"bytes"
 	"context"
+	"io"
 	"time"
 
+	"github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-units"
@@ -20,6 +23,29 @@ type ExecutionResult struct {
 	Duration          float64 `json:"duration"` // Changed to float64 for seconds
 	ExitCode          int64   `json:"exit_code"`
 	TerminationReason string  `json:"termination_reason,omitempty"`
+}
+
+func (e *DockerExecutor) EnsureImage(ctx context.Context, imageName string) error {
+	_, err := e.Client.ImageInspect(ctx, imageName)
+
+	if err == nil {
+		//image exist
+		return nil
+	}
+
+	if !errdefs.IsNotFound(err) {
+		//network error or permission error maybe
+		return err
+	}
+
+	pullResponse, err := e.Client.ImagePull(ctx, imageName, image.PullOptions{})
+	if err != nil {
+		return err
+	}
+	defer pullResponse.Close()
+
+	io.Copy(io.Discard, pullResponse)
+	return nil
 }
 
 func (e *DockerExecutor) Execute(ctx context.Context, code string, language string) (ExecutionResult, error) {

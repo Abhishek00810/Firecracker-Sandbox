@@ -5,6 +5,7 @@ import (
 	"backend/internal/queue"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 )
 
@@ -36,6 +37,15 @@ func ExecuteHandler(JobQueue *queue.JobQueue) http.HandlerFunc {
 
 		result := <-resultCh
 
+		if result.Result.TerminationReason == "timeout" {
+			// Log this - YOUR system killed it
+			log.Printf("[TIMEOUT] Execution timed out - Duration: %.2fs", result.Result.Duration)
+		} else if result.Result.TerminationReason == "oom_kill" {
+			// Don't log
+		} else if result.Result.ExitCode == 137 && result.Result.TerminationReason != "oom_kill" {
+			// Unexpected 137 - investigate!
+			log.Printf("[ALERT] Unexpected exit code 137 - Investigate!")
+		}
 		resp := ExecuteResponse{
 			Output: result.Result,
 			Status: "success",

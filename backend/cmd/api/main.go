@@ -30,12 +30,13 @@ func main() {
 
 	ctx := context.Background()
 	dockerExec, err := executor.NewDockerExecutor(ctx)
+
 	if err != nil {
 		log.Fatal("Docker is required but not available:", err)
 	} else {
 		log.Printf("Docker connected successfully!!")
 	}
-
+	dockerExec.EnsureImage(ctx, "python:alpine") // startup time
 	JobQueue := queue.NewJobQueue(dockerExec, 10)
 	JobQueue.Start()
 
