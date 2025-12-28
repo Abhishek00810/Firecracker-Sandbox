@@ -79,6 +79,13 @@ temp/
 *.ext4
 vmlinux
 firecracker-socket
+# Firecracker binary archives
+firecracker-*.tgz
+*.tgz
+# Firecracker release directories
+release-*/
+# Local test configuration
+test_config.json
 
 # Test coverage
 coverage.txt
