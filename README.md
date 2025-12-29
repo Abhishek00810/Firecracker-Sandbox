@@ -17,7 +17,7 @@ This project provides a secure sandboxed environment for executing user-submitte
 
 ## Project Status
 
-🚧 **In Development** - Currently in Sprint 1
+🚧 **In Development** - Currently in Sprint 3 (Firecracker Foundation)
 
 ## Roadmap
 
@@ -38,7 +38,14 @@ _Coming soon..._
 
 ## Architecture
 
-_Coming soon..._
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for detailed architecture documentation.
+
+The system follows an E2B-inspired architecture with:
+- **API Layer**: Request validation, authentication, and rate limiting
+- **Job Queue**: Request queuing and worker pool management
+- **Executor**: Replaceable sandbox runtime (Docker → Firecracker)
+- **Isolation Boundary**: Multi-layer security model
+- **Result Channel**: One-way output collection
 
 ## API Documentation
 

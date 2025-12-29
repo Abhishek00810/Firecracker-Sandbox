@@ -14,6 +14,10 @@ import (
 	"github.com/docker/go-units"
 )
 
+type Executor interface {
+	Execute(ctx context.Context, code string, language string) (ExecutionResult, error)
+}
+
 type DockerExecutor struct {
 	Client *client.Client
 }
