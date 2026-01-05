@@ -21,12 +21,12 @@ type Job struct {
 }
 
 type JobQueue struct {
-	executor *executor.DockerExecutor
+	executor executor.Executor
 	jobs     chan Job // these are the lists of jobs which will get added here core feature
 	workers  int
 }
 
-func NewJobQueue(exec *executor.DockerExecutor, maxWorkers int) *JobQueue {
+func NewJobQueue(exec executor.Executor, maxWorkers int) *JobQueue {
 	return &JobQueue{
 		executor: exec,
 		jobs:     make(chan Job, 100), //buffered channel
@@ -37,7 +37,6 @@ func NewJobQueue(exec *executor.DockerExecutor, maxWorkers int) *JobQueue {
 func (q *JobQueue) worker() {
 	// reading jobs from channel this is just task implementation
 	for job := range q.jobs {
-
 		ctx, cancel := context.WithTimeout(job.Ctx, 12*time.Second)
 		defer cancel()
 		result, err := q.executor.Execute(ctx, job.Code, job.Language)
