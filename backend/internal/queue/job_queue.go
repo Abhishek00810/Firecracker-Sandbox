@@ -22,7 +22,7 @@ type Job struct {
 
 type JobQueue struct {
 	executor executor.Executor
-	jobs     chan Job // these are the lists of jobs which will get added here core feature
+	jobs     chan Job // these are the lists of jobs which will get added here core feature anyhow
 	workers  int
 }
 
