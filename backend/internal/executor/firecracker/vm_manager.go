@@ -34,7 +34,7 @@ type MicroVM struct {
 }
 
 type BootSource struct {
-	KernelImagePath string `json:"kernel_image_path"`
+	KernelImagePath string `json:"kernel_image_path"` //check now
 	BootArgs        string `json:"boot_args"`
 }
 
