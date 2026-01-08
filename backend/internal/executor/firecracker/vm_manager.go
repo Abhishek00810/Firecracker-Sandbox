@@ -2,6 +2,7 @@ package firecracker
 
 import (
 	"context"
+	"sync"
 	"time"
 )
 
@@ -56,9 +57,20 @@ type FirecrackerConfig struct {
 	MachineConfig MachineConfig `json:"machine-config"`
 }
 
+type FireCrackerManager struct {
+	SocketDir  string
+	AssetsPath string
+	Vms        map[string]*MicroVM
+	mu         sync.RWMutex
+}
+
 type VMManager interface {
 	Create(ctx context.Context, cfg VMConfig) (*MicroVM, error)
 	Boot(ctx context.Context, vmID string) error
 	Stop(ctx context.Context, vmID string) error
 	Destroy(ctx context.Context, vmID string) error
+}
+
+func NewFirecrackerManager(sockerDir, assetsPath string) *FireCrackerManager {
+
 }
