@@ -3,6 +3,8 @@ package firecracker
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
@@ -105,4 +107,37 @@ func (f *FireCrackerManager) Create(ctx context.Context, cfg VMConfig) (*MicroVM
 	// due to multiple request it can cause race condition so we are putting mutex here
 
 	return vm, nil
+}
+
+func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
+
+	f.mu.RLock()
+	vm, exists := f.Vms[vmID]
+	f.mu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("VM %s not found", vmID)
+	}
+
+	cmd := exec.CommandContext(ctx,
+		"/Users/abhishekdadwal/nothing/sandbox_env/release-v1.7.0-aarch64/firecracker-v1.7.0-aarch64",
+		"--api-sock", vm.SocketPath,
+	)
+
+	err := cmd.Start()
+
+	if err != nil {
+		return fmt.Errorf("command doesn't started")
+	}
+
+	// Wait up to 5 seconds for socket
+	for i := 0; i < 50; i++ {
+		_, err := os.Stat(vm.SocketPath)
+		if err == nil {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	return nil
 }

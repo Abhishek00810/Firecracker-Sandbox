@@ -14,6 +14,7 @@ func NewFirecrackerExecutor(vmManager VMManager) *FirecrackerExecutor {
 }
 
 func (f *FirecrackerExecutor) Execute(ctx context.Context, code, language string) (executor.ExecutionResult, error) {
+	// lets go with this one and will include vm lifecycle after this
 	return executor.ExecutionResult{
 		Output:            "firecracker stub",
 		Duration:          0.0,
