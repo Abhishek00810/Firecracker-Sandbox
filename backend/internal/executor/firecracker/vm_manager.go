@@ -131,7 +131,7 @@ func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
 	}
 
 	// Wait up to 5 seconds for socket
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		_, err := os.Stat(vm.SocketPath)
 		if err == nil {
 			break
