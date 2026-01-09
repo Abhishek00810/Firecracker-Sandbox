@@ -2,8 +2,12 @@ package firecracker
 
 import (
 	"context"
+	"fmt"
+	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 type VMState string
@@ -17,7 +21,6 @@ const (
 )
 
 type VMConfig struct {
-	VMID       string
 	VCPUCount  int
 	MemSizeMiB int
 	Timeout    time.Duration
@@ -71,6 +74,35 @@ type VMManager interface {
 	Destroy(ctx context.Context, vmID string) error
 }
 
-func NewFirecrackerManager(sockerDir, assetsPath string) *FireCrackerManager {
+func NewFirecrackerManager(socketDir, assetsPath string) *FireCrackerManager {
+	return &FireCrackerManager{
+		SocketDir:  socketDir,
+		AssetsPath: assetsPath,
+		Vms:        make(map[string]*MicroVM),
+	}
+}
 
+func (f *FireCrackerManager) getSocketPath(vmID string) string {
+	return filepath.Join(f.SocketDir, fmt.Sprintf("%s.sock", vmID))
+}
+
+func (f *FireCrackerManager) Create(ctx context.Context, cfg VMConfig) (*MicroVM, error) {
+	vmID := uuid.New().String()
+	socketPath := f.getSocketPath(vmID)
+
+	vm := &MicroVM{
+		ID:         vmID,
+		Config:     cfg,
+		State:      VMStateCreated,
+		SocketPath: socketPath,
+		CreatedAt:  time.Now(),
+	}
+
+	f.mu.Lock()
+	f.Vms[vmID] = vm
+	f.mu.Unlock()
+
+	// due to multiple request it can cause race condition so we are putting mutex here
+
+	return vm, nil
 }
