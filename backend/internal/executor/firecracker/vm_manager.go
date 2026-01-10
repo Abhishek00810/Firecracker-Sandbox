@@ -281,6 +281,7 @@ func (f *FireCrackerManager) Destroy(ctx context.Context, vmID string) error {
 		return fmt.Errorf("VM %s not found", vmID)
 	}
 
+	vm.State = VMStateDestroyed
 	delete(f.Vms, vmID)
 	f.mu.Unlock()
 
