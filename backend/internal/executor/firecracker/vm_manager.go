@@ -1,8 +1,13 @@
 package firecracker
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -88,6 +93,33 @@ func (f *FireCrackerManager) getSocketPath(vmID string) string {
 	return filepath.Join(f.SocketDir, fmt.Sprintf("%s.sock", vmID))
 }
 
+func (f *FireCrackerManager) putJSON(client *http.Client, url string, payload interface{}) error {
+	data, err := json.Marshal(payload)
+
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest("PUT", url, bytes.NewBuffer(data))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(req.Body)
+		return fmt.Errorf("API call failed: %s - %s", resp.Status, body)
+	}
+	return nil
+}
+
 func (f *FireCrackerManager) Create(ctx context.Context, cfg VMConfig) (*MicroVM, error) {
 	vmID := uuid.New().String()
 	socketPath := f.getSocketPath(vmID)
@@ -123,7 +155,6 @@ func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
 		"/Users/abhishekdadwal/nothing/sandbox_env/release-v1.7.0-aarch64/firecracker-v1.7.0-aarch64",
 		"--api-sock", vm.SocketPath,
 	)
-
 	err := cmd.Start()
 
 	if err != nil {
@@ -137,6 +168,23 @@ func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+				return net.Dial("unix", vm.SocketPath)
+			},
+		},
+	}
+
+	BootSourcePayload := BootSource{
+		KernelImagePath: vm.Config.KernelPath,
+		BootArgs:        vm.Config.BootArgs,
+	}
+
+	if err := f.putJSON(client, "http://localhost/boot-source", BootSourcePayload); err != nil {
+		return fmt.Errorf("failed to set boot source: %w", err)
 	}
 
 	return nil
