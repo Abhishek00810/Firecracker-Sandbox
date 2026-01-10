@@ -36,12 +36,18 @@ type VMConfig struct {
 	BootArgs   string
 }
 
+type VsockConfig struct {
+	GuestCID int    `json:"guest_cid"`
+	UDSPath  string `json:"uds_path"`
+}
 type MicroVM struct {
 	ID         string
 	Config     VMConfig
 	State      VMState
+	VsockPath  string
 	SocketPath string
 	CreatedAt  time.Time
+	Process    *exec.Cmd
 }
 
 type BootSource struct {
@@ -114,7 +120,7 @@ func (f *FireCrackerManager) putJSON(client *http.Client, url string, payload in
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(req.Body)
+		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("API call failed: %s - %s", resp.Status, body)
 	}
 	return nil
@@ -123,13 +129,16 @@ func (f *FireCrackerManager) putJSON(client *http.Client, url string, payload in
 func (f *FireCrackerManager) Create(ctx context.Context, cfg VMConfig) (*MicroVM, error) {
 	vmID := uuid.New().String()
 	socketPath := f.getSocketPath(vmID)
+	vsockPath := filepath.Join(f.SocketDir, fmt.Sprintf("vsock-%s.sock", vmID)) // ← Add this
 
 	vm := &MicroVM{
 		ID:         vmID,
 		Config:     cfg,
 		State:      VMStateCreated,
 		SocketPath: socketPath,
+		VsockPath:  vsockPath,
 		CreatedAt:  time.Now(),
+		Process:    nil,
 	}
 
 	f.mu.Lock()
@@ -158,7 +167,7 @@ func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
 	err := cmd.Start()
 
 	if err != nil {
-		return fmt.Errorf("command doesn't started")
+		return fmt.Errorf("failed to start firecracker: %w", err) // ← Include actual error
 	}
 
 	// Wait up to 5 seconds for socket
@@ -178,6 +187,7 @@ func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
 		},
 	}
 
+	//PUT boot-source
 	BootSourcePayload := BootSource{
 		KernelImagePath: vm.Config.KernelPath,
 		BootArgs:        vm.Config.BootArgs,
@@ -186,6 +196,101 @@ func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
 	if err := f.putJSON(client, "http://localhost/boot-source", BootSourcePayload); err != nil {
 		return fmt.Errorf("failed to set boot source: %w", err)
 	}
+
+	//PUT drives
+
+	drivePayload := Drive{
+		DriveId:      "rootfs",
+		PathOnHost:   vm.Config.RootfsPath,
+		IsRootDevice: true,
+		IsReadOnly:   false,
+	}
+
+	if err := f.putJSON(client, "http://localhost/drives/rootfs", drivePayload); err != nil {
+		return fmt.Errorf("failed to set drive: %w", err)
+	}
+
+	// PUT machinec-config
+
+	machineconfigPayload := MachineConfig{
+		VCPUCount:  vm.Config.VCPUCount,
+		MemSizeMib: vm.Config.MemSizeMiB,
+	}
+
+	if err := f.putJSON(client, "http://localhost/machine-config", machineconfigPayload); err != nil {
+		return fmt.Errorf("failed to set machine config: %w", err)
+	}
+
+	//PUT vsock
+	vsockPayload := VsockConfig{
+		GuestCID: 3,
+		UDSPath:  vm.VsockPath,
+	}
+	if err := f.putJSON(client, "http://localhost/vsock", vsockPayload); err != nil {
+		return fmt.Errorf("failed to set vsock: %w", err)
+	}
+	//PUT actions (start VM)
+
+	startAction := map[string]string{"action_type": "InstanceStart"}
+	if err := f.putJSON(client, "http://localhost/actions", startAction); err != nil {
+		return fmt.Errorf("failed to start instance: %w", err)
+	}
+
+	f.mu.Lock()
+	vm.Process = cmd
+	vm.State = VMStateRunning
+	f.mu.Unlock()
+
+	return nil
+}
+
+func (f *FireCrackerManager) Stop(ctx context.Context, vmID string) error {
+	f.mu.RLock()
+	vm, exists := f.Vms[vmID]
+	f.mu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("VM %s not found", vmID)
+	}
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+				return net.Dial("unix", vm.SocketPath)
+			},
+		},
+	}
+
+	stopAction := map[string]string{"action_type": "SendCtrlAltDel"}
+	if err := f.putJSON(client, "http://localhost/actions", stopAction); err != nil {
+		return fmt.Errorf("failed to stop instance: %w", err)
+	}
+	// Update state
+	f.mu.Lock()
+	vm.State = VMStateStopped
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *FireCrackerManager) Destroy(ctx context.Context, vmID string) error {
+	f.mu.Lock()
+
+	vm, exists := f.Vms[vmID]
+	if !exists {
+		f.mu.Unlock()
+		return fmt.Errorf("VM %s not found", vmID)
+	}
+
+	delete(f.Vms, vmID)
+	f.mu.Unlock()
+
+	if vm.Process != nil {
+		vm.Process.Process.Kill()
+		vm.Process.Wait()
+	}
+
+	os.Remove(vm.SocketPath)
+	os.Remove(vm.VsockPath)
 
 	return nil
 }
