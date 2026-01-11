@@ -3,7 +3,10 @@ package firecracker
 import (
 	"backend/internal/executor"
 	"context"
+	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 )
 
@@ -17,6 +20,18 @@ func NewFirecrackerExecutor(vmManager VMManager) *FirecrackerExecutor {
 
 func copyAndInjectCode(srcRootfs, dstRootfs, code, language string) error {
 	copyCmd := exec.Command("cp", srcRootfs, dstRootfs)
+
+	if err := copyCmd.Run(); err != nil {
+		return fmt.Errorf("failed to copy rootfs: %w", err)
+	}
+
+	mountPoint := filepath.Join(os.TempDir(), fmt.Sprintf("fc-mount-%d", time.Now().UnixNano()))
+
+	if err := os.MkdirAll(mountPoint, 0755); err != nil {
+		return fmt.Errorf("failed to create mount point: %w", err)
+	}
+
+	defer os.RemoveAll(mountPoint)
 }
 
 func (f *FirecrackerExecutor) Execute(ctx context.Context, code, language string) (executor.ExecutionResult, error) {
