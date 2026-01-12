@@ -32,6 +32,12 @@ func copyAndInjectCode(srcRootfs, dstRootfs, code, language string) error {
 	}
 
 	defer os.RemoveAll(mountPoint)
+
+	mountCmd := exec.Command("sudo", "mount", "-o", "loop", dstRootfs, mountPoint)
+	if err := mountCmd.Run(); err != nil {
+		return fmt.Errorf("failed to mount rootfs: %w", err)
+	}
+	defer exec.Command("sudo", "umount", mountPoint).Run() // Unmount on exit
 }
 
 func (f *FirecrackerExecutor) Execute(ctx context.Context, code, language string) (executor.ExecutionResult, error) {
