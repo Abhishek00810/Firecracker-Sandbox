@@ -38,6 +38,18 @@ func copyAndInjectCode(srcRootfs, dstRootfs, code, language string) error {
 		return fmt.Errorf("failed to mount rootfs: %w", err)
 	}
 	defer exec.Command("sudo", "umount", mountPoint).Run() // Unmount on exit
+
+	codeFile := filepath.Join(mountPoint, "tmp", "user_code.py")
+	if err := os.MkdirAll(filepath.Dir(codeFile), 0755); err != nil {
+		return fmt.Errorf("failed to create code directory: %w", err)
+	}
+	if err := os.WriteFile(codeFile, []byte(code), 0644); err != nil {
+		return fmt.Errorf("failed to write code file: %w", err)
+	}
+	defer exec.Command("sudo", "umount", mountPoint).Run()
+	defer os.RemoveAll(mountPoint)
+
+	return nil
 }
 
 func (f *FirecrackerExecutor) Execute(ctx context.Context, code, language string) (executor.ExecutionResult, error) {
@@ -56,9 +68,15 @@ func (f *FirecrackerExecutor) Execute(ctx context.Context, code, language string
 		return executor.ExecutionResult{}, err
 	}
 
-	//copiedRootfsPath := filepath.Join(os.TempDir(), fmt.Sprintf("fc-rootfs-%s.ext4", vm.ID))
-	//2. boot vm
+	copiedRootfsPath := filepath.Join(os.TempDir(), fmt.Sprintf("fc-rootfs-%s.ext4", vm.ID))
+	err = copyAndInjectCode(vm.Config.RootfsPath, copiedRootfsPath, code, language)
+	if err != nil {
+		f.VmManager.Destroy(ctx, vm.ID)
+		return executor.ExecutionResult{}, fmt.Errorf("failed to inject code: %w", err)
+	}
+	defer os.Remove(copiedRootfsPath) // Cleanup copied rootfs after execution
 
+	//2. boot vm
 	err = f.VmManager.Boot(ctx, vm.ID)
 	if err != nil {
 		f.VmManager.Destroy(ctx, vm.ID) // Cleanup on error
