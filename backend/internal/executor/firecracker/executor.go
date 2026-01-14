@@ -79,7 +79,7 @@ func (f *FirecrackerExecutor) Execute(ctx context.Context, code, language string
 	//2. boot vm
 	err = f.VmManager.Boot(ctx, vm.ID)
 	if err != nil {
-		f.VmManager.Destroy(ctx, vm.ID) // Cleanup on error
+		f.VmManager.Destroy(ctx, vm.ID) // Cleanup on error on manage
 		return executor.ExecutionResult{}, err
 	}
 
