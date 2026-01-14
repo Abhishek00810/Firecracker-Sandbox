@@ -2,6 +2,7 @@ package firecracker
 
 import (
 	"backend/internal/executor"
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -40,14 +41,25 @@ func copyAndInjectCode(srcRootfs, dstRootfs, code, language string) error {
 	defer exec.Command("sudo", "umount", mountPoint).Run() // Unmount on exit
 
 	codeFile := filepath.Join(mountPoint, "tmp", "user_code.py")
-	if err := os.MkdirAll(filepath.Dir(codeFile), 0755); err != nil {
+
+	// Create directory with sudo
+	mkdirCmd := exec.Command("sudo", "mkdir", "-p", filepath.Dir(codeFile))
+	if err := mkdirCmd.Run(); err != nil {
 		return fmt.Errorf("failed to create code directory: %w", err)
 	}
-	if err := os.WriteFile(codeFile, []byte(code), 0644); err != nil {
+
+	// Write file with sudo using tee
+	writeCmd := exec.Command("sudo", "tee", codeFile)
+	writeCmd.Stdin = bytes.NewReader([]byte(code))
+	if err := writeCmd.Run(); err != nil {
 		return fmt.Errorf("failed to write code file: %w", err)
 	}
-	defer exec.Command("sudo", "umount", mountPoint).Run()
-	defer os.RemoveAll(mountPoint)
+
+	// Set permissions
+	chmodCmd := exec.Command("sudo", "chmod", "644", codeFile)
+	if err := chmodCmd.Run(); err != nil {
+		return fmt.Errorf("failed to set file permissions: %w", err)
+	}
 
 	return nil
 }
@@ -55,7 +67,7 @@ func copyAndInjectCode(srcRootfs, dstRootfs, code, language string) error {
 func (f *FirecrackerExecutor) Execute(ctx context.Context, code, language string) (executor.ExecutionResult, error) {
 	// lets go with this one and will include vm lifecycle after this
 	// 1. create vm
-	//startTime := time.Now()
+	startTime := time.Now()
 	vm, err := f.VmManager.Create(ctx, VMConfig{
 		VCPUCount:  2,
 		MemSizeMiB: 256,
@@ -75,6 +87,7 @@ func (f *FirecrackerExecutor) Execute(ctx context.Context, code, language string
 		return executor.ExecutionResult{}, fmt.Errorf("failed to inject code: %w", err)
 	}
 	defer os.Remove(copiedRootfsPath) // Cleanup copied rootfs after execution
+	vm.Config.RootfsPath = copiedRootfsPath
 
 	//2. boot vm
 	err = f.VmManager.Boot(ctx, vm.ID)
@@ -82,11 +95,13 @@ func (f *FirecrackerExecutor) Execute(ctx context.Context, code, language string
 		f.VmManager.Destroy(ctx, vm.ID) // Cleanup on error on manage
 		return executor.ExecutionResult{}, err
 	}
+	defer f.VmManager.Destroy(ctx, vm.ID)
 
 	return executor.ExecutionResult{
 		Output:            "firecracker stub",
-		Duration:          0.0,
+		Duration:          (time.Since(startTime)).Seconds(),
 		ExitCode:          0,
 		TerminationReason: "success",
 	}, nil
+
 }

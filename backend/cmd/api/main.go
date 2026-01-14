@@ -1,13 +1,14 @@
 package main
 
 import (
-	"backend/internal/executor"
+	"backend/internal/executor/firecracker"
 	"backend/internal/handler"
 	"backend/internal/queue"
-	"context"
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 )
 
 type HealthResponse struct {
@@ -27,17 +28,21 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	// Setup Firecracker executor
+	socketDir := filepath.Join(os.TempDir(), "fc-sockets")
+	assetsPath := "/Users/abhishekdadwal/nothing/sandbox_env/assets"
 
-	ctx := context.Background()
-	dockerExec, err := executor.NewDockerExecutor(ctx)
-
-	if err != nil {
-		log.Fatal("Docker is required but not available:", err)
-	} else {
-		log.Printf("Docker connected successfully!!")
+	// Create socket directory if it doesn't exist
+	if err := os.MkdirAll(socketDir, 0755); err != nil {
+		log.Fatalf("Failed to create socket directory: %v", err)
 	}
-	dockerExec.EnsureImage(ctx, "python:alpine") // startup time
-	JobQueue := queue.NewJobQueue(dockerExec, 10)
+
+	vmManager := firecracker.NewFirecrackerManager(socketDir, assetsPath)
+	firecrackerExec := firecracker.NewFirecrackerExecutor(vmManager)
+
+	log.Printf("Firecracker executor initialized successfully!")
+
+	JobQueue := queue.NewJobQueue(firecrackerExec, 10)
 	JobQueue.Start()
 
 	http.HandleFunc("/health", healthHandler)
@@ -47,10 +52,7 @@ func main() {
 
 	log.Printf("Server is running on Port 8080 huh!!")
 
-	err = http.ListenAndServe(port, nil)
-
-	if err != nil {
+	if err := http.ListenAndServe(port, nil); err != nil {
 		log.Fatalf("error in serving the API: %v", err)
 	}
-
 }
