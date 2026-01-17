@@ -48,6 +48,8 @@ type MicroVM struct {
 	SocketPath string
 	CreatedAt  time.Time
 	Process    *exec.Cmd
+	Stdout     *bytes.Buffer
+	Stderr     *bytes.Buffer
 }
 
 type BootSource struct {
@@ -150,6 +152,36 @@ func (f *FireCrackerManager) Create(ctx context.Context, cfg VMConfig) (*MicroVM
 	return vm, nil
 }
 
+func (f *FireCrackerManager) WaitForCompletion(ctx context.Context, vmID string, timeout time.Duration) (string, int64, error) {
+	f.mu.RLock()
+	vm, exists := f.Vms[vmID]
+	f.mu.RUnlock()
+
+	if !exists {
+		return "", -1, fmt.Errorf("VM %s not found", vmID)
+	}
+
+	if vm.Process == nil {
+		return "", -1, fmt.Errorf("VM %s process not found", vmID)
+	}
+
+	done := make(chan error, 1)
+
+	go func() {
+		done <- vm.Process.Wait()
+	}()
+
+	select {
+	case err := <- done:
+		output := vm.Stdout.String() + vm.Stderr.String()
+		exitCode := int64(0)
+
+		if err != nil{
+			if exitError, ok := err.(*exec.Error)
+		}
+	}
+}
+
 func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
 
 	f.mu.RLock()
@@ -164,6 +196,9 @@ func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
 		"/Users/abhishekdadwal/nothing/sandbox_env/release-v1.7.0-aarch64/firecracker-v1.7.0-aarch64",
 		"--api-sock", vm.SocketPath,
 	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 	err := cmd.Start()
 
 	if err != nil {
@@ -210,7 +245,7 @@ func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
 		return fmt.Errorf("failed to set drive: %w", err)
 	}
 
-	// PUT machinec-config
+	// PUT machine-config
 
 	machineconfigPayload := MachineConfig{
 		VCPUCount:  vm.Config.VCPUCount,
@@ -238,6 +273,8 @@ func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
 
 	f.mu.Lock()
 	vm.Process = cmd
+	vm.Stdout = &stdout
+	vm.Stderr = &stderr
 	vm.State = VMStateRunning
 	f.mu.Unlock()
 
