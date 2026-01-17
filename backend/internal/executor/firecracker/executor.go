@@ -71,7 +71,7 @@ func (f *FirecrackerExecutor) Execute(ctx context.Context, code, language string
 	vm, err := f.VmManager.Create(ctx, VMConfig{
 		VCPUCount:  2,
 		MemSizeMiB: 256,
-		Timeout:    5 * time.Second,
+		Timeout:    30 * time.Second, // Increased timeout for VM boot and execution
 		KernelPath: "/Users/abhishekdadwal/nothing/sandbox_env/assets/kernel/vmlinux",
 		RootfsPath: "/Users/abhishekdadwal/nothing/sandbox_env/assets/rootfs/rootfs.ext4",
 		BootArgs:   "keep_bootcon console=ttyS0 reboot=k panic=1 pci=off",
@@ -97,10 +97,17 @@ func (f *FirecrackerExecutor) Execute(ctx context.Context, code, language string
 	}
 	defer f.VmManager.Destroy(ctx, vm.ID)
 
+	output, exitCode, err := f.VmManager.WaitForCompletion(ctx, vm.ID, vm.Config.Timeout)
+	if err != nil {
+		return executor.ExecutionResult{}, fmt.Errorf("failed to wait for completion: %w", err)
+	}
+
+	duration := time.Since(startTime).Seconds()
+
 	return executor.ExecutionResult{
-		Output:            "firecracker stub",
-		Duration:          (time.Since(startTime)).Seconds(),
-		ExitCode:          0,
+		Output:            output,
+		Duration:          duration,
+		ExitCode:          exitCode,
 		TerminationReason: "success",
 	}, nil
 

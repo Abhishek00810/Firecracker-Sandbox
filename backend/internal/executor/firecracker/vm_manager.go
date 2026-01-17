@@ -87,6 +87,7 @@ type VMManager interface {
 	Boot(ctx context.Context, vmID string) error
 	Stop(ctx context.Context, vmID string) error
 	Destroy(ctx context.Context, vmID string) error
+	WaitForCompletion(ctx context.Context, vmID string, timeout time.Duration) (string, int64, error)
 }
 
 func NewFirecrackerManager(socketDir, assetsPath string) *FireCrackerManager {
@@ -172,13 +173,21 @@ func (f *FireCrackerManager) WaitForCompletion(ctx context.Context, vmID string,
 	}()
 
 	select {
-	case err := <- done:
+	case err := <-done:
 		output := vm.Stdout.String() + vm.Stderr.String()
 		exitCode := int64(0)
 
-		if err != nil{
-			if exitError, ok := err.(*exec.Error)
+		if err != nil {
+			if exitError, ok := err.(*exec.ExitError); ok {
+				exitCode = int64(exitError.ExitCode())
+			}
 		}
+		return output, exitCode, nil
+	case <-time.After(timeout):
+		// Timeout
+		return "", -1, fmt.Errorf("VM execution timeout after %v", timeout)
+	case <-ctx.Done():
+		return "", -1, ctx.Err()
 	}
 }
 
