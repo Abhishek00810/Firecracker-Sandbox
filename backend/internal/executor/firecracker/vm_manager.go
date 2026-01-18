@@ -167,7 +167,6 @@ func (f *FireCrackerManager) WaitForCompletion(ctx context.Context, vmID string,
 	}
 
 	done := make(chan error, 1)
-
 	go func() {
 		done <- vm.Process.Wait()
 	}()
@@ -184,10 +183,21 @@ func (f *FireCrackerManager) WaitForCompletion(ctx context.Context, vmID string,
 		}
 		return output, exitCode, nil
 	case <-time.After(timeout):
-		// Timeout
-		return "", -1, fmt.Errorf("VM execution timeout after %v", timeout)
+		output := vm.Stdout.String() + vm.Stderr.String()
+
+		if vm.Process != nil && vm.Process.Process != nil {
+			vm.Process.Process.Kill()
+			vm.Process.Wait()
+		}
+		return output, -1, fmt.Errorf("VM execution timeout after %v", timeout)
 	case <-ctx.Done():
-		return "", -1, ctx.Err()
+		output := vm.Stdout.String() + vm.Stderr.String()
+
+		if vm.Process != nil && vm.Process.Process != nil {
+			vm.Process.Process.Kill()
+			vm.Process.Wait()
+		}
+		return output, -1, ctx.Err()
 	}
 }
 
