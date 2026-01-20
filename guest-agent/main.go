@@ -62,8 +62,18 @@ func handleConnection(connFd int) {
 	var req ExecutionRequest
 	decoder := json.NewDecoder(conn)
 
+	log.Println("About to decode JSON request...")
 	if err := decoder.Decode(&req); err != nil {
-		log.Printf("Failed to decode request: %v", err)
+		log.Printf("ERROR: Failed to decode request: %v", err)
+		// Send error response instead of just returning
+		errResp := ExecutionResponse{
+			Stdout:   "",
+			Stderr:   fmt.Sprintf("Failed to decode request: %v", err),
+			ExitCode: -1,
+			Duration: 0,
+		}
+		encoder := json.NewEncoder(conn)
+		encoder.Encode(errResp)
 		return
 	}
 
@@ -71,16 +81,16 @@ func handleConnection(connFd int) {
 
 	resp := executeCode(req)
 
-	//send response
+	log.Printf("Execution completed, sending response...")
 
 	encoder := json.NewEncoder(conn)
 	err := encoder.Encode(resp)
 	if err != nil {
-		log.Printf("Failed to encode response: %v", err)
+		log.Printf("ERROR: Failed to encode response: %v", err)
 		return
 	}
 
-	log.Printf("Response sent: exit_code=%d, stdout_len=%d", resp.ExitCode, len(resp.Stdout))
+	log.Printf("Response sent successfully: exit_code=%d, stdout_len=%d, stderr_len=%d", resp.ExitCode, len(resp.Stdout), len(resp.Stderr))
 }
 
 func executeCode(req ExecutionRequest) ExecutionResponse {

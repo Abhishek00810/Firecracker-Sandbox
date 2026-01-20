@@ -87,7 +87,6 @@ type VMManager interface {
 	Boot(ctx context.Context, vmID string) error
 	Stop(ctx context.Context, vmID string) error
 	Destroy(ctx context.Context, vmID string) error
-	WaitForCompletion(ctx context.Context, vmID string, timeout time.Duration) (string, int64, error)
 }
 
 func NewFirecrackerManager(socketDir, assetsPath string) *FireCrackerManager {
@@ -153,54 +152,6 @@ func (f *FireCrackerManager) Create(ctx context.Context, cfg VMConfig) (*MicroVM
 	return vm, nil
 }
 
-func (f *FireCrackerManager) WaitForCompletion(ctx context.Context, vmID string, timeout time.Duration) (string, int64, error) {
-	f.mu.RLock()
-	vm, exists := f.Vms[vmID]
-	f.mu.RUnlock()
-
-	if !exists {
-		return "", -1, fmt.Errorf("VM %s not found", vmID)
-	}
-
-	if vm.Process == nil {
-		return "", -1, fmt.Errorf("VM %s process not found", vmID)
-	}
-
-	done := make(chan error, 1)
-	go func() {
-		done <- vm.Process.Wait()
-	}()
-
-	select {
-	case err := <-done:
-		output := vm.Stdout.String() + vm.Stderr.String()
-		exitCode := int64(0)
-
-		if err != nil {
-			if exitError, ok := err.(*exec.ExitError); ok {
-				exitCode = int64(exitError.ExitCode())
-			}
-		}
-		return output, exitCode, nil
-	case <-time.After(timeout):
-		output := vm.Stdout.String() + vm.Stderr.String()
-
-		if vm.Process != nil && vm.Process.Process != nil {
-			vm.Process.Process.Kill()
-			vm.Process.Wait()
-		}
-		return output, -1, fmt.Errorf("VM execution timeout after %v", timeout)
-	case <-ctx.Done():
-		output := vm.Stdout.String() + vm.Stderr.String()
-
-		if vm.Process != nil && vm.Process.Process != nil {
-			vm.Process.Process.Kill()
-			vm.Process.Wait()
-		}
-		return output, -1, ctx.Err()
-	}
-}
-
 func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
 
 	f.mu.RLock()
@@ -223,6 +174,13 @@ func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
 	if err != nil {
 		return fmt.Errorf("failed to start firecracker: %w", err) // ← Include actual error
 	}
+
+	// Store stdout/stderr buffers for debugging
+	f.mu.Lock()
+	vm.Process = cmd
+	vm.Stdout = &stdout
+	vm.Stderr = &stderr
+	f.mu.Unlock()
 
 	// Wait up to 5 seconds for socket
 	for range 50 {

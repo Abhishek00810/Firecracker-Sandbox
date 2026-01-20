@@ -2,12 +2,10 @@ package firecracker
 
 import (
 	"backend/internal/executor"
-	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"time"
 )
 
@@ -19,47 +17,9 @@ func NewFirecrackerExecutor(vmManager VMManager) *FirecrackerExecutor {
 	return &FirecrackerExecutor{VmManager: vmManager}
 }
 
-func copyAndInjectCode(srcRootfs, dstRootfs, code, language string) error {
-	copyCmd := exec.Command("cp", srcRootfs, dstRootfs)
-	if err := copyCmd.Run(); err != nil {
-		return fmt.Errorf("failed to copy rootfs: %w", err)
-	}
-
-	mountPoint := filepath.Join(os.TempDir(), fmt.Sprintf("fc-mount-%d", time.Now().UnixNano()))
-	if err := os.MkdirAll(mountPoint, 0755); err != nil {
-		return fmt.Errorf("failed to create mount point: %w", err)
-	}
-	defer os.RemoveAll(mountPoint)
-
-	mountCmd := exec.Command("sudo", "mount", "-o", "loop", dstRootfs, mountPoint)
-	if err := mountCmd.Run(); err != nil {
-		return fmt.Errorf("failed to mount rootfs: %w", err)
-	}
-	defer exec.Command("sudo", "umount", mountPoint).Run()
-
-	codeFile := filepath.Join(mountPoint, "root", "user_code.py")
-
-	mkdirCmd := exec.Command("sudo", "mkdir", "-p", filepath.Dir(codeFile))
-	if err := mkdirCmd.Run(); err != nil {
-		return fmt.Errorf("failed to create code directory: %w", err)
-	}
-
-	writeCmd := exec.Command("sudo", "tee", codeFile)
-	writeCmd.Stdin = bytes.NewReader([]byte(code))
-	if err := writeCmd.Run(); err != nil {
-		return fmt.Errorf("failed to write code file: %w", err)
-	}
-
-	chmodCmd := exec.Command("sudo", "chmod", "644", codeFile)
-	if err := chmodCmd.Run(); err != nil {
-		return fmt.Errorf("failed to set file permissions: %w", err)
-	}
-
-	return nil
-}
-
 func (f *FirecrackerExecutor) Execute(ctx context.Context, code, language string) (executor.ExecutionResult, error) {
 	startTime := time.Now()
+	log.Println("DEBUG: Starting VM creation...")
 
 	vm, err := f.VmManager.Create(ctx, VMConfig{
 		VCPUCount:  2,
@@ -67,39 +27,69 @@ func (f *FirecrackerExecutor) Execute(ctx context.Context, code, language string
 		Timeout:    30 * time.Second,
 		KernelPath: "/Users/abhishekdadwal/nothing/sandbox_env/assets/kernel/vmlinux",
 		RootfsPath: "/Users/abhishekdadwal/nothing/sandbox_env/assets/rootfs/rootfs.ext4",
-		BootArgs:   "keep_bootcon console=ttyS0 reboot=k panic=1 pci=off",
+		BootArgs:   "console=ttyS0 reboot=k panic=1 pci=off init=/usr/local/bin/guest-agent",
 	})
 	if err != nil {
+		log.Printf("DEBUG: VM creation failed: %v", err)
 		return executor.ExecutionResult{}, err
 	}
+	log.Printf("DEBUG: VM created with ID: %s, VsockPath: %s", vm.ID, vm.VsockPath)
 
-	copiedRootfsPath := filepath.Join(os.TempDir(), fmt.Sprintf("fc-rootfs-%s.ext4", vm.ID))
-	err = copyAndInjectCode(vm.Config.RootfsPath, copiedRootfsPath, code, language)
-	if err != nil {
-		f.VmManager.Destroy(ctx, vm.ID)
-		return executor.ExecutionResult{}, fmt.Errorf("failed to inject code: %w", err)
-	}
-	defer os.Remove(copiedRootfsPath)
-	vm.Config.RootfsPath = copiedRootfsPath
-
-	err = f.VmManager.Boot(ctx, vm.ID)
-	if err != nil {
-		f.VmManager.Destroy(ctx, vm.ID)
-		return executor.ExecutionResult{}, err
-	}
 	defer f.VmManager.Destroy(ctx, vm.ID)
 
-	output, exitCode, err := f.VmManager.WaitForCompletion(ctx, vm.ID, vm.Config.Timeout)
+	log.Println("DEBUG: Booting VM...")
+	err = f.VmManager.Boot(ctx, vm.ID)
 	if err != nil {
-		return executor.ExecutionResult{}, fmt.Errorf("failed to wait for completion: %w", err)
+		log.Printf("DEBUG: Boot failed: %v", err)
+		return executor.ExecutionResult{}, err
+	}
+	log.Println("DEBUG: VM booted, waiting for guest agent...")
+
+	time.Sleep(8 * time.Second)
+
+	log.Printf("DEBUG: Checking if vsock socket exists at: %s", vm.VsockPath)
+	if _, err := os.Stat(vm.VsockPath); os.IsNotExist(err) {
+		log.Printf("DEBUG: Vsock socket DOES NOT EXIST!")
+	} else {
+		log.Printf("DEBUG: Vsock socket exists")
 	}
 
+	// Print VM console output for debugging
+	log.Println("DEBUG: ===== VM Console Output =====")
+	if vm.Stdout != nil && vm.Stdout.Len() > 0 {
+		log.Printf("DEBUG: VM stdout:\n%s", vm.Stdout.String())
+	} else {
+		log.Println("DEBUG: VM stdout: (empty)")
+	}
+	if vm.Stderr != nil && vm.Stderr.Len() > 0 {
+		log.Printf("DEBUG: VM stderr:\n%s", vm.Stderr.String())
+	} else {
+		log.Println("DEBUG: VM stderr: (empty)")
+	}
+	log.Println("DEBUG: ==============================")
+
+	vsockClient := NewVsockClient(vm.VsockPath)
+	log.Println("DEBUG: Connecting to guest agent via vsock...")
+
+	// Execute code via vsock
+	resp, err := vsockClient.Execute(code, language, 15) // 15 second timeout for code execution
+	if err != nil {
+		log.Printf("DEBUG: Vsock execute failed: %v", err)
+		return executor.ExecutionResult{}, fmt.Errorf("failed to execute via vsock: %w", err)
+	}
+	log.Printf("DEBUG: Got response - exit_code: %d, stdout_len: %d", resp.ExitCode, len(resp.Stdout))
+
 	duration := time.Since(startTime).Seconds()
+
+	output := resp.Stdout
+	if resp.Stderr != "" {
+		output += "\n" + resp.Stderr
+	}
 
 	return executor.ExecutionResult{
 		Output:            output,
 		Duration:          duration,
-		ExitCode:          exitCode,
+		ExitCode:          int64(resp.ExitCode),
 		TerminationReason: "success",
 	}, nil
 }
