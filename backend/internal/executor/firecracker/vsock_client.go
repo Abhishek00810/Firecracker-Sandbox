@@ -47,6 +47,24 @@ func (v *VsockClient) Execute(code, language string, timeoutSec int) (*ExecuteRe
 	deadline := time.Now().Add(v.timeout)
 	conn.SetDeadline(deadline)
 
+	// CRITICAL: Send Firecracker vsock handshake to connect to guest port 52
+	// Format: "CONNECT <port>\n"
+	_, err = conn.Write([]byte("CONNECT 52\n"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to send vsock handshake: %w", err)
+	}
+
+	// Read the response (should be "OK <port>\n" on success)
+	buf := make([]byte, 32)
+	n, err := conn.Read(buf)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read vsock handshake response: %w", err)
+	}
+	response := string(buf[:n])
+	if len(response) < 2 || response[:2] != "OK" {
+		return nil, fmt.Errorf("vsock handshake failed: %s", response)
+	}
+
 	req := ExecuteRequest{
 		Code:     code,
 		Language: language,

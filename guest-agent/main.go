@@ -2,13 +2,13 @@ package main
 
 import (
 	"bytes"
-	"encoding/json" // ← MISSING
-	"fmt"           // ← MISSING
-	"io"            // ← MISSING
+	"encoding/json"
+	"fmt"
+	"io"
 	"log"
 	"os/exec"
-	"syscall" // ← MISSING
-	"time"    // ← MISSING
+	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -54,7 +54,7 @@ func (c *fdConn) Write(p []byte) (n int, err error) {
 }
 
 func handleConnection(connFd int) {
-	defer unix.Close(connFd)
+	// NOTE: Connection is closed by caller, not here
 
 	// wrap fd into a file easier reading
 	conn := &fdConn{fd: connFd}
@@ -99,13 +99,14 @@ func executeCode(req ExecutionRequest) ExecutionResponse {
 	var cmd *exec.Cmd
 
 	// route to correct runtime based on language
+	// Use absolute paths since we're running as PID 1 without proper PATH
 	switch req.Language {
 	case "python":
-		cmd = exec.Command("python3", "-c", req.Code)
+		cmd = exec.Command("/usr/bin/python3", "-c", req.Code)
 	case "node":
-		cmd = exec.Command("node", "-e", req.Code)
+		cmd = exec.Command("/usr/bin/node", "-e", req.Code)
 	case "bash":
-		cmd = exec.Command("bash", "-c", req.Code)
+		cmd = exec.Command("/bin/bash", "-c", req.Code)
 	default:
 		return ExecutionResponse{
 			Stdout:   "",
@@ -218,21 +219,25 @@ func main() {
 		log.Fatalf("failed to listen: %v", err)
 	}
 
-	log.Println("waiting for connection: backlog is 1 as of now")
+	log.Println("Guest agent ready, waiting for connections...")
 
-	// acccpeting the request
-	connFd, _, err := unix.Accept(fd)
+	// Loop forever to handle connections and prevent process exit
+	for {
+		log.Println("Waiting for next connection...")
 
-	if err != nil {
-		log.Fatalf("failed to accept: %v", err)
+		connFd, _, err := unix.Accept(fd)
+		if err != nil {
+			log.Printf("ERROR: Failed to accept connection: %v", err)
+			continue
+		}
+
+		log.Println("Connection accepted, handling request...")
+
+		handleConnection(connFd)
+
+		// Close the connection after handling
+		unix.Close(connFd)
+
+		log.Println("Request completed, ready for next connection")
 	}
-
-	defer unix.Close(connFd)
-
-	log.Println("Connection accepted, handling request...")
-
-	handleConnection(connFd)
-
-	log.Println("Request completed, shutting down")
-
 }
