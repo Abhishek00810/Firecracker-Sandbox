@@ -36,6 +36,7 @@ func NewVsockClient(socketPath string) *VsockClient {
 }
 
 func (v *VsockClient) Execute(code, language string, timeoutSec int) (*ExecuteResponse, error) {
+	// Connect to the Unix socket that Firecracker exposes for vsock
 	conn, err := net.DialTimeout("unix", v.socketPath, v.timeout)
 
 	if err != nil {
