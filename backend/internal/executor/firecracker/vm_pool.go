@@ -2,6 +2,7 @@ package firecracker
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -75,4 +76,29 @@ func (p *VMPool) addVM() error {
 	p.vms <- pooledVM
 
 	return nil
+}
+
+func (p *VMPool) Acquire(timeout time.Duration) (*PooledVM, error) {
+	select {
+	case vm := <-p.vms:
+		p.mu.Lock()
+		vm.InUse = true
+		vm.LastUsed = time.Now()
+		p.mu.Unlock()
+		return vm, nil
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("timeout: no VM available")
+	}
+}
+
+func (p *VMPool) Release(vm *PooledVM) {
+
+	p.mu.Lock()
+	vm.InUse = false
+	vm.LastUsed = time.Now()
+	vm.RequestCount++
+
+	p.mu.Unlock()
+
+	p.vms <- vm
 }
