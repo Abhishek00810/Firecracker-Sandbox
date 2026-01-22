@@ -21,8 +21,8 @@ func (f *FirecrackerExecutor) Execute(ctx context.Context, code, language string
 
 	// Acquire VM from pool
 	pooledVM, err := f.Pool.Acquire(30 * time.Second)
-	if err != nil {
-		return executor.ExecutionResult{}, err
+	if f.Pool == nil {
+		return executor.ExecutionResult{}, fmt.Errorf("VM pool not initialized")
 	}
 
 	// Always release VM back to pool

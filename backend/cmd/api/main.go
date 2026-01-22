@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 type HealthResponse struct {
@@ -40,11 +41,22 @@ func main() {
 	vmManager := firecracker.NewFirecrackerManager(socketDir, assetsPath)
 	firecrackerExec := firecracker.NewFirecrackerExecutor(vmManager)
 
+	config := firecracker.VMConfig{
+		VCPUCount:  2,
+		MemSizeMiB: 256,
+		Timeout:    30 * time.Second,
+		KernelPath: filepath.Join(assetsPath, "kernel/vmlinux"),
+		RootfsPath: filepath.Join(assetsPath, "rootfs/rootfs-alpine.ext4"),
+		BootArgs:   "console=ttyS0 reboot=k panic=1 pci=off init=/usr/local/bin/guest-agent",
+	}
+
+	//  pool (pre-boots 3 VMs)
+	pool := firecracker.NewVMPool(3, config, vmManager)
 	log.Printf("Firecracker executor initialized successfully!")
-
-	JobQueue := queue.NewJobQueue(firecrackerExec, 10)
+	firecrackerExec.Pool = pool // ← Connect pool
+	// ✅ ADD THIS: Create JobQueue with executor (that has pool)
+	JobQueue := queue.NewJobQueue(firecrackerExec, 10) // 10 workers
 	JobQueue.Start()
-
 	http.HandleFunc("/health", healthHandler)
 	http.HandleFunc("/execute", handler.ExecuteHandler(JobQueue))
 
