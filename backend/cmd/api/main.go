@@ -3,6 +3,7 @@ package main
 import (
 	"backend/internal/executor/firecracker"
 	"backend/internal/handler"
+	"backend/internal/metrics"
 	"backend/internal/queue"
 	"encoding/json"
 	"log"
@@ -26,6 +27,12 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(resp)
+}
+
+func MetricsHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	m := metrics.GetMetrics()
+	json.NewEncoder(w).Encode(m)
 }
 
 func main() {
@@ -53,12 +60,12 @@ func main() {
 	//  pool (pre-boots 3 VMs)
 	pool := firecracker.NewVMPool(3, config, vmManager)
 	log.Printf("Firecracker executor initialized successfully!")
-	firecrackerExec.Pool = pool // ← Connect pool
-	// ✅ ADD THIS: Create JobQueue with executor (that has pool)
+	firecrackerExec.Pool = pool                        // ← Connect pool
 	JobQueue := queue.NewJobQueue(firecrackerExec, 10) // 10 workers
 	JobQueue.Start()
 	http.HandleFunc("/health", healthHandler)
 	http.HandleFunc("/execute", handler.ExecuteHandler(JobQueue))
+	http.HandleFunc("/metrics", MetricsHandler)
 
 	port := ":8080"
 
