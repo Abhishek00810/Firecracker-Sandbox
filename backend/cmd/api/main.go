@@ -38,7 +38,10 @@ func MetricsHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	// Setup Firecracker executor
 	socketDir := filepath.Join(os.TempDir(), "fc-sockets")
-	assetsPath := "/Users/abhishekdadwal/nothing/sandbox_env/assets"
+	assetsPath := os.Getenv("ASSETS_PATH")
+	if assetsPath == "" {
+		assetsPath = "/app/assets" // Default for Docker
+	}
 
 	// Create socket directory if it doesn't exist
 	if err := os.MkdirAll(socketDir, 0755); err != nil {

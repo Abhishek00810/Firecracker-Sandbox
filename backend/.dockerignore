@@ -1,0 +1,8 @@
+# Ignore these files when copying to Docker
+*.md
+.git
+.gitignore
+.vscode
+*.test
+*.log
+tmp/

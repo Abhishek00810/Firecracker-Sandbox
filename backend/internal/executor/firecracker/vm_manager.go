@@ -162,8 +162,13 @@ func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
 		return fmt.Errorf("VM %s not found", vmID)
 	}
 
+	firecrackerBinary := os.Getenv("FIRECRACKER_BINARY")
+	if firecrackerBinary == "" {
+		firecrackerBinary = "/app/firecracker/firecracker-v1.7.0-aarch64" // Default for Docker
+	}
+
 	cmd := exec.CommandContext(ctx,
-		"/Users/abhishekdadwal/nothing/sandbox_env/release-v1.7.0-aarch64/firecracker-v1.7.0-aarch64",
+		firecrackerBinary,
 		"--api-sock", vm.SocketPath,
 	)
 	var stdout, stderr bytes.Buffer
