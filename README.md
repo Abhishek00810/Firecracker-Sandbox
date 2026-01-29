@@ -409,8 +409,7 @@ MIT License - see [LICENSE](./LICENSE) for details.
 **Abhishek Dadwal**
 
 - GitHub: [@Abhishek00810](https://github.com/Abhishek00810)
-- LinkedIn: [Your LinkedIn Profile]
-- Email: [Your Email]
+- LinkedIn: [Linkedin Profile](https://www.linkedin.com/in/abhishek-dadwal-5565781b6/)
 
 ---
 
