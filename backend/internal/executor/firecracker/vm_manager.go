@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -80,6 +81,7 @@ type FireCrackerManager struct {
 	AssetsPath string
 	Vms        map[string]*MicroVM
 	mu         sync.RWMutex
+	nextCID    atomic.Uint32
 }
 
 type VMManager interface {
@@ -180,13 +182,6 @@ func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
 		return fmt.Errorf("failed to start firecracker: %w", err) // ← Include actual error
 	}
 
-	// Store stdout/stderr buffers for debugging
-	f.mu.Lock()
-	vm.Process = cmd
-	vm.Stdout = &stdout
-	vm.Stderr = &stderr
-	f.mu.Unlock()
-
 	// Wait up to 5 seconds for socket
 	for range 50 {
 		_, err := os.Stat(vm.SocketPath)
@@ -239,8 +234,9 @@ func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
 	}
 
 	//PUT vsock
+	guestCID := int(f.nextCID.Add(1)) + 2 // CIDs 0,1,2 are reserved; start from 3
 	vsockPayload := VsockConfig{
-		GuestCID: 3,
+		GuestCID: guestCID,
 		UDSPath:  vm.VsockPath,
 	}
 	if err := f.putJSON(client, "http://localhost/vsock", vsockPayload); err != nil {

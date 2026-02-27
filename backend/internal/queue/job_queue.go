@@ -38,8 +38,8 @@ func (q *JobQueue) worker() {
 	// reading jobs from channel this is just task implementation
 	for job := range q.jobs {
 		ctx, cancel := context.WithTimeout(job.Ctx, 12*time.Second)
-		defer cancel()
 		result, err := q.executor.Execute(ctx, job.Code, job.Language)
+		cancel()
 		job.ResultCh <- JobResult{
 			Result: result,
 			Err:    err,

@@ -20,10 +20,14 @@ func NewFirecrackerExecutor(vmManager VMManager) *FirecrackerExecutor {
 func (f *FirecrackerExecutor) Execute(ctx context.Context, code, language string) (executor.ExecutionResult, error) {
 	startTime := time.Now()
 
-	// Acquire VM from pool
-	pooledVM, err := f.Pool.Acquire(30 * time.Second)
 	if f.Pool == nil {
 		return executor.ExecutionResult{}, fmt.Errorf("VM pool not initialized")
+	}
+
+	// Acquire VM from pool
+	pooledVM, err := f.Pool.Acquire(30 * time.Second)
+	if err != nil {
+		return executor.ExecutionResult{}, fmt.Errorf("failed to acquire VM: %w", err)
 	}
 
 	// Always release VM back to pool

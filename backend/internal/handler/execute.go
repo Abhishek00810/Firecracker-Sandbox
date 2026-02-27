@@ -27,6 +27,7 @@ func ExecuteHandler(JobQueue *queue.JobQueue) http.HandlerFunc {
 
 		if err != nil {
 			http.Error(w, "Invalid request", http.StatusBadRequest)
+			return
 		}
 
 		resultCh, err := JobQueue.Submit(r.Context(), req.Code, req.Language)

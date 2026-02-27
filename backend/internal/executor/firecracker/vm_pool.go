@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"sync"
 	"time"
 )
@@ -61,7 +62,18 @@ func (p *VMPool) addVM() error {
 		log.Printf("DEBUG: Boot failed: %v", err)
 		return err
 	}
-	time.Sleep(8 * time.Second)
+
+	// Poll for vsock socket readiness instead of a fixed sleep (up to 15s)
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, statErr := os.Stat(vm.VsockPath); statErr == nil {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if _, statErr := os.Stat(vm.VsockPath); statErr != nil {
+		return fmt.Errorf("vsock socket never appeared for VM %s", vm.ID)
+	}
 
 	pooledVM := &PooledVM{
 		VM:           vm,
