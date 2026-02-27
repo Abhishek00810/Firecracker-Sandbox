@@ -2,11 +2,14 @@ package handler
 
 import (
 	"backend/internal/executor"
+	"backend/internal/metrics"
+	"backend/internal/middleware"
 	"backend/internal/queue"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
+	"time"
 )
 
 type ExecuteRequest struct {
@@ -22,9 +25,10 @@ type ExecuteResponse struct {
 
 func ExecuteHandler(JobQueue *queue.JobQueue) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := middleware.RequestIDFromContext(r.Context())
+
 		var req ExecuteRequest
 		err := json.NewDecoder(r.Body).Decode(&req)
-
 		if err != nil {
 			http.Error(w, "Invalid request", http.StatusBadRequest)
 			return
@@ -36,17 +40,33 @@ func ExecuteHandler(JobQueue *queue.JobQueue) http.HandlerFunc {
 			return
 		}
 
-		result := <-resultCh
+		metrics.RecordExecutionStart()
 
-		if result.Result.TerminationReason == "timeout" {
-			// Log this - YOUR system killed it
-			log.Printf("[TIMEOUT] Execution timed out - Duration: %.2fs", result.Result.Duration)
-		} else if result.Result.TerminationReason == "oom_kill" {
-			// Don't log
-		} else if result.Result.ExitCode == 137 && result.Result.TerminationReason != "oom_kill" {
-			// Unexpected 137 - investigate!
-			log.Printf("[ALERT] Unexpected exit code 137 - Investigate!")
+		start := time.Now()
+		result := <-resultCh
+		duration := time.Since(start).Seconds()
+
+		var errType metrics.ErrorType
+		switch {
+		case result.Result.TerminationReason == "timeout":
+			errType = metrics.ErrorTimeout
+			slog.Warn("execution timed out", "duration_s", duration, "request_id", requestID)
+		case result.Result.TerminationReason == "oom_kill":
+			errType = metrics.ErrorOOM
+		case result.Result.TerminationReason == "runtime_error":
+			errType = metrics.ErrorRuntime
+		case result.Err != nil:
+			errType = metrics.ErrorSystem
+			slog.Error("execution system error", "err", result.Err, "request_id", requestID)
+		case result.Result.ExitCode == 137 && result.Result.TerminationReason != "oom_kill":
+			errType = metrics.ErrorOOM
+			slog.Warn("unexpected exit code 137", "request_id", requestID)
+		default:
+			errType = metrics.ErrorNone
 		}
+
+		metrics.RecordExecutionEnd(duration, errType)
+
 		resp := ExecuteResponse{
 			Output: result.Result,
 			Status: "success",

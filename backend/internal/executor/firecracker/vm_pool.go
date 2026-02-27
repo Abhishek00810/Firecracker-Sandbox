@@ -3,7 +3,7 @@ package firecracker
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"sync"
 	"time"
@@ -36,7 +36,7 @@ func NewVMPool(n int, cfg VMConfig, mgr VMManager) *VMPool {
 
 	for i := 0; i < n; i++ {
 		if err := pool.addVM(); err != nil {
-			log.Printf("Failed to add VM %d to pool: %v", i, err)
+			slog.Error("Failed to add VM to pool", "index", i, "err", err)
 			// Continue with remaining VMs (don't fail entire pool)
 		}
 	}
@@ -53,13 +53,13 @@ func (p *VMPool) addVM() error {
 	vm, err := p.manager.Create(ctx, p.config)
 
 	if err != nil {
-		log.Printf("DEBUG: VM creation failed: %v", err)
+		slog.Debug("VM creation failed", "err", err)
 		return err
 	}
 
 	err = p.manager.Boot(ctx, vm.ID)
 	if err != nil {
-		log.Printf("DEBUG: Boot failed: %v", err)
+		slog.Debug("Boot failed", "err", err)
 		return err
 	}
 
@@ -114,12 +114,23 @@ func (p *VMPool) Release(vm *PooledVM) {
 		p.mu.Unlock()
 
 		if err := p.manager.Destroy(ctx, vm.VM.ID); err != nil {
-			log.Printf("Failed to destroy VM %s: %v", vm.VM.ID, err)
+			slog.Error("Failed to destroy VM", "vm_id", vm.VM.ID, "err", err)
 		}
 
 		// Boot a fresh replacement VM to keep the pool at capacity
 		if err := p.addVM(); err != nil {
-			log.Printf("Failed to replenish pool after releasing VM %s: %v", vm.VM.ID, err)
+			slog.Error("Failed to replenish pool after releasing VM", "vm_id", vm.VM.ID, "err", err)
 		}
 	}()
+}
+
+func (p *VMPool) Stats() (available, inUse int) {
+	available = len(p.vms)
+	p.mu.Lock()
+	inUse = len(p.vmMap) - available
+	p.mu.Unlock()
+	if inUse < 0 {
+		inUse = 0
+	}
+	return
 }

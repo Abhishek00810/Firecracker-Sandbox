@@ -54,6 +54,8 @@ func (q *JobQueue) Start() {
 	}
 }
 
+func (q *JobQueue) Depth() int { return len(q.jobs) }
+
 func (q *JobQueue) Submit(ctx context.Context, code, language string) (chan JobResult, error) {
 	resultCh := make(chan JobResult, 1)
 

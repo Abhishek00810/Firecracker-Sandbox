@@ -2,7 +2,6 @@ package firecracker
 
 import (
 	"backend/internal/executor"
-	"backend/internal/metrics"
 	"context"
 	"fmt"
 	"time"
@@ -37,12 +36,9 @@ func (f *FirecrackerExecutor) Execute(ctx context.Context, code, language string
 	vsockClient := NewVsockClient(pooledVM.VM.VsockPath)
 	resp, err := vsockClient.Execute(code, language, 15)
 	if err != nil {
-		duration := time.Since(startTime).Seconds()
-		metrics.RecordExecution(duration, false)
 		return executor.ExecutionResult{}, fmt.Errorf("failed to execute: %w", err)
 	}
 	duration := time.Since(startTime).Seconds()
-	metrics.RecordExecution(duration, true)
 
 	output := resp.Stdout
 	if resp.Stderr != "" {

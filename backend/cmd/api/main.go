@@ -4,9 +4,10 @@ import (
 	"backend/internal/executor/firecracker"
 	"backend/internal/handler"
 	"backend/internal/metrics"
+	"backend/internal/middleware"
 	"backend/internal/queue"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -18,34 +19,42 @@ type HealthResponse struct {
 	Message string `json:"message"`
 }
 
+func setupLogger() {
+	level := slog.LevelInfo
+	if os.Getenv("LOG_LEVEL") == "debug" {
+		level = slog.LevelDebug
+	}
+	opts := &slog.HandlerOptions{Level: level}
+	var h slog.Handler
+	if os.Getenv("LOG_FORMAT") == "text" {
+		h = slog.NewTextHandler(os.Stdout, opts)
+	} else {
+		h = slog.NewJSONHandler(os.Stdout, opts)
+	}
+	slog.SetDefault(slog.New(h))
+}
+
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-
 	resp := HealthResponse{
 		Status:  "ok",
 		Message: "Server is healthy and is rocking!!!",
 	}
-
 	json.NewEncoder(w).Encode(resp)
 }
 
-func MetricsHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	m := metrics.GetMetrics()
-	json.NewEncoder(w).Encode(m)
-}
-
 func main() {
-	// Setup Firecracker executor
+	setupLogger()
+
 	socketDir := filepath.Join(os.TempDir(), "fc-sockets")
 	assetsPath := os.Getenv("ASSETS_PATH")
 	if assetsPath == "" {
-		assetsPath = "/app/assets" // Default for Docker
+		assetsPath = "/app/assets"
 	}
 
-	// Create socket directory if it doesn't exist
 	if err := os.MkdirAll(socketDir, 0755); err != nil {
-		log.Fatalf("Failed to create socket directory: %v", err)
+		slog.Error("Failed to create socket directory", "err", err)
+		os.Exit(1)
 	}
 
 	vmManager := firecracker.NewFirecrackerManager(socketDir, assetsPath)
@@ -60,21 +69,31 @@ func main() {
 		BootArgs:   "console=ttyS0 reboot=k panic=1 pci=off init=/usr/local/bin/guest-agent",
 	}
 
-	//  pool (pre-boots 3 VMs)
 	pool := firecracker.NewVMPool(3, config, vmManager)
-	log.Printf("Firecracker executor initialized successfully!")
-	firecrackerExec.Pool = pool                        // ← Connect pool
-	JobQueue := queue.NewJobQueue(firecrackerExec, 10) // 10 workers
-	JobQueue.Start()
+	slog.Info("Firecracker executor initialized successfully")
+	firecrackerExec.Pool = pool
+	jobQueue := queue.NewJobQueue(firecrackerExec, 10)
+	jobQueue.Start()
+
 	http.HandleFunc("/health", healthHandler)
-	http.HandleFunc("/execute", handler.ExecuteHandler(JobQueue))
-	http.HandleFunc("/metrics", MetricsHandler)
+	http.HandleFunc("/execute", handler.ExecuteHandler(jobQueue))
+
+	metricsHandler := func(w http.ResponseWriter, r *http.Request) {
+		snap := metrics.GetSnapshot()
+		avail, inUse := pool.Stats()
+		snap.VMPoolAvailable = avail
+		snap.VMPoolInUse = inUse
+		snap.QueueDepth = jobQueue.Depth()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(snap)
+	}
+	http.HandleFunc("/metrics", metricsHandler)
 
 	port := ":8080"
+	slog.Info("Server is running", "port", port)
 
-	log.Printf("Server is running on Port 8080 huh!!")
-
-	if err := http.ListenAndServe(port, nil); err != nil {
-		log.Fatalf("error in serving the API: %v", err)
+	if err := http.ListenAndServe(port, middleware.Logging(http.DefaultServeMux)); err != nil {
+		slog.Error("Error serving API", "err", err)
+		os.Exit(1)
 	}
 }
