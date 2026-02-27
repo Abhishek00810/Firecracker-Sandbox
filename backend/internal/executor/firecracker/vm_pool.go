@@ -104,13 +104,22 @@ func (p *VMPool) Acquire(timeout time.Duration) (*PooledVM, error) {
 }
 
 func (p *VMPool) Release(vm *PooledVM) {
+	// Destroy the used VM — its rootfs copy may have been modified
+	// by the execution. Never return a dirty VM to the pool.
+	go func() {
+		ctx := context.Background()
 
-	p.mu.Lock()
-	vm.InUse = false
-	vm.LastUsed = time.Now()
-	vm.RequestCount++
+		p.mu.Lock()
+		delete(p.vmMap, vm.VM.ID)
+		p.mu.Unlock()
 
-	p.mu.Unlock()
+		if err := p.manager.Destroy(ctx, vm.VM.ID); err != nil {
+			log.Printf("Failed to destroy VM %s: %v", vm.VM.ID, err)
+		}
 
-	p.vms <- vm
+		// Boot a fresh replacement VM to keep the pool at capacity
+		if err := p.addVM(); err != nil {
+			log.Printf("Failed to replenish pool after releasing VM %s: %v", vm.VM.ID, err)
+		}
+	}()
 }

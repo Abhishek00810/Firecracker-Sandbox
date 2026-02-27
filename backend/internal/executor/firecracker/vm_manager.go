@@ -133,11 +133,20 @@ func (f *FireCrackerManager) putJSON(client *http.Client, url string, payload in
 func (f *FireCrackerManager) Create(ctx context.Context, cfg VMConfig) (*MicroVM, error) {
 	vmID := uuid.New().String()
 	socketPath := f.getSocketPath(vmID)
-	vsockPath := filepath.Join(f.SocketDir, fmt.Sprintf("vsock-%s.sock", vmID)) // ← Add this
+	vsockPath := filepath.Join(f.SocketDir, fmt.Sprintf("vsock-%s.sock", vmID))
+
+	// Each VM gets its own rootfs copy so state never leaks between executions
+	rootfsCopy := filepath.Join(f.SocketDir, fmt.Sprintf("rootfs-%s.ext4", vmID))
+	if err := copyFile(cfg.RootfsPath, rootfsCopy); err != nil {
+		return nil, fmt.Errorf("failed to copy rootfs for VM %s: %w", vmID, err)
+	}
+
+	vmCfg := cfg
+	vmCfg.RootfsPath = rootfsCopy
 
 	vm := &MicroVM{
 		ID:         vmID,
-		Config:     cfg,
+		Config:     vmCfg,
 		State:      VMStateCreated,
 		SocketPath: socketPath,
 		VsockPath:  vsockPath,
@@ -149,9 +158,24 @@ func (f *FireCrackerManager) Create(ctx context.Context, cfg VMConfig) (*MicroVM
 	f.Vms[vmID] = vm
 	f.mu.Unlock()
 
-	// due to multiple request it can cause race condition so we are putting mutex here
-
 	return vm, nil
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, in)
+	return err
 }
 
 func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
@@ -307,6 +331,7 @@ func (f *FireCrackerManager) Destroy(ctx context.Context, vmID string) error {
 
 	os.Remove(vm.SocketPath)
 	os.Remove(vm.VsockPath)
+	os.Remove(vm.Config.RootfsPath) // delete the VM-specific rootfs copy
 
 	return nil
 }
