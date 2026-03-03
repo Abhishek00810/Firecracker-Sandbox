@@ -1,6 +1,7 @@
 package firecracker
 
 import (
+	"backend/internal/cgroup"
 	"context"
 	"fmt"
 	"log/slog"
@@ -10,12 +11,13 @@ import (
 )
 
 type VMPool struct {
-	mu      sync.Mutex
-	vms     chan *PooledVM       // queue of the available VMs
-	vmMap   map[string]*PooledVM // ALL VMs
-	config  VMConfig
-	manager VMManager
-	size    int
+	mu           sync.Mutex
+	vms          chan *PooledVM       // queue of the available VMs
+	vmMap        map[string]*PooledVM // ALL VMs
+	config       VMConfig
+	manager      VMManager
+	size         int
+	cgroupConfig cgroup.Config
 }
 
 type PooledVM struct {
@@ -23,15 +25,17 @@ type PooledVM struct {
 	RequestCount int
 	LastUsed     time.Time
 	InUse        bool
+	Cgroup       *cgroup.Cgroup
 }
 
-func NewVMPool(n int, cfg VMConfig, mgr VMManager) *VMPool {
+func NewVMPool(n int, cfg VMConfig, mgr VMManager, cgroupConfig cgroup.Config) *VMPool {
 	pool := &VMPool{
-		vms:     make(chan *PooledVM, n),
-		vmMap:   make(map[string]*PooledVM),
-		size:    n,
-		config:  cfg,
-		manager: mgr,
+		vms:          make(chan *PooledVM, n),
+		vmMap:        make(map[string]*PooledVM),
+		size:         n,
+		config:       cfg,
+		manager:      mgr,
+		cgroupConfig: cgroupConfig,
 	}
 
 	for i := 0; i < n; i++ {
@@ -75,11 +79,25 @@ func (p *VMPool) addVM() error {
 		return fmt.Errorf("vsock socket never appeared for VM %s", vm.ID)
 	}
 
+	var cg *cgroup.Cgroup
+
+	if vm.Process != nil && vm.Process.Process != nil {
+		cg, err = cgroup.New("default", vm.ID, p.cgroupConfig)
+		if err != nil {
+			slog.Warn("failed to create cgroup", "vm_id", vm.ID, "err", err)
+		} else if err = cg.AddPID(vm.Process.Process.Pid); err != nil {
+			slog.Warn("failed to add pid to cgroup", "vm_id", vm.ID, "err", err)
+			cg.Destroy()
+			cg = nil
+		}
+	}
+
 	pooledVM := &PooledVM{
 		VM:           vm,
 		RequestCount: 0,
 		LastUsed:     time.Now(),
 		InUse:        false,
+		Cgroup:       cg,
 	}
 
 	p.mu.Lock()
