@@ -147,6 +147,28 @@ func (p *VMPool) Release(vm *PooledVM) {
 	}()
 }
 
+func (p *VMPool) Shutdown() {
+	ctx := context.Background()
+
+	p.mu.Lock()
+	vms := make([]*PooledVM, 0, len(p.vmMap))
+	for _, vm := range p.vmMap {
+		vms = append(vms, vm)
+	}
+	p.mu.Unlock()
+
+	for _, vm := range vms {
+		if err := p.manager.Destroy(ctx, vm.VM.ID); err != nil {
+			slog.Error("shutdown: failed to destroy VM", "vm_id", vm.VM.ID, "err", err)
+		}
+		if vm.Cgroup != nil {
+			if err := vm.Cgroup.Destroy(); err != nil {
+				slog.Error("shutdown: failed to destroy cgroup", "vm_id", vm.VM.ID, "err", err)
+			}
+		}
+	}
+}
+
 func (p *VMPool) Stats() (available, inUse int) {
 	available = len(p.vms)
 	p.mu.Lock()

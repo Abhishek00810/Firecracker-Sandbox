@@ -11,7 +11,9 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -98,8 +100,18 @@ func main() {
 	port := ":8080"
 	slog.Info("Server is running", "port", port)
 
-	if err := http.ListenAndServe(port, middleware.Logging(http.DefaultServeMux)); err != nil {
-		slog.Error("Error serving API", "err", err)
-		os.Exit(1)
-	}
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		if err := http.ListenAndServe(port, middleware.Logging(http.DefaultServeMux)); err != nil {
+			slog.Error("Error serving API", "err", err)
+			os.Exit(1)
+		}
+	}()
+
+	<-quit
+	slog.Info("shutting down, cleaning up VMs")
+	pool.Shutdown()
+	slog.Info("shutdown complete")
 }
