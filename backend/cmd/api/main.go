@@ -1,6 +1,7 @@
 package main
 
 import (
+	"backend/internal/cgroup"
 	"backend/internal/executor/firecracker"
 	"backend/internal/handler"
 	"backend/internal/metrics"
@@ -45,7 +46,9 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	setupLogger()
-
+	if err := cgroup.Init(); err != nil {
+		slog.Warn("cgroup init failed, limits will not be enforced", "err", err)
+	}
 	socketDir := filepath.Join(os.TempDir(), "fc-sockets")
 	assetsPath := os.Getenv("ASSETS_PATH")
 	if assetsPath == "" {
@@ -68,8 +71,11 @@ func main() {
 		RootfsPath: filepath.Join(assetsPath, "rootfs/rootfs-alpine.ext4"),
 		BootArgs:   "console=ttyS0 reboot=k panic=1 pci=off init=/usr/local/bin/guest-agent",
 	}
-
-	pool := firecracker.NewVMPool(3, config, vmManager)
+	cgroupCfg := cgroup.Config{
+		CPUQuotaUS:  100_000,
+		CPUPeriodUS: 100_000,
+	}
+	pool := firecracker.NewVMPool(3, config, vmManager, cgroupCfg)
 	slog.Info("Firecracker executor initialized successfully")
 	firecrackerExec.Pool = pool
 	jobQueue := queue.NewJobQueue(firecrackerExec, 10)

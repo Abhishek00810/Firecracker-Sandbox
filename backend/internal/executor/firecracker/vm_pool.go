@@ -134,6 +134,11 @@ func (p *VMPool) Release(vm *PooledVM) {
 		if err := p.manager.Destroy(ctx, vm.VM.ID); err != nil {
 			slog.Error("Failed to destroy VM", "vm_id", vm.VM.ID, "err", err)
 		}
+		if vm.Cgroup != nil {
+			if err := vm.Cgroup.Destroy(); err != nil {
+				slog.Error("failed to destroy cgroup", "vm_id", vm.VM.ID, "err", err)
+			}
+		}
 
 		// Boot a fresh replacement VM to keep the pool at capacity
 		if err := p.addVM(); err != nil {
