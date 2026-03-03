@@ -1,159 +1,88 @@
-# 🔥 Firecracker Sandbox Engine
+# Firecracker Sandbox Engine
 
-> **A high-performance, secure code execution engine powered by Firecracker microVMs**
+A secure code execution engine built on Firecracker microVMs. Runs untrusted code in hardware-isolated VMs with enforced CPU and memory limits, structured observability, and a pre-warmed VM pool for low-latency execution.
 
-Execute untrusted code safely with hardware-level isolation, sub-100ms boot times, and multi-language support. Built for production scale with VM pooling, job queuing, and comprehensive resource limits.
-
-[![Status](https://img.shields.io/badge/status-production--ready-brightgreen)]()
 [![Go Version](https://img.shields.io/badge/go-1.25.0-blue)]()
 [![Firecracker](https://img.shields.io/badge/firecracker-v1.7.0-orange)]()
+[![Status](https://img.shields.io/badge/status-active-brightgreen)]()
 
 ---
 
-## ✨ Features
+## Overview
 
-| Feature | Description |
-|---------|-------------|
-| 🔒 **Hardware Isolation** | Firecracker microVMs provide KVM-based virtualization, not just containers |
-| ⚡ **Sub-100ms Boot** | VM pool keeps warm microVMs ready, achieving <100ms cold starts |
-| 🎯 **Resource Limits** | 256MB RAM, 2 vCPU, 30s timeout per execution |
-| 🌐 **Multi-Language** | Python, Node.js, Bash, Go (extensible architecture) |
-| 🔄 **VM Pooling** | Pre-booted VMs drastically reduce latency |
-| 📊 **Job Queue** | Buffered queue (100 jobs) with 10 concurrent workers |
-| 🛡️ **Network Isolation** | Zero network access - complete air-gapping |
-| 🚀 **vsock Communication** | Fast, secure host-guest communication without networking |
+Each execution runs inside a dedicated Firecracker microVM — a separate Linux kernel with no shared state, no network access, and hard resource limits enforced by the host kernel via cgroup v2. VMs are pre-booted and pooled to avoid cold-start latency on each request.
 
 ---
 
-## 🏗️ Architecture
+## Features
+
+| Feature | Details |
+|---------|---------|
+| Hardware isolation | KVM-backed microVMs, not containers. Separate kernel per execution. |
+| cgroup v2 limits | CPU quota and memory cap enforced by the host kernel per VM |
+| VM pooling | Pre-booted VMs eliminate boot latency on the hot path |
+| Structured logging | JSON logs via `log/slog` with request IDs and configurable levels |
+| Request tracing | UUID injected per request, propagated through logs and response headers |
+| Metrics | p50/p95/p99 latency percentiles, error breakdown, active executions, queue depth, VM pool state |
+| Job queue | Buffered channel (100 jobs) with 10 concurrent workers |
+| Network isolation | No TCP/IP inside VMs — vsock only for host-guest communication |
+| Ephemeral VMs | Each VM is destroyed after use, rootfs copy deleted, fresh VM replenished |
+
+---
+
+## Architecture
 
 ```
-┌─────────────┐
-│   Client    │
-└──────┬──────┘
-       │ HTTP POST /execute
-       ▼
-┌─────────────────────────────────┐
-│      Go REST API (Port 8080)    │
-│  ┌──────────┐  ┌──────────────┐ │
-│  │ Handlers │→ │ Job Queue    │ │
-│  └──────────┘  │ (100 buffer) │ │
-│                └──────┬───────┘ │
-└───────────────────────┼─────────┘
-                        │
-         ┌──────────────┼──────────────┐
-         │ Worker Pool (10 workers)    │
-         └──────────────┬──────────────┘
+Client
+  │
+  │  HTTP POST /execute
+  ▼
+Go REST API (port 8080)
+  │  middleware: request ID, structured access log
+  ├── /health
+  ├── /execute  ──→  JobQueue (buffered chan, 10 workers)
+  └── /metrics          │
                         ▼
-         ┌──────────────────────────────┐
-         │   Firecracker VM Pool (3)    │
-         │  ┌────────┐ ┌────────┐       │
-         │  │microVM1│ │microVM2│ ...   │
-         │  │(ready) │ │(ready) │       │
-         │  └────────┘ └────────┘       │
-         └──────────────────────────────┘
+               FirecrackerExecutor
                         │
-                   vsock (secure)
                         ▼
-         ┌──────────────────────────────┐
-         │   Guest Agent (in VM)        │
-         │   - Receives code via vsock  │
-         │   - Executes in isolated env │
-         │   - Returns stdout/stderr    │
-         └──────────────────────────────┘
+               VMPool (3 pre-booted VMs)
+                 │          │          │
+               vm-1        vm-2       vm-3
+          [cgroup v2]  [cgroup v2]  [cgroup v2]
+                 │
+            vsock (unix socket)
+                 │
+            Guest Agent (inside VM)
+            executes code, returns stdout/stderr
 ```
 
-### How It Works
+### Request lifecycle
 
-1. **Client submits code** → HTTP POST to `/execute` with `{code, language}`
-2. **Request validation** → API validates input, checks language support
-3. **Job enqueued** → Job added to buffered channel (fails fast if full)
-4. **Worker picks job** → One of 10 workers dequeues the job
-5. **VM acquired from pool** → Pre-booted VM grabbed (or boot new if needed)
-6. **Code executed via vsock** → Code sent to guest agent, runs isolated
-7. **Output collected** → stdout/stderr captured, VM returned to pool
-8. **Response returned** → JSON with output, duration, exit code
+1. POST `/execute` with `{code, language}`
+2. Middleware injects UUID request ID, sets `X-Request-ID` header
+3. Job submitted to buffered queue — returns 503 if full
+4. Worker dequeues job, acquires VM from pool (blocks up to 30s)
+5. Code sent to guest agent via vsock, executed in isolated VM
+6. Result returned, VM released — destroyed and replenished in background
+7. Metrics recorded (duration, error type, active count)
 
 ---
 
-## 🚀 Quick Start
+## API
 
-### Prerequisites
-
-- **OS**: Linux (x86_64 or aarch64) with KVM support
-- **Go**: 1.25.0 or later
-- **Firecracker**: v1.7.0 (included in `release-v1.7.0-aarch64/`)
-- **Permissions**: Root/sudo for KVM access
-- **Assets**: Kernel (`vmlinux`) and rootfs (`rootfs-alpine.ext4`)
-
-### Installation
-
-```bash
-# 1. Clone the repository
-git clone <your-repo-url>
-cd sandbox_env
-
-# 2. Install Go dependencies
-cd backend
-go mod download
-
-# 3. Verify Firecracker binary
-chmod +x ../release-v1.7.0-aarch64/firecracker-v1.7.0-aarch64
-
-# 4. Check assets exist
-ls ../assets/kernel/vmlinux
-ls ../assets/rootfs/rootfs-alpine.ext4
-```
-
-### Running the Server
-
-```bash
-cd backend/cmd/api
-sudo go run main.go
-```
-
-**Why sudo?** Firecracker requires KVM access (`/dev/kvm`), which typically needs root privileges.
-
-**Expected output:**
-```
-Firecracker executor initialized successfully!
-Server is running on Port 8080 huh!!
-```
-
----
-
-## 📚 Usage Examples
-
-### Health Check
-
-```bash
-curl http://localhost:8080/health
-```
-
-**Response:**
-```json
-{
-  "status": "ok",
-  "message": "Server is healthy and is rocking!!!"
-}
-```
-
-### Execute Python Code
+### `POST /execute`
 
 ```bash
 curl -X POST http://localhost:8080/execute \
   -H "Content-Type: application/json" \
-  -d '{
-    "code": "print(\"Hello from microVM!\")\nfor i in range(5):\n    print(f\"Loop {i}\")",
-    "language": "python"
-  }'
+  -d '{"code": "print(1 + 1)", "language": "python"}'
 ```
 
-**Response:**
 ```json
 {
   "output": {
-    "output": "Hello from microVM!\nLoop 0\nLoop 1\nLoop 2\nLoop 3\nLoop 4\n",
+    "output": "2\n",
     "duration": 0.087,
     "exit_code": 0,
     "termination_reason": "success"
@@ -162,259 +91,187 @@ curl -X POST http://localhost:8080/execute \
 }
 ```
 
-### Execute Node.js Code
+Response headers include `X-Request-ID` for tracing.
 
-```bash
-curl -X POST http://localhost:8080/execute \
-  -H "Content-Type: application/json" \
-  -d '{
-    "code": "console.log(\"Node.js says hello!\"); console.log(Math.random());",
-    "language": "nodejs"
-  }'
-```
+### `GET /metrics`
 
-### Execute Bash Script
-
-```bash
-curl -X POST http://localhost:8080/execute \
-  -H "Content-Type: application/json" \
-  -d '{
-    "code": "#!/bin/bash\necho \"System info:\"\nuname -a\necho \"Memory:\"\nfree -h",
-    "language": "bash"
-  }'
-```
-
-For more examples, see [DEMO.md](./DEMO.md).
-
----
-
-## 📖 Documentation
-
-| Document | Description |
-|----------|-------------|
-| [ARCHITECTURE.md](./ARCHITECTURE.md) | Detailed system design and component breakdown |
-| [API.md](./API.md) | Complete API reference with curl examples |
-| [SECURITY.md](./SECURITY.md) | Security model, isolation guarantees, threat analysis |
-| [DEMO.md](./DEMO.md) | Sample executions, benchmarks, edge cases |
-
----
-
-## 🛡️ Security
-
-### Isolation Layers
-
-1. **Hardware Virtualization (KVM)** 
-   - Each microVM runs on a separate kernel
-   - No shared kernel vulnerabilities
-   - Memory isolated at hardware level
-
-2. **Resource Enforcement**
-   - 256MB RAM hard limit (OOM killer activated)
-   - 2 vCPU maximum
-   - 30-second timeout (force-killed)
-   - Read-only root filesystem (except `/tmp`)
-
-3. **Network Isolation**
-   - **Zero network access** - no TCP/IP stack in VM
-   - Only vsock for controlled host communication
-   - Prevents data exfiltration, reverse shells
-
-4. **Ephemeral VMs**
-   - VMs reset after each execution
-   - No state persists between runs
-   - Impossible to leave backdoors
-
-### What Can't Malicious Code Do?
-
-❌ Access the internet  
-❌ Read files from other executions  
-❌ Consume unlimited CPU/memory  
-❌ Run longer than 30 seconds  
-❌ Escape to the host system  
-❌ Attack other microVMs  
-
-See [SECURITY.md](./SECURITY.md) for threat model details.
-
----
-
-## 📊 Performance Benchmarks
-
-| Metric | Value | Notes |
-|--------|-------|-------|
-| **Cold Boot Time** | 95-120ms | Fresh VM from scratch |
-| **Warm Pool Time** | 20-40ms | VM already booted |
-| **Hello World (Python)** | ~85ms | Including queue time |
-| **CPU-Intensive (Fibonacci)** | ~2.5s | Respects CPU limits |
-| **Memory-Heavy (100MB)** | ~180ms | Allocated successfully |
-| **Timeout Test (15s sleep)** | 15.02s | Clean termination |
-
-**Load Test Results:**
-- 50 concurrent executions: ✅ All succeeded
-- 100 concurrent executions: ✅ Queue handled gracefully
-- 150 requests: ~50 queued, rest handled in ~8 seconds
-
----
-
-## 🔧 Configuration
-
-Key parameters in `main.go`:
-
-```go
-config := firecracker.VMConfig{
-    VCPUCount:  2,              // CPU cores per VM
-    MemSizeMiB: 256,            // RAM limit
-    Timeout:    30 * time.Second, // Max execution time
-    KernelPath: "assets/kernel/vmlinux",
-    RootfsPath: "assets/rootfs/rootfs-alpine.ext4",
+```json
+{
+  "total_executions": 142,
+  "success_count": 139,
+  "failure_count": 3,
+  "success_rate": 0.9788,
+  "active_executions": 1,
+  "timeout_count": 1,
+  "oom_count": 0,
+  "runtime_err_count": 2,
+  "system_err_count": 0,
+  "avg_duration_seconds": 1.12,
+  "p50_duration_seconds": 0.94,
+  "p95_duration_seconds": 3.21,
+  "p99_duration_seconds": 6.87,
+  "queue_depth": 0,
+  "vm_pool_available": 2,
+  "vm_pool_in_use": 1
 }
-
-// VM Pool: 3 pre-booted VMs
-pool := firecracker.NewVMPool(3, config, vmManager)
-
-// Job Queue: 10 workers, 100 job buffer
-JobQueue := queue.NewJobQueue(firecrackerExec, 10)
 ```
 
-### Tuning for Your Workload
+### `GET /health`
 
-**For higher throughput:**
-- Increase pool size: `NewVMPool(10, ...)`
-- Increase workers: `NewJobQueue(exec, 20)`
-
-**For lower latency:**
-- Use larger VM pool (more warm VMs)
-- Reduce timeout for faster failure detection
-
-**For memory-constrained hosts:**
-- Reduce pool size: `NewVMPool(1, ...)`
-- Lower VM memory: `MemSizeMiB: 128`
+```json
+{"status": "ok", "message": "Server is healthy and is rocking!!!"}
+```
 
 ---
 
-## 🗂️ Project Structure
+## Project Structure
 
 ```
 sandbox_env/
 ├── backend/
 │   ├── cmd/api/
-│   │   └── main.go                  # Server entry point
+│   │   └── main.go                     # Entry point, server setup
 │   ├── internal/
+│   │   ├── cgroup/
+│   │   │   └── cgroup.go               # cgroup v2 lifecycle (Init, New, AddPID, Destroy)
 │   │   ├── executor/
-│   │   │   ├── executor.go          # Interface definition
-│   │   │   ├── docker.go            # Docker executor (legacy)
+│   │   │   ├── executor.go             # Executor interface + ExecutionResult
+│   │   │   ├── docker.go               # Docker executor (reference implementation)
 │   │   │   └── firecracker/
-│   │   │       ├── executor.go      # Firecracker executor
-│   │   │       ├── vm_manager.go    # VM lifecycle management
-│   │   │       ├── vm_pool.go       # Pre-booted VM pool
-│   │   │       └── vsock_client.go  # Host-guest communication
+│   │   │       ├── executor.go         # Firecracker executor
+│   │   │       ├── vm_manager.go       # VM create/boot/destroy via Firecracker API
+│   │   │       ├── vm_pool.go          # Pre-booted VM pool with cgroup wiring
+│   │   │       └── vsock_client.go     # Host-guest communication
 │   │   ├── handler/
-│   │   │   └── execute.go           # HTTP handlers
-│   │   ├── queue/
-│   │   │   └── queue.go             # Job queue + worker pool
-│   │   └── metrics/
-│   │       └── metris.go            # Prometheus metrics (WIP)
+│   │   │   └── execute.go              # HTTP handler, metrics recording, error classification
+│   │   ├── middleware/
+│   │   │   └── logging.go              # Request ID injection, structured access logging
+│   │   ├── metrics/
+│   │   │   └── metris.go               # Ring buffer, percentiles, atomic counters
+│   │   └── queue/
+│   │       └── job_queue.go            # Buffered job queue, worker pool
 │   └── go.mod
+├── guest-agent/                         # vsock listener running inside each VM
 ├── assets/
-│   ├── kernel/
-│   │   └── vmlinux                  # Linux kernel for Firecracker
-│   └── rootfs/
-│       ├── rootfs-alpine.ext4       # Alpine Linux with runtimes
-│       └── rootfs.ext4              # Alternative rootfs
-├── guest-agent/                     # VM guest agent (vsock listener)
-├── release-v1.7.0-aarch64/          # Firecracker binaries
-├── ARCHITECTURE.md                  # System design docs
-├── API.md                           # API reference
-├── SECURITY.md                      # Security documentation
-├── DEMO.md                          # Usage examples
-└── README.md                        # This file
+│   ├── kernel/vmlinux                   # Linux kernel image for Firecracker
+│   └── rootfs/rootfs-alpine.ext4        # Alpine rootfs with language runtimes
+└── release-v1.7.0-aarch64/             # Firecracker binary
 ```
 
 ---
 
-## 🛣️ Development Roadmap
+## Configuration
 
-### Completed ✅
+**VM resource limits** (`main.go`):
 
-- ✅ Sprint 1: Docker MVP
-- ✅ Sprint 2: Hardened Docker Sandbox
-- ✅ Sprint 3: Firecracker Foundation
-- ✅ Sprint 4: Firecracker Integration v1
-- ✅ Sprint 5: Performance + VM Pooling
-- ✅ Sprint 6: Multi-Language Support
+```go
+// VM configuration
+config := firecracker.VMConfig{
+    VCPUCount:  2,
+    MemSizeMiB: 256,
+    Timeout:    30 * time.Second,
+}
 
-### In Progress 🔄
+// cgroup v2 limits (enforced by host kernel)
+cgroupCfg := cgroup.Config{
+    CPUQuotaUS:  100_000,        // 1 core (100ms per 100ms period)
+    CPUPeriodUS: 100_000,
+    MemMaxBytes: 300 * 1024 * 1024, // 300MB host-level cap
+}
 
-- 🔄 Sprint 7: Observability + Kubernetes Deployment
-  - Prometheus metrics
-  - Structured JSON logging
-  - Kubernetes manifests
-  - Grafana dashboards
+pool := firecracker.NewVMPool(3, config, vmManager, cgroupCfg)
+```
 
-- 🔄 Sprint 8: Documentation + Public Release
-  - Complete API documentation
-  - Security whitepapers
-  - Blog post draft
+**Log format** (environment variables):
 
-### Future Enhancements 🚀
+```bash
+LOG_FORMAT=text   # default: json
+LOG_LEVEL=debug   # default: info
+```
 
-- [ ] Snapshot/restore for instant boot (<10ms)
-- [ ] Per-user rate limiting
-- [ ] Language-specific resource profiles
-- [ ] Horizontal auto-scaling
-- [ ] Real-time execution streaming (WebSocket)
+---
+
+## Running
+
+### Prerequisites
+
+- Linux with KVM support (or Lima on macOS for development)
+- Go 1.25+
+- Firecracker v1.7.0 binary
+- Kernel image and rootfs assets
+
+### Development (macOS via Lima)
+
+```bash
+# Start Lima VM
+limactl start firecracker
+limactl shell firecracker
+
+# Inside Lima
+cd /path/to/sandbox_env/backend
+sudo go run cmd/api/main.go
+```
+
+### Production (Linux)
+
+```bash
+cd backend
+go build -o api ./cmd/api
+sudo ./api
+```
+
+**Expected log output (JSON):**
+```json
+{"time":"2026-03-04T10:00:00Z","level":"INFO","msg":"Firecracker executor initialized successfully"}
+{"time":"2026-03-04T10:00:00Z","level":"INFO","msg":"Server is running","port":":8080"}
+{"time":"2026-03-04T10:00:01Z","level":"INFO","msg":"http request","method":"POST","path":"/execute","status":200,"duration_ms":94,"request_id":"a3f1c2d4-..."}
+```
+
+---
+
+## Roadmap
+
+**Completed**
+- [x] Firecracker microVM execution
+- [x] VM pool with vsock communication
+- [x] Job queue with concurrent workers
+- [x] Structured JSON logging with request tracing
+- [x] Metrics: percentiles, error breakdown, pool state
+- [x] cgroup v2 CPU and memory enforcement per VM
+
+**In progress**
+- [ ] Per-tenant resource tiers (free / pro / enterprise pools)
+- [ ] Burst protection via token bucket per tenant
+- [ ] Fair scheduling across tenant queues
+- [ ] Firecracker vs Docker benchmark with flame graphs
+
+**Planned**
+- [ ] VM snapshot/restore for sub-10ms boot
+- [ ] WebSocket streaming for long-running executions
+- [ ] Horizontal scaling with shared queue
 - [ ] Custom language runtime support
-- [ ] Execution history/caching
 
 ---
 
-## 🤝 Contributing
+## Security Model
 
-This is a portfolio project, but contributions are welcome! Areas where help is appreciated:
+Execution is isolated at four layers:
 
-- **Language support**: Add Ruby, Rust, Java runtimes to rootfs
-- **Optimization**: Reduce VM boot time further
-- **Testing**: More comprehensive integration tests
-- **Documentation**: Typo fixes, clarifications
+1. **Hardware (KVM)** — separate kernel per VM, memory isolated at hardware level
+2. **cgroup v2** — CPU and memory hard limits enforced by host kernel, VM killed on breach
+3. **Network** — no TCP/IP stack inside VMs, vsock only
+4. **Ephemeral state** — VM destroyed after each execution, rootfs copy discarded
 
-**Guidelines:**
-1. Follow Go best practices (gofmt, golint)
-2. Include tests for new features
-3. Update documentation
-4. Explain security implications of changes
+Malicious code cannot access the network, read other executions' data, consume unbounded resources, or persist state between runs.
 
 ---
 
-## 📝 License
+## Acknowledgments
 
-MIT License - see [LICENSE](./LICENSE) for details.
-
----
-
-## 🙏 Acknowledgments
-
-**Inspired by:**
-- [E2B](https://e2b.dev/) - Pioneered secure code execution with Firecracker
-- [Judge0](https://judge0.com/) - Code execution API for competitive programming
-- [AWS Firecracker](https://firecracker-microvm.github.io/) - Lightweight virtualization
-
-**Built with:**
-- [Firecracker](https://github.com/firecracker-microvm/firecracker) - MicroVM technology
-- [Go](https://go.dev/) - Backend implementation
-- [Alpine Linux](https://alpinelinux.org/) - Minimal rootfs
+- [Firecracker](https://github.com/firecracker-microvm/firecracker) — microVM technology by AWS
+- [E2B](https://e2b.dev/) — reference for production Firecracker usage
+- [Alpine Linux](https://alpinelinux.org/) — minimal rootfs
 
 ---
 
-## 📧 Contact
-
-**Abhishek Dadwal**
-
-- GitHub: [@Abhishek00810](https://github.com/Abhishek00810)
-- LinkedIn: [Linkedin Profile](https://www.linkedin.com/in/abhishek-dadwal-5565781b6/)
-
----
-
-## ⭐ Star This Project
-
-If this helped you understand Firecracker or secure code execution, please star the repo! 🌟
-
-Built with ❤️ for learning and production use.
+**Abhishek Dadwal** — [GitHub](https://github.com/Abhishek00810) · [LinkedIn](https://www.linkedin.com/in/abhishek-dadwal-5565781b6/)
