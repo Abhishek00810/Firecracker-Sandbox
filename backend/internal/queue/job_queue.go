@@ -12,10 +12,18 @@ type JobResult struct {
 	Err    error
 }
 
+type Tier string
+
+const (
+	TierFree    Tier = "free"
+	TierPremium Tier = "premium"
+)
+
 type Job struct {
 	Code     string
 	Language string
 	//Output channel
+	Tier     Tier
 	Ctx      context.Context
 	ResultCh chan JobResult
 }
@@ -56,7 +64,7 @@ func (q *JobQueue) Start() {
 
 func (q *JobQueue) Depth() int { return len(q.jobs) }
 
-func (q *JobQueue) Submit(ctx context.Context, code, language string) (chan JobResult, error) {
+func (q *JobQueue) Submit(ctx context.Context, code, language string, tier Tier) (chan JobResult, error) {
 	resultCh := make(chan JobResult, 1)
 
 	job := Job{
@@ -64,6 +72,7 @@ func (q *JobQueue) Submit(ctx context.Context, code, language string) (chan JobR
 		Language: language,
 		Ctx:      ctx, //caller's context
 		ResultCh: resultCh,
+		Tier:     tier,
 	}
 
 	select {

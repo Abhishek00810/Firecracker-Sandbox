@@ -23,9 +23,19 @@ type ExecuteResponse struct {
 	Status string                   `json:"status"`
 }
 
-func ExecuteHandler(JobQueue *queue.JobQueue) http.HandlerFunc {
+func ExecuteHandler(freeQueue *queue.JobQueue, premiumQueue *queue.JobQueue) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := middleware.RequestIDFromContext(r.Context())
+
+		tier := queue.TierFree
+		if r.Header.Get("X-Tenant-Tier") == "premium" {
+			tier = queue.TierPremium
+		}
+
+		jobQueue := freeQueue
+		if tier == queue.TierPremium {
+			jobQueue = premiumQueue
+		}
 
 		var req ExecuteRequest
 		err := json.NewDecoder(r.Body).Decode(&req)
@@ -34,7 +44,7 @@ func ExecuteHandler(JobQueue *queue.JobQueue) http.HandlerFunc {
 			return
 		}
 
-		resultCh, err := JobQueue.Submit(r.Context(), req.Code, req.Language)
+		resultCh, err := jobQueue.Submit(r.Context(), req.Code, req.Language, tier)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 			return

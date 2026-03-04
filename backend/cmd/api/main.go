@@ -63,7 +63,6 @@ func main() {
 	}
 
 	vmManager := firecracker.NewFirecrackerManager(socketDir, assetsPath)
-	firecrackerExec := firecracker.NewFirecrackerExecutor(vmManager)
 
 	config := firecracker.VMConfig{
 		VCPUCount:  2,
@@ -73,28 +72,45 @@ func main() {
 		RootfsPath: filepath.Join(assetsPath, "rootfs/rootfs-alpine.ext4"),
 		BootArgs:   "console=ttyS0 reboot=k panic=1 pci=off init=/usr/local/bin/guest-agent",
 	}
-	cgroupCfg := cgroup.Config{
-		CPUQuotaUS:  100_000,
+	freeCgroupCfg := cgroup.Config{
+		CPUQuotaUS:  50_000, // 0.5 core
 		CPUPeriodUS: 100_000,
+		MemMaxBytes: 256 * 1024 * 1024, // 256MB
 	}
-	pool := firecracker.NewVMPool(3, config, vmManager, cgroupCfg)
-	slog.Info("Firecracker executor initialized successfully")
-	firecrackerExec.Pool = pool
-	jobQueue := queue.NewJobQueue(firecrackerExec, 10)
-	jobQueue.Start()
+	premiumCgroupCfg := cgroup.Config{
+		CPUQuotaUS:  200_000, // 2 cores
+		CPUPeriodUS: 100_000,
+		MemMaxBytes: 512 * 1024 * 1024, // 512MB
+	}
+
+	freePool := firecracker.NewVMPool(3, config, vmManager, freeCgroupCfg)
+	premiumPool := firecracker.NewVMPool(3, config, vmManager, premiumCgroupCfg)
+	slog.Info("VM pools initialized")
+
+	freeExec := firecracker.NewFirecrackerExecutor(vmManager)
+	freeExec.Pool = freePool
+	freeQueue := queue.NewJobQueue(freeExec, 5)
+	freeQueue.Start()
+
+	premiumExec := firecracker.NewFirecrackerExecutor(vmManager)
+	premiumExec.Pool = premiumPool
+	premiumQueue := queue.NewJobQueue(premiumExec, 10)
+	premiumQueue.Start()
 
 	http.HandleFunc("/health", healthHandler)
-	http.HandleFunc("/execute", handler.ExecuteHandler(jobQueue))
+	http.HandleFunc("/execute", handler.ExecuteHandler(freeQueue, premiumQueue))
 
 	metricsHandler := func(w http.ResponseWriter, r *http.Request) {
 		snap := metrics.GetSnapshot()
-		avail, inUse := pool.Stats()
-		snap.VMPoolAvailable = avail
-		snap.VMPoolInUse = inUse
-		snap.QueueDepth = jobQueue.Depth()
+		freeAvail, freeInUse := freePool.Stats()
+		premAvail, premInUse := premiumPool.Stats()
+		snap.VMPoolAvailable = freeAvail + premAvail
+		snap.VMPoolInUse = freeInUse + premInUse
+		snap.QueueDepth = freeQueue.Depth() + premiumQueue.Depth()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(snap)
 	}
+
 	http.HandleFunc("/metrics", metricsHandler)
 
 	port := ":8080"
@@ -112,6 +128,7 @@ func main() {
 
 	<-quit
 	slog.Info("shutting down, cleaning up VMs")
-	pool.Shutdown()
+	freePool.Shutdown()
+	premiumPool.Shutdown()
 	slog.Info("shutdown complete")
 }
