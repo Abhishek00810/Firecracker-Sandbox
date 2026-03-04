@@ -5,6 +5,7 @@ import (
 	"backend/internal/metrics"
 	"backend/internal/middleware"
 	"backend/internal/queue"
+	"backend/internal/ratelimit"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -23,13 +24,27 @@ type ExecuteResponse struct {
 	Status string                   `json:"status"`
 }
 
-func ExecuteHandler(freeQueue *queue.JobQueue, premiumQueue *queue.JobQueue) http.HandlerFunc {
+func ExecuteHandler(freeQueue *queue.JobQueue, premiumQueue *queue.JobQueue, freeLimiter *ratelimit.TenantLimiter, premiumLimiter *ratelimit.TenantLimiter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := middleware.RequestIDFromContext(r.Context())
 
 		tier := queue.TierFree
 		if r.Header.Get("X-Tenant-Tier") == "premium" {
 			tier = queue.TierPremium
+		}
+
+		tenantID := r.Header.Get("X-Tenant-ID")
+		if tenantID == "" {
+			tenantID = "anonymous"
+		}
+		limiter := freeLimiter
+		if tier == queue.TierPremium {
+			limiter = premiumLimiter
+		}
+
+		if !limiter.GetLimiter(tenantID).Allow() {
+			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+			return
 		}
 
 		jobQueue := freeQueue

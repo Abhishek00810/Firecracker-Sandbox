@@ -7,6 +7,7 @@ import (
 	"backend/internal/metrics"
 	"backend/internal/middleware"
 	"backend/internal/queue"
+	"backend/internal/ratelimit"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -15,6 +16,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"golang.org/x/time/rate"
 )
 
 type HealthResponse struct {
@@ -97,8 +100,11 @@ func main() {
 	premiumQueue := queue.NewJobQueue(premiumExec, 10)
 	premiumQueue.Start()
 
+	freeLimiter := ratelimit.NewTenantLimiter(rate.Limit(2), 5)      // 2 req/sec, burst 5
+	premiumLimiter := ratelimit.NewTenantLimiter(rate.Limit(10), 20) // 10 req/sec, burst 20
+
 	http.HandleFunc("/health", healthHandler)
-	http.HandleFunc("/execute", handler.ExecuteHandler(freeQueue, premiumQueue))
+	http.HandleFunc("/execute", handler.ExecuteHandler(freeQueue, premiumQueue, freeLimiter, premiumLimiter))
 
 	metricsHandler := func(w http.ResponseWriter, r *http.Request) {
 		snap := metrics.GetSnapshot()

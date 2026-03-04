@@ -20,11 +20,13 @@ Each execution runs inside a dedicated Firecracker microVM — a separate Linux 
 |---------|---------|
 | Hardware isolation | KVM-backed microVMs, not containers. Separate kernel per execution. |
 | cgroup v2 limits | CPU quota and memory cap enforced by the host kernel per VM |
+| Per-tenant tiers | Separate free (0.5 CPU, 256MB) and premium (2 CPU, 512MB) VM pools and queues |
+| Burst protection | Token bucket rate limiter per tenant ID — free: 2 req/s burst 5, premium: 10 req/s burst 20 |
 | VM pooling | Pre-booted VMs eliminate boot latency on the hot path |
 | Structured logging | JSON logs via `log/slog` with request IDs and configurable levels |
 | Request tracing | UUID injected per request, propagated through logs and response headers |
 | Metrics | p50/p95/p99 latency percentiles, error breakdown, active executions, queue depth, VM pool state |
-| Job queue | Buffered channel (100 jobs) with 10 concurrent workers |
+| Job queue | Buffered channel (100 jobs) with configurable concurrent workers per tier |
 | Network isolation | No TCP/IP inside VMs — vsock only for host-guest communication |
 | Ephemeral VMs | Each VM is destroyed after use, rootfs copy deleted, fresh VM replenished |
 
@@ -36,36 +38,47 @@ Each execution runs inside a dedicated Firecracker microVM — a separate Linux 
 Client
   │
   │  HTTP POST /execute
+  │  X-Tenant-ID: <id>   X-Tenant-Tier: free|premium
   ▼
 Go REST API (port 8080)
   │  middleware: request ID, structured access log
   ├── /health
-  ├── /execute  ──→  JobQueue (buffered chan, 10 workers)
-  └── /metrics          │
-                        ▼
-               FirecrackerExecutor
-                        │
-                        ▼
-               VMPool (3 pre-booted VMs)
-                 │          │          │
-               vm-1        vm-2       vm-3
-          [cgroup v2]  [cgroup v2]  [cgroup v2]
-                 │
-            vsock (unix socket)
-                 │
-            Guest Agent (inside VM)
-            executes code, returns stdout/stderr
+  ├── /execute
+  │     │
+  │     ├── TenantLimiter (token bucket per tenant)
+  │     │       free:    2 req/s, burst 5
+  │     │       premium: 10 req/s, burst 20
+  │     │
+  │     ├── free tier ──→  FreeJobQueue  (5 workers)
+  │     │                       │
+  │     │              FreeVMPool (3 VMs, 0.5 CPU, 256MB)
+  │     │
+  │     └── premium tier ──→  PremiumJobQueue  (10 workers)
+  │                                │
+  │                       PremiumVMPool (3 VMs, 2 CPU, 512MB)
+  │
+  └── /metrics    (pool stats, percentiles, error breakdown)
+
+Each VM:
+  [cgroup v2: cpu.max, memory.max]
+        │
+   vsock (unix socket)
+        │
+   Guest Agent (inside VM)
+   executes code, returns stdout/stderr
 ```
 
 ### Request lifecycle
 
-1. POST `/execute` with `{code, language}`
+1. POST `/execute` with `{code, language}` and optional tier headers
 2. Middleware injects UUID request ID, sets `X-Request-ID` header
-3. Job submitted to buffered queue — returns 503 if full
-4. Worker dequeues job, acquires VM from pool (blocks up to 30s)
-5. Code sent to guest agent via vsock, executed in isolated VM
-6. Result returned, VM released — destroyed and replenished in background
-7. Metrics recorded (duration, error type, active count)
+3. Tier resolved from `X-Tenant-Tier` header (`free` default, `premium` opt-in)
+4. Token bucket checked for `X-Tenant-ID` — returns 429 if burst exceeded
+5. Job submitted to tier-specific buffered queue — returns 503 if full
+6. Worker dequeues job, acquires VM from the matching tier pool (blocks up to 30s)
+7. Code sent to guest agent via vsock, executed in isolated VM under cgroup limits
+8. Result returned, VM released — destroyed and replenished in background
+9. Metrics recorded (duration, error type, active count)
 
 ---
 
@@ -73,9 +86,27 @@ Go REST API (port 8080)
 
 ### `POST /execute`
 
+**Headers:**
+
+| Header | Required | Values | Description |
+|--------|----------|--------|-------------|
+| `X-Tenant-ID` | No | any string | Identifies the tenant for rate limiting. Defaults to `"anonymous"`. |
+| `X-Tenant-Tier` | No | `free` / `premium` | Selects resource pool. Defaults to `free`. |
+
+**Free tier (default):**
 ```bash
 curl -X POST http://localhost:8080/execute \
   -H "Content-Type: application/json" \
+  -H "X-Tenant-ID: my-app" \
+  -d '{"code": "print(1 + 1)", "language": "python"}'
+```
+
+**Premium tier:**
+```bash
+curl -X POST http://localhost:8080/execute \
+  -H "Content-Type: application/json" \
+  -H "X-Tenant-ID: my-app" \
+  -H "X-Tenant-Tier: premium" \
   -d '{"code": "print(1 + 1)", "language": "python"}'
 ```
 
@@ -148,6 +179,8 @@ sandbox_env/
 │   │   │   └── logging.go              # Request ID injection, structured access logging
 │   │   ├── metrics/
 │   │   │   └── metris.go               # Ring buffer, percentiles, atomic counters
+│   │   ├── ratelimit/
+│   │   │   └── limiter.go              # Per-tenant token bucket rate limiter
 │   │   └── queue/
 │   │       └── job_queue.go            # Buffered job queue, worker pool
 │   └── go.mod
@@ -162,24 +195,36 @@ sandbox_env/
 
 ## Configuration
 
-**VM resource limits** (`main.go`):
+**Tier configuration** (`main.go`):
 
 ```go
-// VM configuration
+// Shared VM config (both tiers use the same kernel/rootfs)
 config := firecracker.VMConfig{
     VCPUCount:  2,
     MemSizeMiB: 256,
     Timeout:    30 * time.Second,
 }
 
-// cgroup v2 limits (enforced by host kernel)
-cgroupCfg := cgroup.Config{
-    CPUQuotaUS:  100_000,        // 1 core (100ms per 100ms period)
+// Free tier — cgroup v2 limits
+freeCgroupCfg := cgroup.Config{
+    CPUQuotaUS:  50_000,             // 0.5 core
     CPUPeriodUS: 100_000,
-    MemMaxBytes: 300 * 1024 * 1024, // 300MB host-level cap
+    MemMaxBytes: 256 * 1024 * 1024, // 256MB
 }
 
-pool := firecracker.NewVMPool(3, config, vmManager, cgroupCfg)
+// Premium tier — cgroup v2 limits
+premiumCgroupCfg := cgroup.Config{
+    CPUQuotaUS:  200_000,            // 2 cores
+    CPUPeriodUS: 100_000,
+    MemMaxBytes: 512 * 1024 * 1024, // 512MB
+}
+
+freePool    := firecracker.NewVMPool(3, config, vmManager, freeCgroupCfg)
+premiumPool := firecracker.NewVMPool(3, config, vmManager, premiumCgroupCfg)
+
+// Rate limiters — token bucket per tenant ID
+freeLimiter    := ratelimit.NewTenantLimiter(rate.Limit(2), 5)   // 2 req/s, burst 5
+premiumLimiter := ratelimit.NewTenantLimiter(rate.Limit(10), 20) // 10 req/s, burst 20
 ```
 
 **Log format** (environment variables):
@@ -238,10 +283,10 @@ sudo ./api
 - [x] Structured JSON logging with request tracing
 - [x] Metrics: percentiles, error breakdown, pool state
 - [x] cgroup v2 CPU and memory enforcement per VM
+- [x] Per-tenant resource tiers (free: 0.5 CPU/256MB, premium: 2 CPU/512MB)
+- [x] Burst protection via token bucket rate limiter per tenant
 
-**In progress**
-- [ ] Per-tenant resource tiers (free / pro / enterprise pools)
-- [ ] Burst protection via token bucket per tenant
+**Planned**
 - [ ] Fair scheduling across tenant queues
 - [ ] Firecracker vs Docker benchmark with flame graphs
 
