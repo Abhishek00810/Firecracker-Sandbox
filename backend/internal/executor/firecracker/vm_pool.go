@@ -12,12 +12,13 @@ import (
 
 type VMPool struct {
 	mu           sync.Mutex
-	vms          chan *PooledVM       // queue of the available VMs
+	vms          chan *PooledVM       // queue of available VMs
 	vmMap        map[string]*PooledVM // ALL VMs
 	config       VMConfig
 	manager      VMManager
 	size         int
 	cgroupConfig cgroup.Config
+	template     *SnapshotTemplate // nil = cold boot
 }
 
 type PooledVM struct {
@@ -29,6 +30,10 @@ type PooledVM struct {
 }
 
 func NewVMPool(n int, cfg VMConfig, mgr VMManager, cgroupConfig cgroup.Config) *VMPool {
+	return NewVMPoolWithSnapshot(n, cfg, mgr, cgroupConfig, nil)
+}
+
+func NewVMPoolWithSnapshot(n int, cfg VMConfig, mgr VMManager, cgroupConfig cgroup.Config, tmpl *SnapshotTemplate) *VMPool {
 	pool := &VMPool{
 		vms:          make(chan *PooledVM, n),
 		vmMap:        make(map[string]*PooledVM),
@@ -36,38 +41,48 @@ func NewVMPool(n int, cfg VMConfig, mgr VMManager, cgroupConfig cgroup.Config) *
 		config:       cfg,
 		manager:      mgr,
 		cgroupConfig: cgroupConfig,
+		template:     tmpl,
 	}
 
 	for i := 0; i < n; i++ {
 		if err := pool.addVM(); err != nil {
-			slog.Error("Failed to add VM to pool", "index", i, "err", err)
-			// Continue with remaining VMs (don't fail entire pool)
+			slog.Error("failed to add VM to pool", "index", i, "err", err)
 		}
 	}
 
 	return pool
-
 }
 
 func (p *VMPool) addVM() error {
-	// create vm
-	// boot vm
 	ctx := context.Background()
+	var vm *MicroVM
+	var err error
 
-	vm, err := p.manager.Create(ctx, p.config)
-
-	if err != nil {
-		slog.Debug("VM creation failed", "err", err)
-		return err
+	if p.template != nil {
+		vm, err = p.manager.LoadFromSnapshot(ctx, p.config, p.template)
+		if err != nil {
+			slog.Warn("snapshot restore failed, falling back to cold boot", "err", err)
+			vm, err = p.manager.Create(ctx, p.config)
+			if err != nil {
+				return err
+			}
+			if err = p.manager.Boot(ctx, vm.ID); err != nil {
+				return err
+			}
+		}
+	} else {
+		vm, err = p.manager.Create(ctx, p.config)
+		if err != nil {
+			slog.Debug("VM creation failed", "err", err)
+			return err
+		}
+		if err = p.manager.Boot(ctx, vm.ID); err != nil {
+			slog.Debug("boot failed", "err", err)
+			return err
+		}
 	}
 
-	err = p.manager.Boot(ctx, vm.ID)
-	if err != nil {
-		slog.Debug("Boot failed", "err", err)
-		return err
-	}
-
-	// Poll for vsock socket readiness instead of a fixed sleep (up to 15s)
+	// Poll for vsock readiness (fast for snapshot-restored VMs since guest agent already running)
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, statErr := os.Stat(vm.VsockPath); statErr == nil {
@@ -80,7 +95,6 @@ func (p *VMPool) addVM() error {
 	}
 
 	var cg *cgroup.Cgroup
-
 	if vm.Process != nil && vm.Process.Process != nil {
 		cg, err = cgroup.New("default", vm.ID, p.cgroupConfig)
 		if err != nil {
@@ -122,8 +136,8 @@ func (p *VMPool) Acquire(timeout time.Duration) (*PooledVM, error) {
 }
 
 func (p *VMPool) Release(vm *PooledVM) {
-	// Destroy the used VM — its rootfs copy may have been modified
-	// by the execution. Never return a dirty VM to the pool.
+	// Destroy the used VM — its rootfs may have been modified during execution.
+	// Never return a dirty VM to the pool.
 	go func() {
 		ctx := context.Background()
 
@@ -132,7 +146,7 @@ func (p *VMPool) Release(vm *PooledVM) {
 		p.mu.Unlock()
 
 		if err := p.manager.Destroy(ctx, vm.VM.ID); err != nil {
-			slog.Error("Failed to destroy VM", "vm_id", vm.VM.ID, "err", err)
+			slog.Error("failed to destroy VM", "vm_id", vm.VM.ID, "err", err)
 		}
 		if vm.Cgroup != nil {
 			if err := vm.Cgroup.Destroy(); err != nil {
@@ -140,9 +154,9 @@ func (p *VMPool) Release(vm *PooledVM) {
 			}
 		}
 
-		// Boot a fresh replacement VM to keep the pool at capacity
+		// Replenish pool — uses snapshot restore if template is set, cold boot otherwise
 		if err := p.addVM(); err != nil {
-			slog.Error("Failed to replenish pool after releasing VM", "vm_id", vm.VM.ID, "err", err)
+			slog.Error("failed to replenish pool after releasing VM", "vm_id", vm.VM.ID, "err", err)
 		}
 	}()
 }

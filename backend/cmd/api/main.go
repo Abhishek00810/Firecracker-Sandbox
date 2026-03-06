@@ -8,6 +8,7 @@ import (
 	"backend/internal/middleware"
 	"backend/internal/queue"
 	"backend/internal/ratelimit"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -54,6 +55,7 @@ func main() {
 	if err := cgroup.Init(); err != nil {
 		slog.Warn("cgroup init failed, limits will not be enforced", "err", err)
 	}
+
 	socketDir := filepath.Join(os.TempDir(), "fc-sockets")
 	assetsPath := os.Getenv("ASSETS_PATH")
 	if assetsPath == "" {
@@ -61,7 +63,7 @@ func main() {
 	}
 
 	if err := os.MkdirAll(socketDir, 0755); err != nil {
-		slog.Error("Failed to create socket directory", "err", err)
+		slog.Error("failed to create socket directory", "err", err)
 		os.Exit(1)
 	}
 
@@ -75,6 +77,7 @@ func main() {
 		RootfsPath: filepath.Join(assetsPath, "rootfs/rootfs-alpine.ext4"),
 		BootArgs:   "console=ttyS0 reboot=k panic=1 pci=off init=/usr/local/bin/guest-agent",
 	}
+
 	freeCgroupCfg := cgroup.Config{
 		CPUQuotaUS:  50_000, // 0.5 core
 		CPUPeriodUS: 100_000,
@@ -86,8 +89,18 @@ func main() {
 		MemMaxBytes: 512 * 1024 * 1024, // 512MB
 	}
 
-	freePool := firecracker.NewVMPool(3, config, vmManager, freeCgroupCfg)
-	premiumPool := firecracker.NewVMPool(3, config, vmManager, premiumCgroupCfg)
+	// Attempt to create a snapshot template once at startup.
+	// If it fails (e.g. no KVM on macOS), both pools fall back to cold boot silently.
+	snapDir := filepath.Join(os.TempDir(), "fc-snapshots")
+	var template *firecracker.SnapshotTemplate
+	if tmpl, err := vmManager.CreateTemplate(context.Background(), config, snapDir); err != nil {
+		slog.Warn("snapshot template creation failed, using cold boot", "err", err)
+	} else {
+		template = tmpl
+	}
+
+	freePool := firecracker.NewVMPoolWithSnapshot(3, config, vmManager, freeCgroupCfg, template)
+	premiumPool := firecracker.NewVMPoolWithSnapshot(3, config, vmManager, premiumCgroupCfg, template)
 	slog.Info("VM pools initialized")
 
 	freeExec := firecracker.NewFirecrackerExecutor(vmManager)
@@ -120,14 +133,14 @@ func main() {
 	http.HandleFunc("/metrics", metricsHandler)
 
 	port := ":8080"
-	slog.Info("Server is running", "port", port)
+	slog.Info("server is running", "port", port)
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
 		if err := http.ListenAndServe(port, middleware.Logging(http.DefaultServeMux)); err != nil {
-			slog.Error("Error serving API", "err", err)
+			slog.Error("error serving API", "err", err)
 			os.Exit(1)
 		}
 	}()
