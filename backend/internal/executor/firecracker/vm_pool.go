@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
 	"sync"
 	"time"
 )
@@ -82,16 +81,22 @@ func (p *VMPool) addVM() error {
 		}
 	}
 
-	// Poll for vsock readiness (fast for snapshot-restored VMs since guest agent already running)
-	deadline := time.Now().Add(15 * time.Second)
+	// Poll until the vsock handshake actually succeeds.
+	// Checking file existence is not enough — for snapshot-restored VMs the
+	// file appears immediately after rename but the guest agent's vsock socket
+	// may not be ready yet (virtio-vsock transport resets on snapshot restore,
+	// and the guest agent needs to reinitialize its listener).
+	vsockReady := false
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, statErr := os.Stat(vm.VsockPath); statErr == nil {
+		if NewVsockClient(vm.VsockPath).Ping() {
+			vsockReady = true
 			break
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	if _, statErr := os.Stat(vm.VsockPath); statErr != nil {
-		return fmt.Errorf("vsock socket never appeared for VM %s", vm.ID)
+	if !vsockReady {
+		return fmt.Errorf("vsock never became ready for VM %s", vm.ID)
 	}
 
 	var cg *cgroup.Cgroup

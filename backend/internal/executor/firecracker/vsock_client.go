@@ -35,6 +35,27 @@ func NewVsockClient(socketPath string) *VsockClient {
 	}
 }
 
+// Ping tests whether the guest agent is ready by doing the vsock handshake
+// and checking for an "OK" response. Used by the pool to verify a VM is
+// actually accepting connections before it is made available for requests.
+func (v *VsockClient) Ping() bool {
+	conn, err := net.DialTimeout("unix", v.socketPath, 2*time.Second)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(2 * time.Second))
+	if _, err = conn.Write([]byte("CONNECT 52\n")); err != nil {
+		return false
+	}
+	buf := make([]byte, 32)
+	n, err := conn.Read(buf)
+	if err != nil || n < 2 {
+		return false
+	}
+	return string(buf[:2]) == "OK"
+}
+
 func (v *VsockClient) Execute(code, language string, timeoutSec int) (*ExecuteResponse, error) {
 	// Connect to the Unix socket that Firecracker exposes for vsock
 	conn, err := net.DialTimeout("unix", v.socketPath, v.timeout)

@@ -8,7 +8,7 @@ import (
 	"backend/internal/middleware"
 	"backend/internal/queue"
 	"backend/internal/ratelimit"
-	"context"
+	"backend/internal/session"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -89,19 +89,34 @@ func main() {
 		MemMaxBytes: 512 * 1024 * 1024, // 512MB
 	}
 
-	// Attempt to create a snapshot template once at startup.
-	// If it fails (e.g. no KVM on macOS), both pools fall back to cold boot silently.
-	snapDir := filepath.Join(os.TempDir(), "fc-snapshots")
-	var template *firecracker.SnapshotTemplate
-	if tmpl, err := vmManager.CreateTemplate(context.Background(), config, snapDir); err != nil {
-		slog.Warn("snapshot template creation failed, using cold boot", "err", err)
-	} else {
-		template = tmpl
+	freeSessionCgroupCfg := cgroup.Config{
+		CPUQuotaUS:  100_000, // 1 core
+		CPUPeriodUS: 100_000,
+		MemMaxBytes: 512 * 1024 * 1024, // 512MB
+	}
+	premiumSessionCgroupCfg := cgroup.Config{
+		CPUQuotaUS:  400_000, // 4 cores
+		CPUPeriodUS: 100_000,
+		MemMaxBytes: 1024 * 1024 * 1024, // 1GB
 	}
 
-	freePool := firecracker.NewVMPoolWithSnapshot(3, config, vmManager, freeCgroupCfg, template)
-	premiumPool := firecracker.NewVMPoolWithSnapshot(3, config, vmManager, premiumCgroupCfg, template)
+	// Snapshot restore is disabled: Firecracker rebinds the vsock socket between
+	// connections, so the rename trick breaks subsequent connections. Cold boot
+	// with warm pool gives the same first-request latency benefit.
+	// TODO: implement per-slot snapshots (unique vsock path per slot) to re-enable.
+	freePool := firecracker.NewVMPoolWithSnapshot(3, config, vmManager, freeCgroupCfg, nil)
+	premiumPool := firecracker.NewVMPoolWithSnapshot(3, config, vmManager, premiumCgroupCfg, nil)
 	slog.Info("VM pools initialized")
+
+	sessionMgr := session.NewManager(
+		vmManager,
+		nil,
+		config,
+		freeSessionCgroupCfg,
+		premiumSessionCgroupCfg,
+		50,
+		15*time.Minute,
+	)
 
 	freeExec := firecracker.NewFirecrackerExecutor(vmManager)
 	freeExec.Pool = freePool
@@ -118,6 +133,8 @@ func main() {
 
 	http.HandleFunc("/health", healthHandler)
 	http.HandleFunc("/execute", handler.ExecuteHandler(freeQueue, premiumQueue, freeLimiter, premiumLimiter))
+	http.HandleFunc("/session", handler.SessionHandler(sessionMgr))
+	http.HandleFunc("/session/", handler.SessionHandler(sessionMgr))
 
 	metricsHandler := func(w http.ResponseWriter, r *http.Request) {
 		snap := metrics.GetSnapshot()

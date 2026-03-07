@@ -82,6 +82,7 @@ type SnapshotTemplate struct {
 	SnapPath   string // VM + device state file
 	MemPath    string // guest RAM file
 	RootfsPath string // kept so restored VMs can clone a fresh copy
+	VsockPath  string // vsock UDS path baked into the snapshot — must be deleted before each restore
 }
 
 type SnapshotCreateRequest struct {
@@ -107,6 +108,7 @@ type FireCrackerManager struct {
 	Vms        map[string]*MicroVM
 	mu         sync.RWMutex
 	nextCID    atomic.Uint32
+	restoreMu  sync.Mutex // serializes snapshot restores — prevents vsock binding conflicts
 }
 
 type VMManager interface {
@@ -233,7 +235,7 @@ func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
 		firecrackerBinary = "/app/firecracker/firecracker-v1.7.0-aarch64"
 	}
 
-	cmd := exec.CommandContext(ctx, firecrackerBinary, "--api-sock", vm.SocketPath)
+	cmd := exec.Command(firecrackerBinary, "--api-sock", vm.SocketPath)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -382,6 +384,12 @@ func (f *FireCrackerManager) Snapshot(ctx context.Context, vmID, snapPath, memPa
 }
 
 func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig, tmpl *SnapshotTemplate) (*MicroVM, error) {
+	// Serialize restores: each snapshot restore binds a new vsock path, but the
+	// Firecracker process needs the API socket to come up before we can issue
+	// the load request. Running restores concurrently races on vsock binding.
+	f.restoreMu.Lock()
+	defer f.restoreMu.Unlock()
+
 	vmID := uuid.New().String()
 	socketPath := f.getSocketPath(vmID)
 	vsockPath := filepath.Join(f.SocketDir, fmt.Sprintf("vsock-%s.sock", vmID))
@@ -397,7 +405,7 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 		firecrackerBinary = "/app/firecracker/firecracker-v1.7.0-aarch64"
 	}
 	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, firecrackerBinary, "--api-sock", socketPath)
+	cmd := exec.Command(firecrackerBinary, "--api-sock", socketPath)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
@@ -420,6 +428,11 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 		},
 	}
 
+	// Delete the stale vsock socket file baked into the snapshot.
+	// Firecracker tries to bind that path during snapshot/load. If the file
+	// still exists from a previous (failed) restore, bind fails with EADDRINUSE.
+	os.Remove(tmpl.VsockPath)
+
 	// Load snapshot paused — don't resume yet
 	if err := f.putJSON(client, "http://localhost/snapshot/load", SnapshotLoadRequest{
 		SnapshotPath:        tmpl.SnapPath,
@@ -431,31 +444,31 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 		return nil, fmt.Errorf("snapshot load failed: %w", err)
 	}
 
-	// Update rootfs backend to fresh copy
-	if err := f.putJSON(client, "http://localhost/drives/rootfs", Drive{
-		DriveId:      "rootfs",
-		PathOnHost:   rootfsCopy,
-		IsRootDevice: true,
-		IsReadOnly:   false,
+	// Update rootfs backend to fresh copy.
+	// After snapshot/load, PUT /drives is rejected ("not supported after starting the microVM").
+	// PATCH /drives/{id} is the runtime path-swap endpoint — only path_on_host is required.
+	if err := f.patchJSON(client, "http://localhost/drives/rootfs", map[string]string{
+		"drive_id":     "rootfs",
+		"path_on_host": rootfsCopy,
 	}); err != nil {
 		cmd.Process.Kill()
 		return nil, fmt.Errorf("drive update failed: %w", err)
 	}
 
-	// Update vsock to new unique UDS path + CID
-	guestCID := int(f.nextCID.Add(1)) + 2
-	if err := f.putJSON(client, "http://localhost/vsock", VsockConfig{
-		GuestCID: guestCID,
-		UDSPath:  vsockPath,
-	}); err != nil {
-		cmd.Process.Kill()
-		return nil, fmt.Errorf("vsock update failed: %w", err)
-	}
-
-	// Resume VM
+	// Resume VM first — Firecracker re-binds the vsock socket during resume.
+	// We must rename AFTER resume so the re-bind succeeds on the original path.
 	if err := f.patchJSON(client, "http://localhost/vm", VMStateChange{State: "Resumed"}); err != nil {
 		cmd.Process.Kill()
 		return nil, fmt.Errorf("resume failed: %w", err)
+	}
+
+	// Rename the vsock socket file to a unique per-VM path.
+	// Firecracker holds the listening fd — renaming the file on disk gives this
+	// VM a unique path while the fd stays intact. The next restore can then
+	// delete and rebind the template path cleanly.
+	if err := os.Rename(tmpl.VsockPath, vsockPath); err != nil {
+		cmd.Process.Kill()
+		return nil, fmt.Errorf("vsock rename failed: %w", err)
 	}
 
 	vm := &MicroVM{
@@ -533,5 +546,6 @@ func (f *FireCrackerManager) CreateTemplate(ctx context.Context, cfg VMConfig, s
 		SnapPath:   snapPath,
 		MemPath:    memPath,
 		RootfsPath: rootfsPath,
+		VsockPath:  vm.VsockPath,
 	}, nil
 }

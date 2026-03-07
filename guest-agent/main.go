@@ -196,48 +196,56 @@ func executeCode(req ExecutionRequest) ExecutionResponse {
 
 }
 
-func main() {
+func listenVsock() (int, error) {
 	fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM, 0)
-
 	if err != nil {
-		log.Fatal(err)
+		return -1, fmt.Errorf("socket: %w", err)
 	}
-
-	defer unix.Close(fd)
-
-	addr := &unix.SockaddrVM{
-		CID:  unix.VMADDR_CID_ANY,
-		Port: 52,
+	addr := &unix.SockaddrVM{CID: unix.VMADDR_CID_ANY, Port: 52}
+	if err = unix.Bind(fd, addr); err != nil {
+		unix.Close(fd)
+		return -1, fmt.Errorf("bind: %w", err)
 	}
+	if err = unix.Listen(fd, 1); err != nil {
+		unix.Close(fd)
+		return -1, fmt.Errorf("listen: %w", err)
+	}
+	return fd, nil
+}
 
-	err = unix.Bind(fd, addr)
+func main() {
+	fd, err := listenVsock()
 	if err != nil {
-		log.Fatalf("failed to bind: %v", err)
-	}
-	err = unix.Listen(fd, 1)
-	if err != nil {
-		log.Fatalf("failed to listen: %v", err)
+		log.Fatalf("failed to listen on vsock: %v", err)
 	}
 
 	log.Println("Guest agent ready, waiting for connections...")
 
-	// Loop forever to handle connections and prevent process exit
 	for {
 		log.Println("Waiting for next connection...")
 
 		connFd, _, err := unix.Accept(fd)
 		if err != nil {
-			log.Printf("ERROR: Failed to accept connection: %v", err)
+			// After a VM snapshot restore the virtio-vsock transport is reset.
+			// The old fd becomes invalid — Accept will keep failing on it.
+			// Close it and create a fresh socket so we can accept again.
+			log.Printf("Accept failed (%v) — reinitializing vsock listener", err)
+			unix.Close(fd)
+			for {
+				fd, err = listenVsock()
+				if err == nil {
+					break
+				}
+				log.Printf("reinit failed: %v — retrying in 100ms", err)
+				time.Sleep(100 * time.Millisecond)
+			}
+			log.Println("vsock listener reinitialized")
 			continue
 		}
 
 		log.Println("Connection accepted, handling request...")
-
 		handleConnection(connFd)
-
-		// Close the connection after handling
 		unix.Close(connFd)
-
 		log.Println("Request completed, ready for next connection")
 	}
 }
