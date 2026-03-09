@@ -116,7 +116,7 @@ type FireCrackerManager struct {
 	mu         sync.RWMutex
 	nextCID    atomic.Uint32
 	nextNetIdx atomic.Uint32 // for TAP subnet allocation: index N → 172.16.N.0/30
-	restoreMu  sync.Mutex   // serializes snapshot restores — prevents vsock binding conflicts
+	restoreMu  sync.Mutex    // serializes snapshot restores — prevents vsock binding conflicts
 }
 
 type VMManager interface {
@@ -336,6 +336,7 @@ func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
 
 	// Create TAP device on the host and wire it into Firecracker.
 	// Non-fatal: VM boots without network if TAP setup fails (e.g. no permissions).
+	// NETWORK CARD
 	if err := createTAP(tapName, hostIP); err != nil {
 		slog.Warn("TAP creation failed, VM will boot without network", "tap", tapName, "err", err)
 	} else {
