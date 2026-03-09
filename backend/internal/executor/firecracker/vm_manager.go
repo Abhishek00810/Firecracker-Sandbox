@@ -49,10 +49,17 @@ type MicroVM struct {
 	State      VMState
 	VsockPath  string
 	SocketPath string
+	TapName    string // host TAP device name, empty if network setup failed
 	CreatedAt  time.Time
 	Process    *exec.Cmd
 	Stdout     *bytes.Buffer
 	Stderr     *bytes.Buffer
+}
+
+type NetworkInterface struct {
+	IfaceID     string `json:"iface_id"`
+	GuestMAC    string `json:"guest_mac"`
+	HostDevName string `json:"host_dev_name"`
 }
 
 type BootSource struct {
@@ -108,7 +115,8 @@ type FireCrackerManager struct {
 	Vms        map[string]*MicroVM
 	mu         sync.RWMutex
 	nextCID    atomic.Uint32
-	restoreMu  sync.Mutex // serializes snapshot restores — prevents vsock binding conflicts
+	nextNetIdx atomic.Uint32 // for TAP subnet allocation: index N → 172.16.N.0/30
+	restoreMu  sync.Mutex   // serializes snapshot restores — prevents vsock binding conflicts
 }
 
 type VMManager interface {
@@ -126,6 +134,34 @@ func NewFirecrackerManager(socketDir, assetsPath string) *FireCrackerManager {
 		AssetsPath: assetsPath,
 		Vms:        make(map[string]*MicroVM),
 	}
+}
+
+// allocateNetwork returns unique TAP/IP values for a new VM.
+// Index N → host: 172.16.N.1/30, guest: 172.16.N.2/30, tap: fctapN
+// Supports up to 256 concurrent VMs (one /30 subnet each).
+func (f *FireCrackerManager) allocateNetwork() (tapName, hostIP, guestIP, mac string) {
+	idx := int(f.nextNetIdx.Add(1) - 1)
+	tapName = fmt.Sprintf("fctap%d", idx)
+	hostIP = fmt.Sprintf("172.16.%d.1", idx)
+	guestIP = fmt.Sprintf("172.16.%d.2", idx)
+	mac = fmt.Sprintf("AA:FC:00:00:%02X:%02X", idx>>8, idx&0xFF)
+	return
+}
+
+// createTAP creates a host-side TAP device and assigns it the given /30 host IP.
+func createTAP(tapName, hostIP string) error {
+	if out, err := exec.Command("ip", "tuntap", "add", tapName, "mode", "tap").CombinedOutput(); err != nil {
+		return fmt.Errorf("create TAP %s: %w: %s", tapName, err, out)
+	}
+	if out, err := exec.Command("ip", "addr", "add", hostIP+"/30", "dev", tapName).CombinedOutput(); err != nil {
+		exec.Command("ip", "link", "delete", tapName).Run()
+		return fmt.Errorf("assign IP to TAP %s: %w: %s", tapName, err, out)
+	}
+	if out, err := exec.Command("ip", "link", "set", tapName, "up").CombinedOutput(); err != nil {
+		exec.Command("ip", "link", "delete", tapName).Run()
+		return fmt.Errorf("bring up TAP %s: %w: %s", tapName, err, out)
+	}
+	return nil
 }
 
 func (f *FireCrackerManager) getSocketPath(vmID string) string {
@@ -230,6 +266,9 @@ func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
 		return fmt.Errorf("VM %s not found", vmID)
 	}
 
+	// Allocate network config upfront so IPs can be baked into boot args.
+	tapName, hostIP, guestIP, mac := f.allocateNetwork()
+
 	firecrackerBinary := os.Getenv("FIRECRACKER_BINARY")
 	if firecrackerBinary == "" {
 		firecrackerBinary = "/app/firecracker/firecracker-v1.7.0-aarch64"
@@ -261,9 +300,12 @@ func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
 		},
 	}
 
+	// Include guest network params in boot args so the guest-agent can bring
+	// up eth0 without any external coordination.
+	bootArgs := vm.Config.BootArgs + fmt.Sprintf(" guestip=%s gwip=%s", guestIP, hostIP)
 	if err := f.putJSON(client, "http://localhost/boot-source", BootSource{
 		KernelImagePath: vm.Config.KernelPath,
-		BootArgs:        vm.Config.BootArgs,
+		BootArgs:        bootArgs,
 	}); err != nil {
 		return fmt.Errorf("failed to set boot source: %w", err)
 	}
@@ -290,6 +332,23 @@ func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
 		UDSPath:  vm.VsockPath,
 	}); err != nil {
 		return fmt.Errorf("failed to set vsock: %w", err)
+	}
+
+	// Create TAP device on the host and wire it into Firecracker.
+	// Non-fatal: VM boots without network if TAP setup fails (e.g. no permissions).
+	if err := createTAP(tapName, hostIP); err != nil {
+		slog.Warn("TAP creation failed, VM will boot without network", "tap", tapName, "err", err)
+	} else {
+		if err := f.putJSON(client, "http://localhost/network-interfaces/eth0", NetworkInterface{
+			IfaceID:     "eth0",
+			GuestMAC:    mac,
+			HostDevName: tapName,
+		}); err != nil {
+			slog.Warn("failed to configure Firecracker network interface", "tap", tapName, "err", err)
+			exec.Command("ip", "link", "delete", tapName).Run()
+		} else {
+			vm.TapName = tapName
+		}
 	}
 
 	if err := f.putJSON(client, "http://localhost/actions", map[string]string{"action_type": "InstanceStart"}); err != nil {
@@ -352,6 +411,13 @@ func (f *FireCrackerManager) Destroy(ctx context.Context, vmID string) error {
 	os.Remove(vm.SocketPath)
 	os.Remove(vm.VsockPath)
 	os.Remove(vm.Config.RootfsPath) // delete the VM-specific rootfs copy
+
+	// Delete the TAP device allocated for this VM.
+	if vm.TapName != "" {
+		if out, err := exec.Command("ip", "link", "delete", vm.TapName).CombinedOutput(); err != nil {
+			slog.Warn("failed to delete TAP device", "tap", vm.TapName, "err", err, "output", string(out))
+		}
+	}
 
 	return nil
 }

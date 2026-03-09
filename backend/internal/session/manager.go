@@ -140,6 +140,7 @@ func (m *Manager) Execute(ctx context.Context, sessionID, code, language string)
 
 	return executor.ExecutionResult{
 		Output:            output,
+		Duration:          resp.Duration,
 		ExitCode:          int64(resp.ExitCode),
 		TerminationReason: "success",
 	}, nil

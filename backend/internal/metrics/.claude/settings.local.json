@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go build:*)",
+      "Bash(go vet:*)",
+      "Bash(git commit:*)",
+      "WebSearch",
+      "WebFetch(domain:modal.com)",
+      "WebFetch(domain:northflank.com)",
+      "WebFetch(domain:blog.replit.com)",
+      "WebFetch(domain:brooker.co.za)",
+      "WebFetch(domain:blog.cloudflare.com)",
+      "WebFetch(domain:www.together.ai)",
+      "WebFetch(domain:fly.io)",
+      "WebFetch(domain:e2b.dev)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:memo.d.foundation)"
+    ]
+  }
+}

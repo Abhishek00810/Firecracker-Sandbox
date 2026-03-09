@@ -1,12 +1,16 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"os/exec"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -33,6 +37,227 @@ type ExecutionResponse struct {
 	Duration float64 `json:"duration"`
 }
 
+// ─── Kernel Bridge ────────────────────────────────────────────────────────────
+
+// KernelBridge wraps a long-lived kernel_bridge.py process for one language.
+// Requests are serialized by the session manager (sess.mu) so no extra
+// locking is needed here.
+type KernelBridge struct {
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdout *bufio.Scanner
+}
+
+func newKernelBridge(language string) (*KernelBridge, error) {
+	cmd := exec.Command("/usr/bin/python3", "/usr/local/bin/kernel_bridge.py", language)
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("stdin pipe: %w", err)
+	}
+
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("stdout pipe: %w", err)
+	}
+
+	cmd.Stderr = log.Writer()
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start kernel_bridge.py: %w", err)
+	}
+
+	log.Printf("kernel bridge started language=%s pid=%d", language, cmd.Process.Pid)
+
+	return &KernelBridge{
+		cmd:    cmd,
+		stdin:  stdin,
+		stdout: bufio.NewScanner(stdoutPipe),
+	}, nil
+}
+
+func (kb *KernelBridge) execute(code string, timeoutSec int) (*ExecutionResponse, error) {
+	req := map[string]interface{}{
+		"code":    code,
+		"timeout": timeoutSec,
+	}
+	data, _ := json.Marshal(req)
+	data = append(data, '\n')
+
+	if _, err := kb.stdin.Write(data); err != nil {
+		return nil, fmt.Errorf("write to bridge: %w", err)
+	}
+
+	if !kb.stdout.Scan() {
+		if err := kb.stdout.Err(); err != nil {
+			return nil, fmt.Errorf("bridge stdout: %w", err)
+		}
+		return nil, fmt.Errorf("bridge process closed")
+	}
+
+	var resp ExecutionResponse
+	if err := json.Unmarshal(kb.stdout.Bytes(), &resp); err != nil {
+		return nil, fmt.Errorf("decode bridge response: %w", err)
+	}
+
+	return &resp, nil
+}
+
+// ─── Kernel Manager ───────────────────────────────────────────────────────────
+
+// kernelLanguages are routed through kernel_bridge.py for persistent state.
+var kernelLanguages = map[string]bool{
+	"python": true,
+	"node":   true,
+}
+
+var (
+	kernelsMu sync.Mutex
+	kernels   = map[string]*KernelBridge{}
+)
+
+func getOrStartKernel(language string) (*KernelBridge, error) {
+	kernelsMu.Lock()
+	defer kernelsMu.Unlock()
+
+	if kb, ok := kernels[language]; ok {
+		return kb, nil
+	}
+
+	kb, err := newKernelBridge(language)
+	if err != nil {
+		return nil, err
+	}
+
+	kernels[language] = kb
+	return kb, nil
+}
+
+func evictKernel(language string) {
+	kernelsMu.Lock()
+	delete(kernels, language)
+	kernelsMu.Unlock()
+}
+
+// ─── Execution Router ─────────────────────────────────────────────────────────
+
+func executeCode(req ExecutionRequest) ExecutionResponse {
+	startTime := time.Now()
+
+	// python/node → persistent Jupyter kernel (state survives between calls)
+	// bash        → direct exec (new process per call, no state)
+	if kernelLanguages[req.Language] {
+		return executeViaKernel(req, startTime)
+	}
+	return executeDirect(req, startTime)
+}
+
+func executeViaKernel(req ExecutionRequest, startTime time.Time) ExecutionResponse {
+	timeout := 30
+	if req.Timeout > 0 {
+		timeout = req.Timeout
+		if timeout > 30 {
+			timeout = 30
+		}
+	}
+
+	kb, err := getOrStartKernel(req.Language)
+	if err != nil {
+		log.Printf("kernel start failed language=%s err=%v", req.Language, err)
+		return ExecutionResponse{
+			Stderr:   fmt.Sprintf("failed to start kernel: %v", err),
+			ExitCode: -1,
+			Duration: time.Since(startTime).Seconds(),
+		}
+	}
+
+	resp, err := kb.execute(req.Code, timeout)
+	if err != nil {
+		// kernel died — evict so next request restarts it
+		evictKernel(req.Language)
+		log.Printf("kernel execution failed language=%s err=%v — evicted", req.Language, err)
+		return ExecutionResponse{
+			Stderr:   fmt.Sprintf("kernel error: %v", err),
+			ExitCode: -1,
+			Duration: time.Since(startTime).Seconds(),
+		}
+	}
+
+	resp.Duration = time.Since(startTime).Seconds()
+	return *resp
+}
+
+func executeDirect(req ExecutionRequest, startTime time.Time) ExecutionResponse {
+	var cmd *exec.Cmd
+
+	// Use absolute paths since we're running as PID 1 without proper PATH
+	switch req.Language {
+	case "bash":
+		cmd = exec.Command("/bin/bash", "-c", req.Code)
+	default:
+		return ExecutionResponse{
+			Stderr:   fmt.Sprintf("unsupported language: %s", req.Language),
+			ExitCode: 1,
+			Duration: time.Since(startTime).Seconds(),
+		}
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	if err := cmd.Start(); err != nil {
+		return ExecutionResponse{
+			Stderr:   fmt.Sprintf("failed to start: %v", err),
+			ExitCode: -1,
+			Duration: time.Since(startTime).Seconds(),
+		}
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	timeout := DefaultTimeout
+	if req.Timeout > 0 {
+		timeout = time.Duration(req.Timeout) * time.Second
+		if timeout > MaxTimeout {
+			timeout = MaxTimeout
+		}
+	}
+
+	exitCode := 0
+	select {
+	case err := <-done:
+		if err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				exitCode = exitErr.ExitCode()
+			} else {
+				exitCode = -1
+			}
+		}
+	case <-time.After(timeout):
+		log.Printf("process timeout after %v, killing...", timeout)
+		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		cmd.Wait()
+		return ExecutionResponse{
+			Stdout:   stdout.String(),
+			Stderr:   stderr.String() + fmt.Sprintf("\n[Timeout: Process killed after %v]", timeout),
+			ExitCode: -1,
+			Duration: time.Since(startTime).Seconds(),
+		}
+	}
+
+	return ExecutionResponse{
+		Stdout:   stdout.String(),
+		Stderr:   stderr.String(),
+		ExitCode: exitCode,
+		Duration: time.Since(startTime).Seconds(),
+	}
+}
+
+// ─── Vsock Listener ───────────────────────────────────────────────────────────
+
 // fdConn wraps a file descriptor to implement io.Reader/Writer
 type fdConn struct {
 	fd int
@@ -54,146 +279,26 @@ func (c *fdConn) Write(p []byte) (n int, err error) {
 }
 
 func handleConnection(connFd int) {
-	// NOTE: Connection is closed by caller, not here
-
-	// wrap fd into a file easier reading
 	conn := &fdConn{fd: connFd}
 
 	var req ExecutionRequest
-	decoder := json.NewDecoder(conn)
-
-	log.Println("About to decode JSON request...")
-	if err := decoder.Decode(&req); err != nil {
-		log.Printf("ERROR: Failed to decode request: %v", err)
-		// Send error response instead of just returning
-		errResp := ExecutionResponse{
-			Stdout:   "",
-			Stderr:   fmt.Sprintf("Failed to decode request: %v", err),
+	log.Println("waiting for request...")
+	if err := json.NewDecoder(conn).Decode(&req); err != nil {
+		log.Printf("decode request: %v", err)
+		json.NewEncoder(conn).Encode(ExecutionResponse{
+			Stderr:   fmt.Sprintf("failed to decode request: %v", err),
 			ExitCode: -1,
-			Duration: 0,
-		}
-		encoder := json.NewEncoder(conn)
-		encoder.Encode(errResp)
+		})
 		return
 	}
 
-	log.Printf("Received request: language=%s, code_len=%d", req.Language, len(req.Code))
-
+	log.Printf("execute language=%s code_len=%d", req.Language, len(req.Code))
 	resp := executeCode(req)
+	log.Printf("done exit_code=%d duration=%.2fs", resp.ExitCode, resp.Duration)
 
-	log.Printf("Execution completed, sending response...")
-
-	encoder := json.NewEncoder(conn)
-	err := encoder.Encode(resp)
-	if err != nil {
-		log.Printf("ERROR: Failed to encode response: %v", err)
-		return
+	if err := json.NewEncoder(conn).Encode(resp); err != nil {
+		log.Printf("encode response: %v", err)
 	}
-
-	log.Printf("Response sent successfully: exit_code=%d, stdout_len=%d, stderr_len=%d", resp.ExitCode, len(resp.Stdout), len(resp.Stderr))
-}
-
-func executeCode(req ExecutionRequest) ExecutionResponse {
-	startTime := time.Now()
-
-	var cmd *exec.Cmd
-
-	// route to correct runtime based on language
-	// Use absolute paths since we're running as PID 1 without proper PATH
-	switch req.Language {
-	case "python":
-		cmd = exec.Command("/usr/bin/python3", "-c", req.Code)
-	case "node":
-		cmd = exec.Command("/usr/bin/node", "-e", req.Code)
-	case "bash":
-		cmd = exec.Command("/bin/bash", "-c", req.Code)
-	default:
-		return ExecutionResponse{
-			Stdout:   "",
-			Stderr:   fmt.Sprintf("Unsupported language: %s", req.Language),
-			ExitCode: 1,
-			Duration: 0.0,
-		}
-	}
-
-	var stdout, stderr bytes.Buffer
-
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true,
-	}
-
-	if err := cmd.Start(); err != nil {
-		return ExecutionResponse{
-			Stdout:   "",
-			Stderr:   fmt.Sprintf("Failed to start: %v", err),
-			ExitCode: -1,
-			Duration: time.Since(startTime).Seconds(),
-		}
-	}
-
-	done := make(chan error, 1)
-
-	//timeout logic
-
-	timeout := DefaultTimeout
-
-	if req.Timeout > 0 {
-		timeout = time.Duration(req.Timeout) * time.Second
-
-		if timeout > MaxTimeout {
-			timeout = MaxTimeout
-		}
-	}
-
-	go func() {
-		done <- cmd.Wait()
-	}()
-
-	exitCode := 0
-
-	select {
-	case err := <-done:
-		if err != nil {
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				exitCode = exitErr.ExitCode()
-			} else {
-				exitCode = -1
-			}
-		} else {
-			exitCode = 0
-		}
-	case <-time.After(timeout):
-		// TIMEOUT - Kill process group
-		log.Printf("Process timeout after %v, killing...", timeout)
-
-		// Kill entire process group (negative PID = process group)
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
-			log.Printf("Failed to kill process group: %v", err)
-		}
-
-		// Wait for cleanup
-		cmd.Wait()
-
-		return ExecutionResponse{
-			Stdout:   stdout.String(),
-			Stderr:   stderr.String() + fmt.Sprintf("\n[Timeout: Process killed after %v]", timeout),
-			ExitCode: -1,
-			Duration: time.Since(startTime).Seconds(),
-		}
-	}
-
-	duration := time.Since(startTime).Seconds()
-
-	return ExecutionResponse{
-		Stdout:   stdout.String(),
-		Stderr:   stderr.String(),
-		ExitCode: exitCode,
-		Duration: duration,
-	}
-
 }
 
 func listenVsock() (int, error) {
@@ -213,23 +318,59 @@ func listenVsock() (int, error) {
 	return fd, nil
 }
 
+// parseBootParam reads a key=value pair from the kernel cmdline.
+func parseBootParam(key string) string {
+	data, err := os.ReadFile("/proc/cmdline")
+	if err != nil {
+		return ""
+	}
+	for _, field := range strings.Fields(string(data)) {
+		if strings.HasPrefix(field, key+"=") {
+			return strings.TrimPrefix(field, key+"=")
+		}
+	}
+	return ""
+}
+
 func main() {
+	// bring up loopback interface so 127.0.0.1 works inside the VM
+	// required for ZMQ (jupyter kernel ↔ kernel_bridge.py communicate via TCP localhost)
+	// 1. assign 127.0.0.1/8 to lo (may already exist, ignore error)
+	exec.Command("/sbin/ip", "addr", "add", "127.0.0.1/8", "dev", "lo").Run()
+	// 2. bring the interface up
+	if out, err := exec.Command("/sbin/ip", "link", "set", "lo", "up").CombinedOutput(); err != nil {
+		log.Printf("warning: failed to bring up lo: %v — %s", err, out)
+	} else {
+		log.Println("loopback interface up (127.0.0.1)")
+	}
+
+	// bring up eth0 for outbound internet access (pip install, etc.)
+	// IPs are passed by the host via kernel boot args: guestip= gwip=
+	guestIP := parseBootParam("guestip")
+	gwIP := parseBootParam("gwip")
+	if guestIP != "" && gwIP != "" {
+		exec.Command("/sbin/ip", "addr", "add", guestIP+"/30", "dev", "eth0").Run()
+		exec.Command("/sbin/ip", "link", "set", "eth0", "up").Run()
+		exec.Command("/sbin/ip", "route", "add", "default", "via", gwIP).Run()
+		if err := os.WriteFile("/etc/resolv.conf", []byte("nameserver 8.8.8.8\n"), 0644); err != nil {
+			log.Printf("warning: failed to write resolv.conf: %v", err)
+		}
+		log.Printf("network up: guest=%s gateway=%s", guestIP, gwIP)
+	} else {
+		log.Println("no network config in boot args, eth0 not configured")
+	}
+
 	fd, err := listenVsock()
 	if err != nil {
 		log.Fatalf("failed to listen on vsock: %v", err)
 	}
 
-	log.Println("Guest agent ready, waiting for connections...")
+	log.Println("guest agent ready, waiting for connections...")
 
 	for {
-		log.Println("Waiting for next connection...")
-
 		connFd, _, err := unix.Accept(fd)
 		if err != nil {
-			// After a VM snapshot restore the virtio-vsock transport is reset.
-			// The old fd becomes invalid — Accept will keep failing on it.
-			// Close it and create a fresh socket so we can accept again.
-			log.Printf("Accept failed (%v) — reinitializing vsock listener", err)
+			log.Printf("accept failed (%v) — reinitializing vsock listener", err)
 			unix.Close(fd)
 			for {
 				fd, err = listenVsock()
@@ -243,9 +384,7 @@ func main() {
 			continue
 		}
 
-		log.Println("Connection accepted, handling request...")
 		handleConnection(connFd)
 		unix.Close(connFd)
-		log.Println("Request completed, ready for next connection")
 	}
 }

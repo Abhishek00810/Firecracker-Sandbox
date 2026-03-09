@@ -31,7 +31,7 @@ type ExecuteResponse struct {
 func NewVsockClient(socketPath string) *VsockClient {
 	return &VsockClient{
 		socketPath: socketPath,
-		timeout:    20 * time.Second,
+		timeout:    60 * time.Second,
 	}
 }
 
