@@ -573,7 +573,7 @@ func (f *FireCrackerManager) CreateTemplate(ctx context.Context, cfg VMConfig, s
 		return nil, err
 	}
 
-	// Wait for vsock socket (guest agent ready) — up to 15s
+	// Wait for vsock socket (guest agent ready) — up to 15seconds
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(vm.VsockPath); err == nil {
