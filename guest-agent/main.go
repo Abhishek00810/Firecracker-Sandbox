@@ -318,18 +318,27 @@ func listenVsock() (int, error) {
 	return fd, nil
 }
 
-// parseBootParam reads a key=value pair from the kernel cmdline.
-func parseBootParam(key string) string {
-	data, err := os.ReadFile("/proc/cmdline")
+// readNetworkConfig reads guest IP and gateway from /etc/vm-network.env,
+// which the host writes into the rootfs copy before Firecracker starts.
+func readNetworkConfig() (guestIP, gwIP string) {
+	data, err := os.ReadFile("/etc/vm-network.env")
 	if err != nil {
-		return ""
+		log.Printf("no /etc/vm-network.env: %v", err)
+		return "", ""
 	}
-	for _, field := range strings.Fields(string(data)) {
-		if strings.HasPrefix(field, key+"=") {
-			return strings.TrimPrefix(field, key+"=")
+	for _, line := range strings.Split(string(data), "\n") {
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		switch parts[0] {
+		case "GUESTIP":
+			guestIP = parts[1]
+		case "GWIP":
+			gwIP = parts[1]
 		}
 	}
-	return ""
+	return
 }
 
 func main() {
@@ -345,9 +354,8 @@ func main() {
 	}
 
 	// bring up eth0 for outbound internet access (pip install, etc.)
-	// IPs are passed by the host via kernel boot args: guestip= gwip=
-	guestIP := parseBootParam("guestip")
-	gwIP := parseBootParam("gwip")
+	// IPs are written into /etc/vm-network.env by the host before boot.
+	guestIP, gwIP := readNetworkConfig()
 	if guestIP != "" && gwIP != "" {
 		exec.Command("/sbin/ip", "addr", "add", guestIP+"/30", "dev", "eth0").Run()
 		exec.Command("/sbin/ip", "link", "set", "eth0", "up").Run()
@@ -357,7 +365,7 @@ func main() {
 		}
 		log.Printf("network up: guest=%s gateway=%s", guestIP, gwIP)
 	} else {
-		log.Println("no network config in boot args, eth0 not configured")
+		log.Println("no network config found, eth0 not configured")
 	}
 
 	fd, err := listenVsock()

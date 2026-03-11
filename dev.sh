@@ -54,9 +54,6 @@ cp kernel_bridge.py /mnt/usr/local/bin/kernel_bridge.py
 chmod +x /mnt/usr/local/bin/guest-agent
 chmod +x /mnt/usr/local/bin/kernel_bridge.py
 
-echo "==> installing python packages into rootfs..."
-chroot /mnt pip3 install --break-system-packages --no-cache-dir cowsay
-
 umount /mnt
 echo "==> rootfs updated"
 

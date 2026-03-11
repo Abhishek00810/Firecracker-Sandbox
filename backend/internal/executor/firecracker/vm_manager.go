@@ -148,6 +148,25 @@ func (f *FireCrackerManager) allocateNetwork() (tapName, hostIP, guestIP, mac st
 	return
 }
 
+// writeNetworkConfig mounts the VM's rootfs copy as a loop device, writes
+// /etc/vm-network.env with the guest IP and gateway, then unmounts.
+// The guest-agent reads this file at boot to configure eth0.
+func writeNetworkConfig(rootfsPath, guestIP, gwIP string) error {
+	mntDir := rootfsPath + ".mnt"
+	if err := os.MkdirAll(mntDir, 0755); err != nil {
+		return err
+	}
+	if out, err := exec.Command("/bin/mount", "-o", "loop", rootfsPath, mntDir).CombinedOutput(); err != nil {
+		os.Remove(mntDir)
+		return fmt.Errorf("mount rootfs: %w: %s", err, out)
+	}
+	content := fmt.Sprintf("GUESTIP=%s\nGWIP=%s\n", guestIP, gwIP)
+	writeErr := os.WriteFile(filepath.Join(mntDir, "etc", "vm-network.env"), []byte(content), 0644)
+	exec.Command("/bin/umount", mntDir).Run()
+	os.Remove(mntDir)
+	return writeErr
+}
+
 // createTAP creates a host-side TAP device and assigns it the given /30 host IP.
 func createTAP(tapName, hostIP string) error {
 	if out, err := exec.Command("ip", "tuntap", "add", tapName, "mode", "tap").CombinedOutput(); err != nil {
@@ -266,8 +285,14 @@ func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
 		return fmt.Errorf("VM %s not found", vmID)
 	}
 
-	// Allocate network config upfront so IPs can be baked into boot args.
+	// Allocate network config upfront so IPs can be written into the rootfs.
 	tapName, hostIP, guestIP, mac := f.allocateNetwork()
+
+	// Write guest IP + gateway into the rootfs copy so the guest-agent can
+	// configure eth0 at boot without needing /proc to be mounted.
+	if err := writeNetworkConfig(vm.Config.RootfsPath, guestIP, hostIP); err != nil {
+		slog.Warn("failed to write network config to rootfs, VM will boot without network", "err", err)
+	}
 
 	firecrackerBinary := os.Getenv("FIRECRACKER_BINARY")
 	if firecrackerBinary == "" {
@@ -300,12 +325,9 @@ func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
 		},
 	}
 
-	// Include guest network params in boot args so the guest-agent can bring
-	// up eth0 without any external coordination.
-	bootArgs := vm.Config.BootArgs + fmt.Sprintf(" guestip=%s gwip=%s", guestIP, hostIP)
 	if err := f.putJSON(client, "http://localhost/boot-source", BootSource{
 		KernelImagePath: vm.Config.KernelPath,
-		BootArgs:        bootArgs,
+		BootArgs:        vm.Config.BootArgs,
 	}); err != nil {
 		return fmt.Errorf("failed to set boot source: %w", err)
 	}
