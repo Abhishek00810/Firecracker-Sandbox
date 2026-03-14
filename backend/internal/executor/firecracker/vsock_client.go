@@ -57,30 +57,49 @@ func (v *VsockClient) Ping() bool {
 }
 
 func (v *VsockClient) Execute(code, language string, timeoutSec int) (*ExecuteResponse, error) {
-	// Connect to the Unix socket that Firecracker exposes for vsock
-	conn, err := net.DialTimeout("unix", v.socketPath, v.timeout)
+	// Retry the handshake up to 3 times with 100ms gaps.
+	// Firecracker's vsock proxy can transiently reject connections (EOF on
+	// handshake read) between consecutive requests — a brief wait resolves it.
+	// Retrying is safe here because code only executes AFTER a successful
+	// handshake, so a failed handshake means no code ran yet.
+	var (
+		conn net.Conn
+		err  error
+		buf  = make([]byte, 32)
+		n    int
+	)
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(100 * time.Millisecond)
+		}
 
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to vsock: %w", err)
+		conn, err = net.DialTimeout("unix", v.socketPath, v.timeout)
+		if err != nil {
+			continue
+		}
+
+		conn.SetDeadline(time.Now().Add(v.timeout))
+
+		if _, err = conn.Write([]byte("CONNECT 52\n")); err != nil {
+			conn.Close()
+			continue
+		}
+
+		n, err = conn.Read(buf)
+		if err != nil {
+			conn.Close()
+			continue
+		}
+
+		// Handshake succeeded — break and proceed with execution
+		break
 	}
-	defer conn.Close()
 
-	deadline := time.Now().Add(v.timeout)
-	conn.SetDeadline(deadline)
-
-	// CRITICAL: Send Firecracker vsock handshake to connect to guest port 52
-	// Format: "CONNECT <port>\n"
-	_, err = conn.Write([]byte("CONNECT 52\n"))
-	if err != nil {
-		return nil, fmt.Errorf("failed to send vsock handshake: %w", err)
-	}
-
-	// Read the response (should be "OK <port>\n" on success)
-	buf := make([]byte, 32)
-	n, err := conn.Read(buf)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read vsock handshake response: %w", err)
 	}
+	defer conn.Close()
+
 	response := string(buf[:n])
 	if len(response) < 2 || response[:2] != "OK" {
 		return nil, fmt.Errorf("vsock handshake failed: %s", response)
@@ -92,15 +111,12 @@ func (v *VsockClient) Execute(code, language string, timeoutSec int) (*ExecuteRe
 		Timeout:  timeoutSec,
 	}
 
-	encoder := json.NewEncoder(conn)
-	if err := encoder.Encode(req); err != nil {
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
 
 	var resp ExecuteResponse
-
-	decoder := json.NewDecoder(conn)
-	if err := decoder.Decode(&resp); err != nil {
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
