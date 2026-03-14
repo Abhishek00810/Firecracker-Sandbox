@@ -56,7 +56,6 @@ func (p *VMPool) addVM() error {
 	ctx := context.Background()
 	var vm *MicroVM
 	var err error
-
 	if p.template != nil {
 		vm, err = p.manager.LoadFromSnapshot(ctx, p.config, p.template)
 		if err != nil {
@@ -98,6 +97,13 @@ func (p *VMPool) addVM() error {
 	if !vsockReady {
 		return fmt.Errorf("vsock never became ready for VM %s", vm.ID)
 	}
+
+	// Warm up the Python kernel so the first real request is fast.
+	vsock := NewVsockClient(vm.VsockPath)
+	if _, err := vsock.Execute("pass", "python", 30); err != nil {
+		slog.Warn("kernel warmup failed", "vm_id", vm.ID, "err", err)
+	}
+	slog.Info("kernel warmed up", "vm_id", vm.ID)
 
 	var cg *cgroup.Cgroup
 	if vm.Process != nil && vm.Process.Process != nil {

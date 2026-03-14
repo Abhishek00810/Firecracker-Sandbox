@@ -9,6 +9,7 @@ import (
 	"backend/internal/queue"
 	"backend/internal/ratelimit"
 	"backend/internal/session"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -100,17 +101,24 @@ func main() {
 		MemMaxBytes: 1024 * 1024 * 1024, // 1GB
 	}
 
-	// Snapshot restore is disabled: Firecracker rebinds the vsock socket between
-	// connections, so the rename trick breaks subsequent connections. Cold boot
-	// with warm pool gives the same first-request latency benefit.
-	// TODO: implement per-slot snapshots (unique vsock path per slot) to re-enable.
-	freePool := firecracker.NewVMPoolWithSnapshot(3, config, vmManager, freeCgroupCfg, nil)
-	premiumPool := firecracker.NewVMPoolWithSnapshot(3, config, vmManager, premiumCgroupCfg, nil)
+	// Create a snapshot template once at startup: boot one VM, warm up kernels,
+	// freeze it. All pool VMs and sessions restore from this snapshot in ~100ms.
+	snapDir := filepath.Join(os.TempDir(), "fc-snapshots")
+	var template *firecracker.SnapshotTemplate
+	if tmpl, err := vmManager.CreateTemplate(context.Background(), config, snapDir); err != nil {
+		slog.Warn("snapshot template creation failed, falling back to cold boot", "err", err)
+	} else {
+		template = tmpl
+		slog.Info("snapshot template ready", "snap", tmpl.SnapPath)
+	}
+
+	freePool := firecracker.NewVMPoolWithSnapshot(3, config, vmManager, freeCgroupCfg, template)
+	premiumPool := firecracker.NewVMPoolWithSnapshot(3, config, vmManager, premiumCgroupCfg, template)
 	slog.Info("VM pools initialized")
 
 	sessionMgr := session.NewManager(
 		vmManager,
-		nil,
+		template,
 		config,
 		freeSessionCgroupCfg,
 		premiumSessionCgroupCfg,

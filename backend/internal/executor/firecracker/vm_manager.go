@@ -89,7 +89,8 @@ type SnapshotTemplate struct {
 	SnapPath   string // VM + device state file
 	MemPath    string // guest RAM file
 	RootfsPath string // kept so restored VMs can clone a fresh copy
-	VsockPath  string // vsock UDS path baked into the snapshot — must be deleted before each restore
+	VsockPath  string // vsock UDS path baked into snapshot — renamed after each restore
+	TapName    string // host TAP name baked into snapshot — recreated before each restore
 }
 
 type SnapshotCreateRequest struct {
@@ -517,12 +518,25 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 		},
 	}
 
-	// Delete the stale vsock socket file baked into the snapshot.
-	// Firecracker tries to bind that path during snapshot/load. If the file
-	// still exists from a previous (failed) restore, bind fails with EADDRINUSE.
+	// Allocate unique TAP/IP for this VM
+	tapName, hostIP, guestIP, _ := f.allocateNetwork()
+
+	// Recreate the template's TAP device (no IP yet — just needs to exist for Firecracker).
+	// The template cleanup deleted it so it's free to recreate.
+	// restoreMu ensures only one restore runs at a time, so no conflict on tmpl.TapName.
+	if tmpl.TapName != "" {
+		exec.Command("ip", "link", "delete", tmpl.TapName).Run() // clean stale if any
+		if out, err := exec.Command("ip", "tuntap", "add", tmpl.TapName, "mode", "tap").CombinedOutput(); err != nil {
+			slog.Warn("recreate template TAP failed, VM will boot without network", "tap", tmpl.TapName, "err", err, "out", string(out))
+		} else {
+			exec.Command("ip", "link", "set", tmpl.TapName, "up").Run()
+		}
+	}
+
+	// Clean up stale vsock from a previous failed restore
 	os.Remove(tmpl.VsockPath)
 
-	// Load snapshot paused — don't resume yet
+	// Load snapshot paused — Firecracker opens tmpl.TapName
 	if err := f.putJSON(client, "http://localhost/snapshot/load", SnapshotLoadRequest{
 		SnapshotPath:        tmpl.SnapPath,
 		MemFilePath:         tmpl.MemPath,
@@ -530,34 +544,65 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 		ResumeVM:            false,
 	}); err != nil {
 		cmd.Process.Kill()
+		exec.Command("ip", "link", "delete", tmpl.TapName).Run()
 		return nil, fmt.Errorf("snapshot load failed: %w", err)
 	}
 
-	// Update rootfs backend to fresh copy.
-	// After snapshot/load, PUT /drives is rejected ("not supported after starting the microVM").
-	// PATCH /drives/{id} is the runtime path-swap endpoint — only path_on_host is required.
+	// Update rootfs backend to fresh copy (PATCH, not PUT — PUT rejected after start)
 	if err := f.patchJSON(client, "http://localhost/drives/rootfs", map[string]string{
 		"drive_id":     "rootfs",
 		"path_on_host": rootfsCopy,
 	}); err != nil {
 		cmd.Process.Kill()
+		exec.Command("ip", "link", "delete", tmpl.TapName).Run()
 		return nil, fmt.Errorf("drive update failed: %w", err)
 	}
 
-	// Resume VM first — Firecracker re-binds the vsock socket during resume.
-	// We must rename AFTER resume so the re-bind succeeds on the original path.
+	// Resume — Firecracker binds tmpl.VsockPath and uses tmpl.TapName
 	if err := f.patchJSON(client, "http://localhost/vm", VMStateChange{State: "Resumed"}); err != nil {
 		cmd.Process.Kill()
+		exec.Command("ip", "link", "delete", tmpl.TapName).Run()
 		return nil, fmt.Errorf("resume failed: %w", err)
 	}
 
-	// Rename the vsock socket file to a unique per-VM path.
-	// Firecracker holds the listening fd — renaming the file on disk gives this
-	// VM a unique path while the fd stays intact. The next restore can then
-	// delete and rebind the template path cleanly.
+	// Rename template TAP → unique name so the next restore can recreate tmpl.TapName fresh.
+	// Then assign unique IP to the renamed TAP for proper host routing.
+	if tmpl.TapName != "" {
+		if out, err := exec.Command("ip", "link", "set", tmpl.TapName, "name", tapName).CombinedOutput(); err != nil {
+			slog.Warn("TAP rename failed", "from", tmpl.TapName, "to", tapName, "err", err, "out", string(out))
+			tapName = ""
+		} else {
+			exec.Command("ip", "addr", "add", hostIP+"/30", "dev", tapName).Run()
+		}
+	}
+
+	// Rename vsock → unique per-VM path (fd survives rename, Firecracker keeps listening)
 	if err := os.Rename(tmpl.VsockPath, vsockPath); err != nil {
 		cmd.Process.Kill()
+		if tapName != "" {
+			exec.Command("ip", "link", "delete", tapName).Run()
+		}
 		return nil, fmt.Errorf("vsock rename failed: %w", err)
+	}
+
+	// Reconfigure guest network via vsock — guest still has template's old IP baked in.
+	// We flush and reassign a unique IP so routing works correctly.
+	if tapName != "" {
+		vc := NewVsockClient(vsockPath)
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if vc.Ping() {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		netCmd := fmt.Sprintf(
+			"ip addr flush dev eth0; ip addr add %s/30 dev eth0; ip link set eth0 up; ip route add default via %s; echo nameserver 8.8.8.8 > /etc/resolv.conf",
+			guestIP, hostIP,
+		)
+		if _, err := vc.Execute(netCmd, "bash", 10); err != nil {
+			slog.Warn("guest network reconfiguration failed", "vm_id", vmID, "err", err)
+		}
 	}
 
 	vm := &MicroVM{
@@ -566,6 +611,7 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 		State:      VMStateRunning,
 		SocketPath: socketPath,
 		VsockPath:  vsockPath,
+		TapName:    tapName,
 		CreatedAt:  time.Now(),
 		Process:    cmd,
 		Stdout:     &stdout,
@@ -595,18 +641,30 @@ func (f *FireCrackerManager) CreateTemplate(ctx context.Context, cfg VMConfig, s
 		return nil, err
 	}
 
-	// Wait for vsock socket (guest agent ready) — up to 15
-	deadline := time.Now().Add(15 * time.Second)
+	// Wait until guest agent is actually accepting connections
+	vsock := NewVsockClient(vm.VsockPath)
+	vsockReady := false
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, err := os.Stat(vm.VsockPath); err == nil {
+		if vsock.Ping() {
+			vsockReady = true
 			break
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	if _, err := os.Stat(vm.VsockPath); err != nil {
+	if !vsockReady {
 		f.Destroy(ctx, vm.ID)
-		return nil, fmt.Errorf("vsock never appeared for template VM")
+		return nil, fmt.Errorf("vsock never became ready for template VM")
 	}
+
+	// Warm up Python and Node kernels — snapshot will capture them mid-run,
+	// so every restored VM starts with hot kernels and ~100ms first-run latency.
+	for _, lang := range []string{"python", "node"} {
+		if _, err := vsock.Execute("pass", lang, 30); err != nil {
+			slog.Warn("template: kernel warmup failed", "lang", lang, "err", err)
+		}
+	}
+	slog.Info("template kernels warmed up")
 
 	// Take snapshot
 	snapPath := filepath.Join(snapDir, "template.snap")
@@ -616,8 +674,11 @@ func (f *FireCrackerManager) CreateTemplate(ctx context.Context, cfg VMConfig, s
 		return nil, fmt.Errorf("snapshot failed: %w", err)
 	}
 
-	// Partial cleanup: kill process and remove sockets but KEEP rootfs copy
+	// Partial cleanup: kill process and remove sockets but KEEP rootfs copy.
+	// Also delete the TAP so it's free to be recreated for each restore.
 	rootfsPath := vm.Config.RootfsPath
+	tapName := vm.TapName
+	vsockPath := vm.VsockPath
 	f.mu.Lock()
 	vm.State = VMStateDestroyed
 	delete(f.Vms, vm.ID)
@@ -627,7 +688,10 @@ func (f *FireCrackerManager) CreateTemplate(ctx context.Context, cfg VMConfig, s
 		vm.Process.Wait()
 	}
 	os.Remove(vm.SocketPath)
-	os.Remove(vm.VsockPath)
+	os.Remove(vsockPath)
+	if tapName != "" {
+		exec.Command("ip", "link", "delete", tapName).Run()
+	}
 	// rootfsPath intentionally NOT removed — restored VMs will clone from it
 
 	slog.Info("snapshot template created", "snap", snapPath, "mem", memPath)
@@ -635,6 +699,7 @@ func (f *FireCrackerManager) CreateTemplate(ctx context.Context, cfg VMConfig, s
 		SnapPath:   snapPath,
 		MemPath:    memPath,
 		RootfsPath: rootfsPath,
-		VsockPath:  vm.VsockPath,
+		VsockPath:  vsockPath,
+		TapName:    tapName,
 	}, nil
 }

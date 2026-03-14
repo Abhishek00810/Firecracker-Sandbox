@@ -76,6 +76,22 @@ func (m *Manager) Create(ctx context.Context, tier string) (*Session, error) {
 		time.Sleep(200 * time.Millisecond)
 	}
 
+	// Warm up Python kernel so the first sess.run() is fast.
+	if _, err := vsockClient.Execute("pass", "python", 30); err != nil {
+		slog.Warn("session: python warmup failed", "vm_id", vm.ID, "err", err)
+	}
+
+	// Final ping — confirms guest is back at Accept and ready for user requests.
+	// Without this, sess.run() immediately after warmup can race with the guest
+	// cleaning up the last warmup connection.
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if vsockClient.Ping() {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
 	// pick cgroup config and tenant path based on tier
 	tenantID := "session-free"
 	cgroupCfg := m.freeCgroupCfg
