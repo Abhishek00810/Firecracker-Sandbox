@@ -1,0 +1,41 @@
+#!/bin/sh
+
+# Mount kernel virtual filesystems
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev
+
+# Wait up to 50s for lower block device to appear
+i=0
+while [ $i -lt 50 ]; do
+    if [ -b /dev/vda ]; then
+        break
+    fi
+    sleep 1
+    i=$((i+1))
+done
+
+# Create mount points
+mkdir -p /lower /upper /merged
+
+# Mount lower layer (rootfs-alpine.ext4) read-only
+mount -o ro,norecovery /dev/vda /lower
+
+# Mount upper layer as tmpfs (RAM-backed, captured in snapshot, consistent across restore)
+mount -t tmpfs tmpfs /upper
+
+# OverlayFS needs these two dirs inside upper
+mkdir -p /upper/upper /upper/work
+
+# Combine lower + upper into merged view
+mount -t overlay overlay \
+    -o lowerdir=/lower,upperdir=/upper/upper,workdir=/upper/work \
+    /merged
+
+# Move kernel virtual filesystems into the new root before handing off
+mount -o move /proc /merged/proc
+mount -o move /sys /merged/sys
+mount -o move /dev /merged/dev
+
+# Switch root into merged overlay and hand off to guest-agent
+exec switch_root /merged /usr/local/bin/guest-agent

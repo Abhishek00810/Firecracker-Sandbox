@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(go build:*)",
-      "WebFetch(domain:iximiuz.com)"
+      "WebFetch(domain:iximiuz.com)",
+      "Bash(mkdir:*)"
     ]
   }
 }

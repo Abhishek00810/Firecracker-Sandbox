@@ -76,7 +76,8 @@ func main() {
 		Timeout:    30 * time.Second,
 		KernelPath: filepath.Join(assetsPath, "kernel/vmlinux"),
 		RootfsPath: filepath.Join(assetsPath, "rootfs/rootfs-alpine.ext4"),
-		BootArgs:   "console=ttyS0 reboot=k panic=1 pci=off init=/usr/local/bin/guest-agent",
+		InitrdPath: filepath.Join(assetsPath, "initramfs.cpio.gz"),
+		BootArgs:   "console=ttyS0 reboot=k panic=1 pci=off",
 	}
 
 	freeCgroupCfg := cgroup.Config{
@@ -103,7 +104,7 @@ func main() {
 
 	// Create a snapshot template once at startup: boot one VM, warm up kernels,
 	// freeze it. All pool VMs and sessions restore from this snapshot in ~100ms.
-	snapDir := filepath.Join(os.TempDir(), "fc-snapshots")
+	snapDir := "/dev/shm/fc-snapshots"
 	var template *firecracker.SnapshotTemplate
 	if tmpl, err := vmManager.CreateTemplate(context.Background(), config, snapDir); err != nil {
 		slog.Warn("snapshot template creation failed, falling back to cold boot", "err", err)

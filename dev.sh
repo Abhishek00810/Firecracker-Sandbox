@@ -57,6 +57,43 @@ chmod +x /mnt/usr/local/bin/kernel_bridge.py
 umount /mnt
 echo "==> rootfs updated"
 
+echo "==> building initramfs..."
+INITRAMFS_WORK=$(mktemp -d)
+INITRAMFS_OUT=/Users/abhishekdadwal/nothing/sandbox_env/assets/initramfs.cpio.gz
+
+# Create directory structure needed inside initramfs
+mkdir -p "$INITRAMFS_WORK/bin"
+mkdir -p "$INITRAMFS_WORK/sbin"
+mkdir -p "$INITRAMFS_WORK/dev"
+mkdir -p "$INITRAMFS_WORK/proc"
+mkdir -p "$INITRAMFS_WORK/sys"
+mkdir -p "$INITRAMFS_WORK/lower"
+mkdir -p "$INITRAMFS_WORK/upper"
+mkdir -p "$INITRAMFS_WORK/merged"
+mkdir -p "$INITRAMFS_WORK/oldroot"
+
+# Copy busybox from Alpine rootfs — it provides mount, mkdir, pivot_root, etc.
+mount -o loop "$ROOTFS" /mnt
+cp /mnt/bin/busybox "$INITRAMFS_WORK/bin/busybox"
+mkdir -p "$INITRAMFS_WORK/lib"
+cp /mnt/lib/ld-musl-aarch64.so.1 "$INITRAMFS_WORK/lib/"
+umount /mnt
+
+# Create symlinks so busybox responds to each command name
+for cmd in sh mount umount mkdir rmdir sleep switch_root; do
+    ln -sf busybox "$INITRAMFS_WORK/bin/$cmd"
+done
+ln -sf ../bin/busybox "$INITRAMFS_WORK/sbin/pivot_root"
+
+# Copy init script
+cp "$GUEST_AGENT_DIR/initramfs/init" "$INITRAMFS_WORK/init"
+chmod +x "$INITRAMFS_WORK/init"
+
+# Bundle into cpio.gz archive
+(cd "$INITRAMFS_WORK" && find . | cpio -H newc -o 2>/dev/null | gzip) > "$INITRAMFS_OUT"
+rm -rf "$INITRAMFS_WORK"
+echo "==> initramfs built: $INITRAMFS_OUT"
+
 echo "==> starting server..."
 cd "$BACKEND_DIR"
 exec env \

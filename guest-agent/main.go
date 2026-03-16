@@ -43,9 +43,10 @@ type ExecutionResponse struct {
 // Requests are serialized by the session manager (sess.mu) so no extra
 // locking is needed here.
 type KernelBridge struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout *bufio.Scanner
+	cmd          *exec.Cmd
+	stdin        io.WriteCloser
+	stdout       *bufio.Scanner
+	bridgeStderr *bytes.Buffer // captures kernel_bridge.py stderr for error reporting
 }
 
 func newKernelBridge(language string) (*KernelBridge, error) {
@@ -61,7 +62,8 @@ func newKernelBridge(language string) (*KernelBridge, error) {
 		return nil, fmt.Errorf("stdout pipe: %w", err)
 	}
 
-	cmd.Stderr = log.Writer()
+	stderrBuf := new(bytes.Buffer)
+	cmd.Stderr = io.MultiWriter(log.Writer(), stderrBuf)
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start kernel_bridge.py: %w", err)
@@ -70,9 +72,10 @@ func newKernelBridge(language string) (*KernelBridge, error) {
 	log.Printf("kernel bridge started language=%s pid=%d", language, cmd.Process.Pid)
 
 	return &KernelBridge{
-		cmd:    cmd,
-		stdin:  stdin,
-		stdout: bufio.NewScanner(stdoutPipe),
+		cmd:          cmd,
+		stdin:        stdin,
+		stdout:       bufio.NewScanner(stdoutPipe),
+		bridgeStderr: stderrBuf,
 	}, nil
 }
 
@@ -92,7 +95,7 @@ func (kb *KernelBridge) execute(code string, timeoutSec int) (*ExecutionResponse
 		if err := kb.stdout.Err(); err != nil {
 			return nil, fmt.Errorf("bridge stdout: %w", err)
 		}
-		return nil, fmt.Errorf("bridge process closed")
+		return nil, fmt.Errorf("bridge process closed: %s", kb.bridgeStderr.String())
 	}
 
 	var resp ExecutionResponse

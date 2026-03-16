@@ -4,6 +4,7 @@ import (
 	"backend/internal/executor"
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 )
 
@@ -36,6 +37,8 @@ func (f *FirecrackerExecutor) Execute(ctx context.Context, code, language string
 	vsockClient := NewVsockClient(pooledVM.VM.VsockPath)
 	resp, err := vsockClient.Execute(code, language, 15)
 	if err != nil {
+		slog.Warn("execution failed", "vm_id", pooledVM.VM.ID, "err", err,
+			"vm_console", pooledVM.VM.Stderr.String())
 		return executor.ExecutionResult{}, fmt.Errorf("failed to execute: %w", err)
 	}
 	duration := time.Since(startTime).Seconds()

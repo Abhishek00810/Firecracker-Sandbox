@@ -47,6 +47,7 @@ func NewManager(
 
 // Create boots a VM and binds it to a new session
 func (m *Manager) Create(ctx context.Context, tier string) (*Session, error) {
+	t0 := time.Now()
 	var vm *firecracker.MicroVM
 	var err error
 
@@ -63,6 +64,7 @@ func (m *Manager) Create(ctx context.Context, tier string) (*Session, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create session VM: %w", err)
 	}
+	slog.Info("session: vm ready", "vm_id", vm.ID, "ms", time.Since(t0).Milliseconds())
 
 	// Wait until the guest agent is actually accepting connections.
 	// Same issue as the pool: after snapshot restore the vsock file exists
@@ -75,12 +77,16 @@ func (m *Manager) Create(ctx context.Context, tier string) (*Session, error) {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
+	slog.Info("session: vsock ready", "vm_id", vm.ID, "ms", time.Since(t0).Milliseconds())
 
-	// Warm up Python kernel so the first sess.run() is fast.
-	// Execute (not Ping) leaves the guest cleanly back at Accept after completion.
-	if _, err := vsockClient.Execute("pass", "python", 30); err != nil {
-		slog.Warn("session: python warmup failed", "vm_id", vm.ID, "err", err)
+	// Warm up Python kernel on cold boot only.
+	// Snapshot-restored VMs already have a live kernel in memory.
+	if m.template == nil {
+		if _, err := vsockClient.Execute("pass", "python", 30); err != nil {
+			slog.Warn("session: python warmup failed", "vm_id", vm.ID, "err", err)
+		}
 	}
+	slog.Info("session: warmup done", "vm_id", vm.ID, "ms", time.Since(t0).Milliseconds())
 
 	// pick cgroup config and tenant path based on tier
 	tenantID := "session-free"

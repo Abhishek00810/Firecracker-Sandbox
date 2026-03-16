@@ -35,6 +35,7 @@ type VMConfig struct {
 	Timeout    time.Duration
 	KernelPath string
 	RootfsPath string
+	InitrdPath string // initramfs for OverlayFS setup; empty = no initramfs
 	BootArgs   string
 }
 
@@ -44,16 +45,16 @@ type VsockConfig struct {
 }
 
 type MicroVM struct {
-	ID         string
-	Config     VMConfig
-	State      VMState
+	ID             string
+	Config         VMConfig
+	State          VMState
 	VsockPath  string
 	SocketPath string
 	TapName    string // host TAP device name, empty if network setup failed
 	CreatedAt  time.Time
-	Process    *exec.Cmd
-	Stdout     *bytes.Buffer
-	Stderr     *bytes.Buffer
+	Process        *exec.Cmd
+	Stdout         *bytes.Buffer
+	Stderr         *bytes.Buffer
 }
 
 type NetworkInterface struct {
@@ -65,6 +66,7 @@ type NetworkInterface struct {
 type BootSource struct {
 	KernelImagePath string `json:"kernel_image_path"`
 	BootArgs        string `json:"boot_args"`
+	InitrdPath      string `json:"initrd_path,omitempty"`
 }
 
 type Drive struct {
@@ -234,18 +236,20 @@ func (f *FireCrackerManager) Create(ctx context.Context, cfg VMConfig) (*MicroVM
 	socketPath := f.getSocketPath(vmID)
 	vsockPath := filepath.Join(f.SocketDir, fmt.Sprintf("vsock-%s.sock", vmID))
 
-	// Each VM gets its own rootfs copy so state never leaks between executions
-	rootfsCopy := filepath.Join(f.SocketDir, fmt.Sprintf("rootfs-%s.ext4", vmID))
-	if err := copyFile(cfg.RootfsPath, rootfsCopy); err != nil {
-		return nil, fmt.Errorf("failed to copy rootfs for VM %s: %w", vmID, err)
+	if cfg.InitrdPath == "" {
+		// No initramfs: fall back to full rootfs copy (legacy cold boot)
+		rootfsCopy := filepath.Join(f.SocketDir, fmt.Sprintf("rootfs-%s.ext4", vmID))
+		if err := copyFile(cfg.RootfsPath, rootfsCopy); err != nil {
+			return nil, fmt.Errorf("failed to copy rootfs for VM %s: %w", vmID, err)
+		}
+		cfg.RootfsPath = rootfsCopy
 	}
-
-	vmCfg := cfg
-	vmCfg.RootfsPath = rootfsCopy
+	// OverlayFS mode (InitrdPath != ""): no per-VM disk file needed — upper layer is tmpfs
+	// captured in the snapshot's RAM, recreated fresh on first boot.
 
 	vm := &MicroVM{
 		ID:         vmID,
-		Config:     vmCfg,
+		Config:     cfg,
 		State:      VMStateCreated,
 		SocketPath: socketPath,
 		VsockPath:  vsockPath,
@@ -329,17 +333,31 @@ func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
 	if err := f.putJSON(client, "http://localhost/boot-source", BootSource{
 		KernelImagePath: vm.Config.KernelPath,
 		BootArgs:        vm.Config.BootArgs,
+		InitrdPath:      vm.Config.InitrdPath,
 	}); err != nil {
 		return fmt.Errorf("failed to set boot source: %w", err)
 	}
 
-	if err := f.putJSON(client, "http://localhost/drives/rootfs", Drive{
-		DriveId:      "rootfs",
-		PathOnHost:   vm.Config.RootfsPath,
-		IsRootDevice: true,
-		IsReadOnly:   false,
-	}); err != nil {
-		return fmt.Errorf("failed to set drive: %w", err)
+	if vm.Config.InitrdPath != "" {
+		// OverlayFS mode: single read-only lower drive; upper layer is tmpfs (in RAM, no block device)
+		if err := f.putJSON(client, "http://localhost/drives/lower", Drive{
+			DriveId:      "lower",
+			PathOnHost:   vm.Config.RootfsPath,
+			IsRootDevice: true,
+			IsReadOnly:   true,
+		}); err != nil {
+			return fmt.Errorf("failed to set lower drive: %w", err)
+		}
+	} else {
+		// Legacy mode: single writable rootfs copy
+		if err := f.putJSON(client, "http://localhost/drives/rootfs", Drive{
+			DriveId:      "rootfs",
+			PathOnHost:   vm.Config.RootfsPath,
+			IsRootDevice: true,
+			IsReadOnly:   false,
+		}); err != nil {
+			return fmt.Errorf("failed to set drive: %w", err)
+		}
 	}
 
 	if err := f.putJSON(client, "http://localhost/machine-config", MachineConfig{
@@ -434,7 +452,10 @@ func (f *FireCrackerManager) Destroy(ctx context.Context, vmID string) error {
 
 	os.Remove(vm.SocketPath)
 	os.Remove(vm.VsockPath)
-	os.Remove(vm.Config.RootfsPath) // delete the VM-specific rootfs copy
+	if vm.Config.InitrdPath == "" {
+		os.Remove(vm.Config.RootfsPath) // legacy: delete the VM-specific rootfs copy
+	}
+	// OverlayFS mode: lower is the shared rootfs (not deleted), upper is tmpfs in RAM (no file)
 
 	// Delete the TAP device allocated for this VM.
 	if vm.TapName != "" {
@@ -474,21 +495,10 @@ func (f *FireCrackerManager) Snapshot(ctx context.Context, vmID, snapPath, memPa
 }
 
 func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig, tmpl *SnapshotTemplate) (*MicroVM, error) {
-	// Serialize restores: each snapshot restore binds a new vsock path, but the
-	// Firecracker process needs the API socket to come up before we can issue
-	// the load request. Running restores concurrently races on vsock binding.
-	f.restoreMu.Lock()
-	defer f.restoreMu.Unlock()
-
+	t0 := time.Now()
 	vmID := uuid.New().String()
 	socketPath := f.getSocketPath(vmID)
 	vsockPath := filepath.Join(f.SocketDir, fmt.Sprintf("vsock-%s.sock", vmID))
-
-	// Fresh writable rootfs copy for this VM
-	rootfsCopy := filepath.Join(f.SocketDir, fmt.Sprintf("rootfs-%s.ext4", vmID))
-	if err := copyFile(tmpl.RootfsPath, rootfsCopy); err != nil {
-		return nil, fmt.Errorf("failed to copy rootfs: %w", err)
-	}
 
 	firecrackerBinary := os.Getenv("FIRECRACKER_BINARY")
 	if firecrackerBinary == "" {
@@ -502,13 +512,14 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 		return nil, fmt.Errorf("failed to start firecracker: %w", err)
 	}
 
-	// Wait for API socket (up to 5s)
+	// Wait for API socket (up to 5s) — per-VM socket, no lock needed
 	for range 50 {
 		if _, err := os.Stat(socketPath); err == nil {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+	slog.Debug("restore: firecracker socket ready", "vm_id", vmID, "ms", time.Since(t0).Milliseconds())
 
 	client := &http.Client{
 		Transport: &http.Transport{
@@ -518,12 +529,17 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 		},
 	}
 
-	// Allocate unique TAP/IP for this VM
+	// Allocate unique TAP/IP for this VM — atomic counter, no lock needed
 	tapName, hostIP, guestIP, _ := f.allocateNetwork()
+
+	// Serialize only the TAP/vsock critical section: tmpl.TapName and tmpl.VsockPath
+	// are shared across all restores. Two concurrent restores would conflict trying
+	// to both recreate fctap0 and bind the same vsock path.
+	f.restoreMu.Lock()
+	slog.Debug("restore: lock acquired", "vm_id", vmID, "ms", time.Since(t0).Milliseconds())
 
 	// Recreate the template's TAP device (no IP yet — just needs to exist for Firecracker).
 	// The template cleanup deleted it so it's free to recreate.
-	// restoreMu ensures only one restore runs at a time, so no conflict on tmpl.TapName.
 	if tmpl.TapName != "" {
 		exec.Command("ip", "link", "delete", tmpl.TapName).Run() // clean stale if any
 		if out, err := exec.Command("ip", "tuntap", "add", tmpl.TapName, "mode", "tap").CombinedOutput(); err != nil {
@@ -543,23 +559,26 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 		EnableDiffSnapshots: false,
 		ResumeVM:            false,
 	}); err != nil {
+		f.restoreMu.Unlock()
 		cmd.Process.Kill()
 		exec.Command("ip", "link", "delete", tmpl.TapName).Run()
 		return nil, fmt.Errorf("snapshot load failed: %w", err)
 	}
 
-	// Update rootfs backend to fresh copy (PATCH, not PUT — PUT rejected after start)
-	if err := f.patchJSON(client, "http://localhost/drives/rootfs", map[string]string{
-		"drive_id":     "rootfs",
-		"path_on_host": rootfsCopy,
+	// Update lower drive — shared template rootfs (read-only); upper is tmpfs in RAM, no block device.
+	if err := f.patchJSON(client, "http://localhost/drives/lower", map[string]string{
+		"drive_id":     "lower",
+		"path_on_host": tmpl.RootfsPath,
 	}); err != nil {
+		f.restoreMu.Unlock()
 		cmd.Process.Kill()
 		exec.Command("ip", "link", "delete", tmpl.TapName).Run()
-		return nil, fmt.Errorf("drive update failed: %w", err)
+		return nil, fmt.Errorf("lower drive update failed: %w", err)
 	}
 
 	// Resume — Firecracker binds tmpl.VsockPath and uses tmpl.TapName
 	if err := f.patchJSON(client, "http://localhost/vm", VMStateChange{State: "Resumed"}); err != nil {
+		f.restoreMu.Unlock()
 		cmd.Process.Kill()
 		exec.Command("ip", "link", "delete", tmpl.TapName).Run()
 		return nil, fmt.Errorf("resume failed: %w", err)
@@ -578,12 +597,18 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 
 	// Rename vsock → unique per-VM path (fd survives rename, Firecracker keeps listening)
 	if err := os.Rename(tmpl.VsockPath, vsockPath); err != nil {
+		f.restoreMu.Unlock()
 		cmd.Process.Kill()
 		if tapName != "" {
 			exec.Command("ip", "link", "delete", tapName).Run()
 		}
 		return nil, fmt.Errorf("vsock rename failed: %w", err)
 	}
+
+	// TAP and vsock are now unique to this VM — release the lock so the next
+	// restore can proceed with its own TAP/vsock setup in parallel.
+	f.restoreMu.Unlock()
+	slog.Debug("restore: lock released", "vm_id", vmID, "ms", time.Since(t0).Milliseconds())
 
 	// Reconfigure guest network via vsock — guest still has template's old IP baked in.
 	// We flush and reassign a unique IP so routing works correctly.
@@ -606,18 +631,17 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 	}
 
 	vm := &MicroVM{
-		ID:         vmID,
-		Config:     cfg,
-		State:      VMStateRunning,
-		SocketPath: socketPath,
-		VsockPath:  vsockPath,
-		TapName:    tapName,
-		CreatedAt:  time.Now(),
-		Process:    cmd,
-		Stdout:     &stdout,
-		Stderr:     &stderr,
+		ID:             vmID,
+		Config:         cfg,
+		State:          VMStateRunning,
+		SocketPath:     socketPath,
+		VsockPath:      vsockPath,
+		TapName:   tapName,
+		CreatedAt: time.Now(),
+		Process:        cmd,
+		Stdout:         &stdout,
+		Stderr:         &stderr,
 	}
-	vm.Config.RootfsPath = rootfsCopy
 
 	f.mu.Lock()
 	f.Vms[vmID] = vm
@@ -653,18 +677,20 @@ func (f *FireCrackerManager) CreateTemplate(ctx context.Context, cfg VMConfig, s
 		time.Sleep(200 * time.Millisecond)
 	}
 	if !vsockReady {
+		slog.Error("template VM console output", "stdout", vm.Stdout.String(), "stderr", vm.Stderr.String())
 		f.Destroy(ctx, vm.ID)
 		return nil, fmt.Errorf("vsock never became ready for template VM")
 	}
 
-	// Warm up Python and Node kernels — snapshot will capture them mid-run,
-	// so every restored VM starts with hot kernels and ~100ms first-run latency.
-	for _, lang := range []string{"python", "node"} {
-		if _, err := vsock.Execute("pass", lang, 30); err != nil {
-			slog.Warn("template: kernel warmup failed", "lang", lang, "err", err)
-		}
+	// Warm up the Python kernel before snapshotting. The kernel_bridge.py process,
+	// ipykernel process, IPC sockets, and guest-agent's kernels map are all captured
+	// in the snapshot RAM — every restored VM inherits the live kernel for free.
+	if _, err := vsock.Execute("pass", "python", 30); err != nil {
+		slog.Warn("kernel warmup failed for template, snapshot will have cold kernel", "err", err,
+			"vm_console", vm.Stderr.String())
+	} else {
+		slog.Info("kernel warmed up in template VM")
 	}
-	slog.Info("template kernels warmed up")
 
 	// Take snapshot
 	snapPath := filepath.Join(snapDir, "template.snap")
