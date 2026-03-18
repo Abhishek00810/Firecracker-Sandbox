@@ -45,16 +45,16 @@ type VsockConfig struct {
 }
 
 type MicroVM struct {
-	ID             string
-	Config         VMConfig
-	State          VMState
+	ID         string
+	Config     VMConfig
+	State      VMState
 	VsockPath  string
 	SocketPath string
 	TapName    string // host TAP device name, empty if network setup failed
 	CreatedAt  time.Time
-	Process        *exec.Cmd
-	Stdout         *bytes.Buffer
-	Stderr         *bytes.Buffer
+	Process    *exec.Cmd
+	Stdout     *bytes.Buffer
+	Stderr     *bytes.Buffer
 }
 
 type NetworkInterface struct {
@@ -631,16 +631,16 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 	}
 
 	vm := &MicroVM{
-		ID:             vmID,
-		Config:         cfg,
-		State:          VMStateRunning,
-		SocketPath:     socketPath,
-		VsockPath:      vsockPath,
-		TapName:   tapName,
-		CreatedAt: time.Now(),
-		Process:        cmd,
-		Stdout:         &stdout,
-		Stderr:         &stderr,
+		ID:         vmID,
+		Config:     cfg,
+		State:      VMStateRunning,
+		SocketPath: socketPath,
+		VsockPath:  vsockPath,
+		TapName:    tapName,
+		CreatedAt:  time.Now(),
+		Process:    cmd,
+		Stdout:     &stdout,
+		Stderr:     &stderr,
 	}
 
 	f.mu.Lock()

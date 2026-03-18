@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -124,8 +125,10 @@ func getOrStartKernel(language string) (*KernelBridge, error) {
 	defer kernelsMu.Unlock()
 
 	if kb, ok := kernels[language]; ok {
+		slog.Info("kernel: found existing", "lang", language) // ← add this
 		return kb, nil
 	}
+	slog.Info("kernel: starting new", "lang", language) // ← add this
 
 	kb, err := newKernelBridge(language)
 	if err != nil {
@@ -142,7 +145,7 @@ func evictKernel(language string) {
 	kernelsMu.Unlock()
 }
 
-// ─── Execution Router ─────────────────────────────────────────────────────────
+// ─── Execution Router
 
 func executeCode(req ExecutionRequest) ExecutionResponse {
 	startTime := time.Now()

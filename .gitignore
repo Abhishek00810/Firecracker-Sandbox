@@ -96,3 +96,6 @@ coverage.html
 local/
 dev/
 
+# Architecture notes (auto-updated, not for review)
+notes.md
+
