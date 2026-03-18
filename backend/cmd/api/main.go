@@ -115,6 +115,7 @@ func main() {
 
 	freePool := firecracker.NewVMPoolWithSnapshot(3, config, vmManager, freeCgroupCfg, template)
 	premiumPool := firecracker.NewVMPoolWithSnapshot(3, config, vmManager, premiumCgroupCfg, template)
+	sessionPool := firecracker.NewVMPoolWithSnapshot(3, config, vmManager, premiumSessionCgroupCfg, template)
 	slog.Info("VM pools initialized")
 
 	sessionMgr := session.NewManager(
@@ -125,6 +126,7 @@ func main() {
 		premiumSessionCgroupCfg,
 		50,
 		15*time.Minute,
+		sessionPool,
 	)
 
 	freeExec := firecracker.NewFirecrackerExecutor(vmManager)
@@ -175,5 +177,6 @@ func main() {
 	slog.Info("shutting down, cleaning up VMs")
 	freePool.Shutdown()
 	premiumPool.Shutdown()
+	sessionMgr.Shutdown(context.Background())
 	slog.Info("shutdown complete")
 }

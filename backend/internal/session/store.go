@@ -15,7 +15,8 @@ type Session struct {
 	Tier      string
 	CreatedAt time.Time
 	LastUsed  time.Time
-	mu        sync.Mutex // serializes concurrent runs on same session
+	mu        sync.Mutex            // serializes concurrent runs on same session
+	PooledVM  *firecracker.PooledVM //feature: warm vm pool for session
 }
 
 type Store struct {

@@ -21,6 +21,7 @@ type Manager struct {
 	premiumCgroupCfg cgroup.Config
 	idleTimeout      time.Duration
 	vmConfig         firecracker.VMConfig
+	pool             *firecracker.VMPool
 }
 
 func NewManager(
@@ -31,6 +32,7 @@ func NewManager(
 	premiumCgroupCfg cgroup.Config,
 	maxSessions int,
 	idleTimeout time.Duration,
+	pool *firecracker.VMPool,
 ) *Manager {
 	m := &Manager{
 		store:            NewStore(maxSessions),
@@ -40,6 +42,7 @@ func NewManager(
 		freeCgroupCfg:    freeCgroupCfg,
 		premiumCgroupCfg: premiumCgroupCfg,
 		idleTimeout:      idleTimeout,
+		pool:             pool,
 	}
 	go m.reaper()
 	return m
@@ -48,9 +51,33 @@ func NewManager(
 // Create boots a VM and binds it to a new session
 func (m *Manager) Create(ctx context.Context, tier string) (*Session, error) {
 	t0 := time.Now()
+
+	// fast path: acquire pre-warmed VM from pool (vsock + kernel already ready)
+	if m.pool != nil {
+		pvm, err := m.pool.Acquire(5 * time.Second)
+		if err == nil {
+			sess := &Session{
+				ID:        uuid.New().String(),
+				VM:        pvm.VM,
+				Cgroup:    pvm.Cgroup,
+				PooledVM:  pvm,
+				Tier:      tier,
+				CreatedAt: time.Now(),
+				LastUsed:  time.Now(),
+			}
+			if err := m.store.Add(sess); err != nil {
+				m.pool.Release(pvm)
+				return nil, err
+			}
+			slog.Info("session created from pool", "session_id", sess.ID, "vm_id", pvm.VM.ID, "ms", time.Since(t0).Milliseconds())
+			return sess, nil
+		}
+		slog.Warn("session: pool acquire failed, falling back to direct restore", "err", err)
+	}
+
+	// slow path: restore directly (no pool or pool exhausted)
 	var vm *firecracker.MicroVM
 	var err error
-
 	if m.template != nil {
 		vm, err = m.vmManager.LoadFromSnapshot(ctx, m.vmConfig, m.template)
 		if err != nil {
@@ -67,8 +94,6 @@ func (m *Manager) Create(ctx context.Context, tier string) (*Session, error) {
 	slog.Info("session: vm ready", "vm_id", vm.ID, "ms", time.Since(t0).Milliseconds())
 
 	// Wait until the guest agent is actually accepting connections.
-	// Same issue as the pool: after snapshot restore the vsock file exists
-	// immediately but the virtio-vsock transport needs time to reconnect.
 	vsockClient := firecracker.NewVsockClient(vm.VsockPath)
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
@@ -165,12 +190,16 @@ func (m *Manager) Destroy(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("session %s not found", sessionID)
 	}
 
-	if sess.Cgroup != nil {
-		sess.Cgroup.Destroy()
-	}
-
-	if err := m.vmManager.Destroy(ctx, sess.VM.ID); err != nil {
-		return fmt.Errorf("failed to destroy VM: %w", err)
+	if sess.PooledVM != nil {
+		// pool handles cgroup destruction and replenishment
+		m.pool.Release(sess.PooledVM)
+	} else {
+		if sess.Cgroup != nil {
+			sess.Cgroup.Destroy()
+		}
+		if err := m.vmManager.Destroy(ctx, sess.VM.ID); err != nil {
+			return fmt.Errorf("failed to destroy VM: %w", err)
+		}
 	}
 
 	slog.Info("session destroyed", "session_id", sessionID, "vm_id", sess.VM.ID)
@@ -193,10 +222,14 @@ func (m *Manager) reaper() {
 		evicted := m.store.EvictIdle(m.idleTimeout)
 		for _, sess := range evicted {
 			slog.Info("session idle timeout, destroying", "session_id", sess.ID, "idle_for", time.Since(sess.LastUsed))
-			if sess.Cgroup != nil {
-				sess.Cgroup.Destroy()
+			if sess.PooledVM != nil {
+				m.pool.Release(sess.PooledVM)
+			} else {
+				if sess.Cgroup != nil {
+					sess.Cgroup.Destroy()
+				}
+				m.vmManager.Destroy(context.Background(), sess.VM.ID)
 			}
-			m.vmManager.Destroy(context.Background(), sess.VM.ID)
 		}
 	}
 }
@@ -215,9 +248,15 @@ func coldBoot(ctx context.Context, mgr *firecracker.FireCrackerManager, cfg fire
 func (m *Manager) Shutdown(ctx context.Context) {
 	sessions := m.store.All()
 	for _, sess := range sessions {
+		if sess.PooledVM != nil {
+			continue // pool.Shutdown handles these
+		}
 		if sess.Cgroup != nil {
 			sess.Cgroup.Destroy()
 		}
 		m.vmManager.Destroy(ctx, sess.VM.ID)
+	}
+	if m.pool != nil {
+		m.pool.Shutdown()
 	}
 }

@@ -46,10 +46,7 @@ func SessionHandler(mgr *session.Manager) http.HandlerFunc {
 
 		// POST /session — create new session
 		case r.Method == http.MethodPost && path == "":
-			tier := r.Header.Get("X-Tenant-Tier")
-			if tier != "premium" {
-				tier = "free"
-			}
+			tier := "premium"
 
 			sess, err := mgr.Create(r.Context(), tier)
 			if err != nil {
