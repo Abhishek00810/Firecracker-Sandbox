@@ -10,7 +10,9 @@
       "WebFetch(domain:deepwiki.com)",
       "WebFetch(domain:e2b.dev)",
       "WebFetch(domain:alexlavaee.me)",
-      "WebFetch(domain:thesequence.substack.com)"
+      "WebFetch(domain:thesequence.substack.com)",
+      "Bash(gh api:*)",
+      "WebFetch(domain:medium.com)"
     ]
   }
 }

@@ -45,8 +45,7 @@ def start_kernel(language):
         }), flush=True)
         sys.exit(1)
 
-    # use IPC transport (Unix domain sockets) instead of TCP
-    # avoids needing loopback interface (127.0.0.1) inside the VM
+    # use TCP transport 
     os.makedirs("/tmp/jupyter", exist_ok=True)
     os.environ["JUPYTER_RUNTIME_DIR"] = "/tmp/jupyter"
     log(f"JUPYTER_RUNTIME_DIR=/tmp/jupyter")
@@ -58,9 +57,9 @@ def start_kernel(language):
     except Exception as e:
         log(f"could not list kernel specs: {e}")
 
-    log(f"creating KernelManager kernel_name={kernel_name} transport=ipc")
+    log(f"creating KernelManager kernel_name={kernel_name} transport=tcp")
     try:
-        km = jupyter_client.KernelManager(kernel_name=kernel_name, transport='ipc')
+        km = jupyter_client.KernelManager(kernel_name=kernel_name, transport='tcp', ip = '127.0.0.1')
     except Exception as e:
         log(f"KernelManager creation failed: {e}\n{traceback.format_exc()}")
         sys.exit(1)
