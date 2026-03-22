@@ -16,7 +16,8 @@ type Session struct {
 	CreatedAt time.Time
 	LastUsed  time.Time
 	mu        sync.Mutex            // serializes concurrent runs on same session
-	PooledVM  *firecracker.PooledVM //feature: warm vm pool for session
+	PooledVM  *firecracker.PooledVM // non-nil when VM came from a pool
+	Pool      *firecracker.VMPool   // which pool to release back to (matches PooledVM)
 }
 
 type Store struct {
@@ -69,14 +70,17 @@ func (s *Store) Delete(id string) (*Session, bool) {
 	return sess, ok
 }
 
-// EvictIdle returns all sessions idle longer than maxIdle and removes them from store
-func (s *Store) EvictIdle(maxIdle time.Duration) []*Session {
+// EvictIdle returns sessions idle longer than maxIdle OR alive longer than maxLifetime,
+// and removes them from the store. maxLifetime of 0 disables the lifetime check.
+func (s *Store) EvictIdle(maxIdle time.Duration, maxLifetime time.Duration) []*Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	var evicted []*Session
 	for id, sess := range s.sessions {
-		if time.Since(sess.LastUsed) > maxIdle {
+		idleExpired     := maxIdle > 0 && time.Since(sess.LastUsed) > maxIdle
+		lifetimeExpired := maxLifetime > 0 && time.Since(sess.CreatedAt) > maxLifetime
+		if idleExpired || lifetimeExpired {
 			evicted = append(evicted, sess)
 			delete(s.sessions, id)
 		}

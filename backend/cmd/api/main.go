@@ -9,6 +9,7 @@ import (
 	"backend/internal/queue"
 	"backend/internal/ratelimit"
 	"backend/internal/session"
+	"backend/internal/tierconfig"
 	"context"
 	"encoding/json"
 	"log/slog"
@@ -68,6 +69,9 @@ func main() {
 		os.Exit(1)
 	}
 
+	freeTc := tierconfig.Tiers[tierconfig.Free]
+	proTc := tierconfig.Tiers[tierconfig.Pro]
+
 	vmManager := firecracker.NewFirecrackerManager(socketDir, assetsPath)
 
 	config := firecracker.VMConfig{
@@ -113,9 +117,10 @@ func main() {
 		slog.Info("snapshot template ready", "snap", tmpl.SnapPath)
 	}
 
-	freePool := firecracker.NewVMPoolWithSnapshot(3, config, vmManager, freeCgroupCfg, template)
-	premiumPool := firecracker.NewVMPoolWithSnapshot(3, config, vmManager, premiumCgroupCfg, template)
-	sessionPool := firecracker.NewVMPoolWithSnapshot(3, config, vmManager, premiumSessionCgroupCfg, template)
+	freePool := firecracker.NewVMPoolWithSnapshot(freeTc.PoolSize, config, vmManager, freeCgroupCfg, template)
+	premiumPool := firecracker.NewVMPoolWithSnapshot(proTc.PoolSize, config, vmManager, premiumCgroupCfg, template)
+	freeSessionPool := firecracker.NewVMPoolWithSnapshot(freeTc.PoolSize, config, vmManager, freeSessionCgroupCfg, template)
+	proSessionPool := firecracker.NewVMPoolWithSnapshot(proTc.PoolSize, config, vmManager, premiumSessionCgroupCfg, template)
 	slog.Info("VM pools initialized")
 
 	sessionMgr := session.NewManager(
@@ -124,23 +129,25 @@ func main() {
 		config,
 		freeSessionCgroupCfg,
 		premiumSessionCgroupCfg,
-		50,
-		15*time.Minute,
-		sessionPool,
+		proTc.MaxSessions,
+		proTc.SessionIdleTimeout,
+		proTc.SessionMaxLifetime,
+		freeSessionPool,
+		proSessionPool,
 	)
 
 	freeExec := firecracker.NewFirecrackerExecutor(vmManager)
 	freeExec.Pool = freePool
-	freeQueue := queue.NewJobQueue(freeExec, 5)
+	freeQueue := queue.NewJobQueue(freeExec, freeTc.Workers)
 	freeQueue.Start()
 
 	premiumExec := firecracker.NewFirecrackerExecutor(vmManager)
 	premiumExec.Pool = premiumPool
-	premiumQueue := queue.NewJobQueue(premiumExec, 10)
+	premiumQueue := queue.NewJobQueue(premiumExec, proTc.Workers)
 	premiumQueue.Start()
 
-	freeLimiter := ratelimit.NewTenantLimiter(rate.Limit(2), 5)      // 2 req/sec, burst 5
-	premiumLimiter := ratelimit.NewTenantLimiter(rate.Limit(10), 20) // 10 req/sec, burst 20
+	freeLimiter := ratelimit.NewTenantLimiter(rate.Limit(freeTc.RateLimit), freeTc.RateBurst)
+	premiumLimiter := ratelimit.NewTenantLimiter(rate.Limit(proTc.RateLimit), proTc.RateBurst)
 
 	http.HandleFunc("/health", healthHandler)
 	http.HandleFunc("/execute", handler.ExecuteHandler(freeQueue, premiumQueue, freeLimiter, premiumLimiter))

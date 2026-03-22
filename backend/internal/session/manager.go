@@ -9,6 +9,7 @@ import (
 	"backend/internal/cgroup"
 	"backend/internal/executor"
 	"backend/internal/executor/firecracker"
+	"backend/internal/tierconfig"
 
 	"github.com/google/uuid"
 )
@@ -20,8 +21,10 @@ type Manager struct {
 	freeCgroupCfg    cgroup.Config
 	premiumCgroupCfg cgroup.Config
 	idleTimeout      time.Duration
+	maxLifetime      time.Duration
 	vmConfig         firecracker.VMConfig
-	pool             *firecracker.VMPool
+	freePool         *firecracker.VMPool
+	proPool          *firecracker.VMPool
 }
 
 func NewManager(
@@ -32,7 +35,9 @@ func NewManager(
 	premiumCgroupCfg cgroup.Config,
 	maxSessions int,
 	idleTimeout time.Duration,
-	pool *firecracker.VMPool,
+	maxLifetime time.Duration,
+	freePool *firecracker.VMPool,
+	proPool *firecracker.VMPool,
 ) *Manager {
 	m := &Manager{
 		store:            NewStore(maxSessions),
@@ -42,7 +47,9 @@ func NewManager(
 		freeCgroupCfg:    freeCgroupCfg,
 		premiumCgroupCfg: premiumCgroupCfg,
 		idleTimeout:      idleTimeout,
-		pool:             pool,
+		maxLifetime:      maxLifetime,
+		freePool:         freePool,
+		proPool:          proPool,
 	}
 	go m.reaper()
 	return m
@@ -52,24 +59,29 @@ func NewManager(
 func (m *Manager) Create(ctx context.Context, tier string) (*Session, error) {
 	t0 := time.Now()
 
-	// fast path: acquire pre-warmed VM from pool (vsock + kernel already ready)
-	if m.pool != nil {
-		pvm, err := m.pool.Acquire(5 * time.Second)
+	// fast path: acquire pre-warmed VM from the tier's pool (vsock + kernel already ready)
+	pool := m.freePool
+	if tier == tierconfig.Pro {
+		pool = m.proPool
+	}
+	if pool != nil {
+		pvm, err := pool.Acquire(5 * time.Second)
 		if err == nil {
 			sess := &Session{
 				ID:        uuid.New().String(),
 				VM:        pvm.VM,
 				Cgroup:    pvm.Cgroup,
 				PooledVM:  pvm,
+				Pool:      pool,
 				Tier:      tier,
 				CreatedAt: time.Now(),
 				LastUsed:  time.Now(),
 			}
 			if err := m.store.Add(sess); err != nil {
-				m.pool.Release(pvm)
+				pool.Release(pvm)
 				return nil, err
 			}
-			slog.Info("session created from pool", "session_id", sess.ID, "vm_id", pvm.VM.ID, "ms", time.Since(t0).Milliseconds())
+			slog.Info("session created from pool", "session_id", sess.ID, "vm_id", pvm.VM.ID, "tier", tier, "ms", time.Since(t0).Milliseconds())
 			return sess, nil
 		}
 		slog.Warn("session: pool acquire failed, falling back to direct restore", "err", err)
@@ -116,8 +128,8 @@ func (m *Manager) Create(ctx context.Context, tier string) (*Session, error) {
 	// pick cgroup config and tenant path based on tier
 	tenantID := "session-free"
 	cgroupCfg := m.freeCgroupCfg
-	if tier == "premium" {
-		tenantID = "session-premium"
+	if tier == tierconfig.Pro {
+		tenantID = "session-pro"
 		cgroupCfg = m.premiumCgroupCfg
 	}
 
@@ -170,14 +182,11 @@ func (m *Manager) Execute(ctx context.Context, sessionID, code, language string)
 		return executor.ExecutionResult{}, fmt.Errorf("execution failed: %w", err)
 	}
 
-	output := resp.Stdout
-	if resp.Stderr != "" {
-		output += "\n" + resp.Stderr
-	}
-
 	return executor.ExecutionResult{
-		Output:            output,
+		Stdout:            resp.Stdout,
+		Stderr:            resp.Stderr,
 		Duration:          resp.Duration,
+		GuestDuration:     resp.Duration,
 		ExitCode:          int64(resp.ExitCode),
 		TerminationReason: "success",
 	}, nil
@@ -190,9 +199,9 @@ func (m *Manager) Destroy(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("session %s not found", sessionID)
 	}
 
-	if sess.PooledVM != nil {
+	if sess.PooledVM != nil && sess.Pool != nil {
 		// pool handles cgroup destruction and replenishment
-		m.pool.Release(sess.PooledVM)
+		sess.Pool.Release(sess.PooledVM)
 	} else {
 		if sess.Cgroup != nil {
 			sess.Cgroup.Destroy()
@@ -219,11 +228,11 @@ func (m *Manager) reaper() {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 	for range ticker.C {
-		evicted := m.store.EvictIdle(m.idleTimeout)
+		evicted := m.store.EvictIdle(m.idleTimeout, m.maxLifetime)
 		for _, sess := range evicted {
 			slog.Info("session idle timeout, destroying", "session_id", sess.ID, "idle_for", time.Since(sess.LastUsed))
-			if sess.PooledVM != nil {
-				m.pool.Release(sess.PooledVM)
+			if sess.PooledVM != nil && sess.Pool != nil {
+				sess.Pool.Release(sess.PooledVM)
 			} else {
 				if sess.Cgroup != nil {
 					sess.Cgroup.Destroy()
@@ -256,7 +265,10 @@ func (m *Manager) Shutdown(ctx context.Context) {
 		}
 		m.vmManager.Destroy(ctx, sess.VM.ID)
 	}
-	if m.pool != nil {
-		m.pool.Shutdown()
+	if m.freePool != nil {
+		m.freePool.Shutdown()
+	}
+	if m.proPool != nil {
+		m.proPool.Shutdown()
 	}
 }

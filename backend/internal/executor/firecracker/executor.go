@@ -43,14 +43,11 @@ func (f *FirecrackerExecutor) Execute(ctx context.Context, code, language string
 	}
 	duration := time.Since(startTime).Seconds()
 
-	output := resp.Stdout
-	if resp.Stderr != "" {
-		output += "\n" + resp.Stderr
-	}
-
 	return executor.ExecutionResult{
-		Output:            output,
+		Stdout:            resp.Stdout,
+		Stderr:            resp.Stderr,
 		Duration:          duration,
+		GuestDuration:     resp.Duration,
 		ExitCode:          int64(resp.ExitCode),
 		TerminationReason: "success",
 	}, nil

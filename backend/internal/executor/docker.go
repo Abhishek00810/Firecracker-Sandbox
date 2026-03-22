@@ -14,19 +14,8 @@ import (
 	"github.com/docker/go-units"
 )
 
-type Executor interface {
-	Execute(ctx context.Context, code string, language string) (ExecutionResult, error)
-}
-
 type DockerExecutor struct {
 	Client *client.Client
-}
-
-type ExecutionResult struct {
-	Output            string  `json:"output"`
-	Duration          float64 `json:"duration"` // Changed to float64 for seconds
-	ExitCode          int64   `json:"exit_code"`
-	TerminationReason string  `json:"termination_reason,omitempty"`
 }
 
 func (e *DockerExecutor) EnsureImage(ctx context.Context, imageName string) error {
@@ -169,10 +158,9 @@ func (e *DockerExecutor) Execute(ctx context.Context, code string, language stri
 	if err != nil {
 		return ExecutionResult{}, err
 	}
-	finalOutput := stdout.String() + stderr.String()
-
 	return ExecutionResult{
-		Output:            finalOutput,
+		Stdout:            stdout.String(),
+		Stderr:            stderr.String(),
 		Duration:          executionTime.Seconds(),
 		ExitCode:          ExitCode,
 		TerminationReason: TerminationReason,

@@ -1,11 +1,11 @@
 package handler
 
 import (
-	"backend/internal/executor"
 	"backend/internal/metrics"
 	"backend/internal/middleware"
 	"backend/internal/queue"
 	"backend/internal/ratelimit"
+	"backend/internal/tierconfig"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -13,32 +13,23 @@ import (
 	"time"
 )
 
-type ExecuteRequest struct {
-	Code     string `json:"code"`
-	Language string `json:"language"`
-}
-
-type ExecuteResponse struct {
-	Output executor.ExecutionResult `json:"output"`
-	Error  string                   `json:"error,omitempty"`
-	Status string                   `json:"status"`
-}
 
 func ExecuteHandler(freeQueue *queue.JobQueue, premiumQueue *queue.JobQueue, freeLimiter *ratelimit.TenantLimiter, premiumLimiter *ratelimit.TenantLimiter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := middleware.RequestIDFromContext(r.Context())
 
-		tier := queue.TierFree
-		if r.Header.Get("X-Tenant-Tier") == "premium" {
-			tier = queue.TierPremium
+		tierName := r.Header.Get("X-Tenant-Tier")
+		if tierName == "" {
+			tierName = tierconfig.Free
 		}
+		tc := tierconfig.Get(tierName)
 
 		tenantID := r.Header.Get("X-Tenant-ID")
 		if tenantID == "" {
 			tenantID = "anonymous"
 		}
 		limiter := freeLimiter
-		if tier == queue.TierPremium {
+		if tierName == tierconfig.Pro {
 			limiter = premiumLimiter
 		}
 
@@ -48,7 +39,7 @@ func ExecuteHandler(freeQueue *queue.JobQueue, premiumQueue *queue.JobQueue, fre
 		}
 
 		jobQueue := freeQueue
-		if tier == queue.TierPremium {
+		if tierName == tierconfig.Pro {
 			jobQueue = premiumQueue
 		}
 
@@ -59,7 +50,7 @@ func ExecuteHandler(freeQueue *queue.JobQueue, premiumQueue *queue.JobQueue, fre
 			return
 		}
 
-		resultCh, err := jobQueue.Submit(r.Context(), req.Code, req.Language, tier)
+		resultCh, err := jobQueue.Submit(r.Context(), req.Code, req.Language)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 			return
@@ -92,17 +83,42 @@ func ExecuteHandler(freeQueue *queue.JobQueue, premiumQueue *queue.JobQueue, fre
 
 		metrics.RecordExecutionEnd(duration, errType)
 
+		output := &ExecutionOutput{
+			Stdout:            result.Result.Stdout,
+			Stderr:            result.Result.Stderr,
+			ExitCode:          int(result.Result.ExitCode),
+			TerminationReason: result.Result.TerminationReason,
+			DurationMs:        duration * 1000,
+			GuestDurationMs:   result.Result.GuestDuration * 1000,
+		}
+
 		resp := ExecuteResponse{
-			Output: result.Result,
-			Status: "success",
+			Status:    "success",
+			RequestID: requestID,
+			Result:    output,
+			Usage: &UsageInfo{
+				ExecutionTimeMs: duration * 1000,
+				QueueWaitMs:     0, // no separate queue wait tracking yet
+				TimeoutLimitMs:  int(tc.MaxExecTimeout.Milliseconds()),
+			},
+			Tenant: &TenantContext{
+				TenantID: tenantID,
+				Tier:     tierName,
+			},
 		}
 
 		if result.Err != nil {
-			resp.Error = result.Err.Error()
 			resp.Status = "error"
+			resp.Error = &ErrorDetail{
+				Code:    "system_error",
+				Message: result.Err.Error(),
+			}
 		} else if result.Result.ExitCode != 0 {
 			resp.Status = "error"
-			resp.Error = fmt.Sprintf("Execution failed with exit code %d", result.Result.ExitCode)
+			resp.Error = &ErrorDetail{
+				Code:    "execution_failed",
+				Message: fmt.Sprintf("process exited with code %d", result.Result.ExitCode),
+			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
