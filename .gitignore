@@ -1,3 +1,9 @@
+# Claude IDE
+.claude/
+
+# Supabase migrations (local dev only)
+migrations/
+
 # Cursor IDE
 .cursor/
 .cursor-index/

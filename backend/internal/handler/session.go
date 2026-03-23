@@ -3,7 +3,6 @@ package handler
 import (
 	"backend/internal/middleware"
 	"backend/internal/session"
-	"backend/internal/tierconfig"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -21,15 +20,13 @@ import (
 func SessionHandler(mgr *session.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := middleware.RequestIDFromContext(r.Context())
-		tenantID := r.Header.Get("X-Tenant-ID")
-		if tenantID == "" {
-			tenantID = "anonymous"
+
+		auth, ok := middleware.AuthFromContext(r.Context())
+		if !ok {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
 		}
-		tierName := r.Header.Get("X-Tenant-Tier")
-		if tierName == "" {
-			tierName = tierconfig.Free
-		}
-		tc := tierconfig.Get(tierName)
+		tc := auth.Config
 
 		// strip leading /session prefix, trim slashes
 		// e.g. /session          → ""
@@ -54,7 +51,7 @@ func SessionHandler(mgr *session.Manager) http.HandlerFunc {
 				return
 			}
 
-			sess, err := mgr.Create(r.Context(), tierName)
+			sess, err := mgr.Create(r.Context(), auth.Config.Name)
 			if err != nil {
 				slog.Error("failed to create session", "err", err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -81,8 +78,8 @@ func SessionHandler(mgr *session.Manager) http.HandlerFunc {
 					IdleTimeoutMs:  int(tc.SessionIdleTimeout.Milliseconds()),
 				},
 				Tenant: &TenantContext{
-					TenantID: tenantID,
-					Tier:     tierName,
+					TenantID: auth.TenantID,
+					Tier:     auth.Config.Name,
 				},
 			})
 
@@ -114,7 +111,7 @@ func SessionHandler(mgr *session.Manager) http.HandlerFunc {
 			execDurationMs := time.Since(start).Seconds() * 1000
 
 			sessSt, _ := mgr.GetSession(sessionID)
-			sessTc := tierconfig.Get(sessSt.Tier)
+			sessTc := auth.Config
 
 			output := &ExecutionOutput{
 				Stdout:            result.Stdout,
@@ -136,8 +133,8 @@ func SessionHandler(mgr *session.Manager) http.HandlerFunc {
 					TimeoutLimitMs:  int(sessTc.MaxExecTimeout.Milliseconds()),
 				},
 				Tenant: &TenantContext{
-					TenantID: tenantID,
-					Tier:     tierName,
+					TenantID: auth.TenantID,
+					Tier:     auth.Config.Name,
 				},
 				Session: &SessionState{
 					State:     "active",
@@ -180,7 +177,7 @@ func SessionHandler(mgr *session.Manager) http.HandlerFunc {
 				return
 			}
 
-			sessTc := tierconfig.Get(sess.Tier)
+			sessTc := auth.Config
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(SessionInfoResponse{
 				Status:    "success",
@@ -205,7 +202,7 @@ func SessionHandler(mgr *session.Manager) http.HandlerFunc {
 					LastExitCode:     nil,
 				},
 				Tenant: &TenantContext{
-					TenantID: tenantID,
+					TenantID: auth.TenantID,
 					Tier:     sess.Tier,
 				},
 			})

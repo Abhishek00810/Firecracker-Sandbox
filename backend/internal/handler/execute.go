@@ -14,32 +14,30 @@ import (
 )
 
 
+
+
 func ExecuteHandler(freeQueue *queue.JobQueue, premiumQueue *queue.JobQueue, freeLimiter *ratelimit.TenantLimiter, premiumLimiter *ratelimit.TenantLimiter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := middleware.RequestIDFromContext(r.Context())
 
-		tierName := r.Header.Get("X-Tenant-Tier")
-		if tierName == "" {
-			tierName = tierconfig.Free
+		auth, ok := middleware.AuthFromContext(r.Context())
+		if !ok {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
 		}
-		tc := tierconfig.Get(tierName)
 
-		tenantID := r.Header.Get("X-Tenant-ID")
-		if tenantID == "" {
-			tenantID = "anonymous"
-		}
 		limiter := freeLimiter
-		if tierName == tierconfig.Pro {
+		if auth.Config.Name == tierconfig.Pro {
 			limiter = premiumLimiter
 		}
 
-		if !limiter.GetLimiter(tenantID).Allow() {
+		if !limiter.GetLimiter(auth.TenantID).Allow() {
 			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 			return
 		}
 
 		jobQueue := freeQueue
-		if tierName == tierconfig.Pro {
+		if auth.Config.Name == tierconfig.Pro {
 			jobQueue = premiumQueue
 		}
 
@@ -99,11 +97,11 @@ func ExecuteHandler(freeQueue *queue.JobQueue, premiumQueue *queue.JobQueue, fre
 			Usage: &UsageInfo{
 				ExecutionTimeMs: duration * 1000,
 				QueueWaitMs:     0, // no separate queue wait tracking yet
-				TimeoutLimitMs:  int(tc.MaxExecTimeout.Milliseconds()),
+				TimeoutLimitMs:  int(auth.Config.MaxExecTimeout.Milliseconds()),
 			},
 			Tenant: &TenantContext{
-				TenantID: tenantID,
-				Tier:     tierName,
+				TenantID: auth.TenantID,
+				Tier:     auth.Config.Name,
 			},
 		}
 

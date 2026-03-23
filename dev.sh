@@ -99,4 +99,6 @@ cd "$BACKEND_DIR"
 exec env \
   ASSETS_PATH=/Users/abhishekdadwal/nothing/sandbox_env/assets \
   FIRECRACKER_BINARY=/Users/abhishekdadwal/nothing/sandbox_env/release-v1.7.0-aarch64/firecracker-v1.7.0-aarch64 \
+  SUPABASE_URL=https://eprymyntiuvwjlvwfgve.supabase.co \
+  SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVwcnlteW50aXV2d2psdndmZ3ZlIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NDAzNjIwNiwiZXhwIjoyMDg5NjEyMjA2fQ.di0-V_6NEmDHt315wm463liNpaGBcWsk7Gj05nWtBQ4 \
   go run cmd/api/main.go

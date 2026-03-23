@@ -4,7 +4,7 @@ Run: python test_sdk.py
 """
 from sandbox import Sandbox
 
-sb = Sandbox(base_url="http://localhost:8080", tenant_id="sdk-test")
+sb = Sandbox(api_key="comp_key_test1234567890abcdef12345678", base_url="http://localhost:8080")
 
 # ── 1. single-shot ────────────────────────────────────────────────────────────
 print("==> single-shot")

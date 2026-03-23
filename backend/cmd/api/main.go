@@ -6,6 +6,7 @@ import (
 	"backend/internal/handler"
 	"backend/internal/metrics"
 	"backend/internal/middleware"
+	"backend/internal/platform"
 	"backend/internal/queue"
 	"backend/internal/ratelimit"
 	"backend/internal/session"
@@ -54,6 +55,15 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	setupLogger()
+
+	supabaseURL := os.Getenv("SUPABASE_URL")
+	serviceRoleKey := os.Getenv("SUPABASE_SERVICE_ROLE_KEY")
+	if supabaseURL == "" || serviceRoleKey == "" {
+		slog.Error("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set")
+		os.Exit(1)
+	}
+	platformClient := platform.NewClient(supabaseURL, serviceRoleKey)
+
 	if err := cgroup.Init(); err != nil {
 		slog.Warn("cgroup init failed, limits will not be enforced", "err", err)
 	}
@@ -173,8 +183,11 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
+	// Middleware chain: Logging → Auth → mux
+	chain := middleware.Logging(middleware.Auth(platformClient)(http.DefaultServeMux))
+
 	go func() {
-		if err := http.ListenAndServe(port, middleware.Logging(http.DefaultServeMux)); err != nil {
+		if err := http.ListenAndServe(port, chain); err != nil {
 			slog.Error("error serving API", "err", err)
 			os.Exit(1)
 		}
