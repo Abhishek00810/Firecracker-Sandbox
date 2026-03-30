@@ -1,37 +1,51 @@
-"""
-Quick smoke test — requires the server running on localhost:8080.
-Run: python test_sdk.py
-"""
-from sandbox import Sandbox
+import asyncio
+from renderops import Sandbox, AsyncSandbox
 
-sb = Sandbox(api_key="comp_key_test1234567890abcdef12345678", base_url="http://localhost:8080")
+API_KEY = "ro_live_ac2a8d7c7c5008b17b2d24e4d34390b4"
 
-# ── 1. single-shot ────────────────────────────────────────────────────────────
-print("==> single-shot")
-result = sb.run("print('hello from sdk')")
-print(f"  output   : {result.output!r}")
-print(f"  exit_code: {result.exit_code}")
-print(f"  duration : {result.duration:.3f}s")
-print(f"  ok       : {result.ok}")
+# ── sync ──────────────────────────────────────────────────────────────────────
 
-# ── 2. session with persistent state ─────────────────────────────────────────
-print("\n==> session: state persistence")
+print("==> sync: single-shot")
+sb = Sandbox(api_key=API_KEY)
+result = sb.run("print(1+1)", language="python")
+print("stdout:", result.stdout)
+print("ok:", result.ok)
+print("duration_ms:", result.duration_ms)
+print("request_id:", result.request_id)
+
+print("\n==> sync: session persistent state")
 with sb.session() as sess:
     sess.run("x = 100")
     sess.run("x *= 3")
     r = sess.run("print(x)")
-    print(f"  x = {r.output.strip()}")   # expect 300
+    print("x =", r.stdout.strip())
 
-# ── 3. session: runtime pip install + use ─────────────────────────────────────
-print("\n==> session: runtime install + use")
-with sb.session() as sess:
-    r = sess.run(
-        "import subprocess\n"
-        "p = subprocess.run(['pip3','install','--break-system-packages','--no-cache-dir','cowsay'],"
-        "capture_output=True,text=True)\n"
-        "print('exit:', p.returncode)"
+# ── async ─────────────────────────────────────────────────────────────────────
+
+async def test_async():
+    sb = AsyncSandbox(api_key=API_KEY)
+
+    print("\n==> async: single-shot")
+    result = await sb.run("print(1+1)", language="python")
+    print("stdout:", result.stdout)
+    print("ok:", result.ok)
+    print("duration_ms:", result.duration_ms)
+
+    print("\n==> async: 3 sandboxes in parallel")
+    r1, r2, r3 = await asyncio.gather(
+        sb.run("print('sandbox 1')"),
+        sb.run("print('sandbox 2')"),
+        sb.run("print('sandbox 3')"),
     )
-    print(f"  pip install: {r.output.strip()}")
+    print("r1:", r1.stdout.strip())
+    print("r2:", r2.stdout.strip())
+    print("r3:", r3.stdout.strip())
 
-    r = sess.run("import cowsay; cowsay.cow('sdk works!')")
-    print(r.output)
+    print("\n==> async: session persistent state")
+    async with await sb.session() as sess:
+        await sess.run("x = 100")
+        await sess.run("x *= 3")
+        r = await sess.run("print(x)")
+        print("x =", r.stdout.strip())
+
+asyncio.run(test_async())

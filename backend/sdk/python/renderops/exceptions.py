@@ -10,9 +10,17 @@ class APIError(SandboxError):
         super().__init__(f"[{status_code}] {message}")
 
 
+class AuthError(APIError):
+    """401 — API key is invalid, deactivated, or expired."""
+
+
 class RateLimitError(APIError):
-    """429 rate limit exceeded."""
+    """429 — rate limit exceeded."""
 
 
 class SessionNotFoundError(APIError):
-    """Session ID not found on the server."""
+    """404 — session ID not found on the server."""
+
+
+class ServerError(APIError):
+    """5xx — server-side error."""

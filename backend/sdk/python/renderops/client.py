@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from typing import Optional
+
 import requests
 
-from .exceptions import APIError, RateLimitError, SessionNotFoundError
+from .exceptions import APIError, AuthError, RateLimitError, ServerError, SessionNotFoundError
 from .models import RunResult
 
 
@@ -15,16 +17,17 @@ class Session:
         self._client = client
 
     def run(self, code: str, language: str = "python") -> RunResult:
+        """Run code inside this session. State is preserved across calls."""
         resp = self._client._post(
             f"/session/{self.id}/run",
             {"code": code, "language": language},
         )
-        return RunResult._from_dict(resp)
+        return RunResult._from_session_run(resp)
 
     def close(self) -> None:
+        """Destroy this session and release the VM."""
         self._client._delete(f"/session/{self.id}")
 
-    # context manager support
     def __enter__(self) -> "Session":
         return self
 
@@ -34,18 +37,27 @@ class Session:
     def __repr__(self) -> str:
         return f"Session(id={self.id!r}, tier={self.tier!r})"
 
+
 class Sandbox:
     """
-    Client for the Nothing sandbox API.
+    Renderops sandbox client.
 
     Parameters
     ----------
     api_key : str
-        Your API key e.g. "comp_key_xxxx..."
+        Your Renderops API key e.g. "ro_live_..."
     base_url : str
-        e.g. "http://localhost:8080"
+        API base URL. Defaults to "http://localhost:8080".
     timeout : int
-        Request timeout in seconds (default 60).
+        HTTP request timeout in seconds. Defaults to 60.
+
+    Example
+    -------
+    >>> from sandbox import Sandbox
+    >>> sb = Sandbox(api_key="ro_live_...")
+    >>> result = sb.run("print('hello')", language="python")
+    >>> print(result.stdout)
+    hello
     """
 
     def __init__(
@@ -54,6 +66,9 @@ class Sandbox:
         base_url: str = "http://localhost:8080",
         timeout: int = 60,
     ):
+        if not api_key or not isinstance(api_key, str):
+            raise ValueError("api_key must be a non-empty string")
+
         self.base_url = base_url.rstrip("/")
         self._timeout = timeout
         self._headers = {
@@ -63,13 +78,35 @@ class Sandbox:
 
     # ── public API ──────────────────────────────────────────────────────────
 
-    def run(self, code: str, language: str = "python") -> RunResult:
-        """Single-shot execution — no persistent state."""
-        resp = self._post("/execute", {"code": code, "language": language})
-        return RunResult._from_dict(resp["output"])
+    def run(self, code: str, language: str = "python", timeout: Optional[int] = None) -> RunResult:
+        """
+        Run code in a fresh sandbox. No state is preserved between calls.
+
+        Parameters
+        ----------
+        code : str
+            Code to execute.
+        language : str
+            "python", "node", or "bash". Defaults to "python".
+        timeout : int, optional
+            Execution timeout in seconds. Uses server default if not set.
+        """
+        body: dict = {"code": code, "language": language}
+        if timeout is not None:
+            body["timeout"] = timeout
+
+        resp = self._post("/execute", body)
+        return RunResult._from_execute(resp)
 
     def session(self) -> Session:
-        """Create a new persistent session."""
+        """
+        Create a persistent session. Variables survive between run() calls.
+        Use as a context manager to auto-close:
+
+            with sb.session() as sess:
+                sess.run("x = 10")
+                result = sess.run("print(x)")
+        """
         r = requests.post(
             f"{self.base_url}/session",
             headers=self._headers,
@@ -105,9 +142,14 @@ class Sandbox:
 
     @staticmethod
     def _raise(r: requests.Response) -> None:
+        if r.status_code < 400:
+            return
+        if r.status_code == 401:
+            raise AuthError(401, r.text)
         if r.status_code == 429:
             raise RateLimitError(429, r.text)
         if r.status_code == 404:
             raise SessionNotFoundError(404, r.text)
-        if r.status_code >= 400:
-            raise APIError(r.status_code, r.text)
+        if r.status_code >= 500:
+            raise ServerError(r.status_code, r.text)
+        raise APIError(r.status_code, r.text)
