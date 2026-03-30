@@ -325,7 +325,7 @@ func listenVsock() (int, error) {
 }
 
 // readNetworkConfig reads guest IP and gateway from /etc/vm-network.env,
-// which the host writes into the rootfs copy before Firecracker starts.
+// which the host writes into the rootfs copy before, Firecracker starts.
 func readNetworkConfig() (guestIP, gwIP string) {
 	data, err := os.ReadFile("/etc/vm-network.env")
 	if err != nil {
