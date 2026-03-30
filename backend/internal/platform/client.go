@@ -46,7 +46,7 @@ func (c *Client) ResolveKey(keyHash string) (KeyRecord, error) {
 
 	q := url.Values{}
 	q.Set("key_hash", "eq."+keyHash)
-	q.Set("select", "id,user_id,tier,is_active,expires_at,profiles(free_usd_remaining)")
+	q.Set("select", "id,user_id,is_active,expires_at,profiles(tier,free_usd_remaining)")
 	q.Set("limit", "1")
 	base.RawQuery = q.Encode()
 
@@ -73,10 +73,10 @@ func (c *Client) ResolveKey(keyHash string) (KeyRecord, error) {
 	var rows []struct {
 		ID        string  `json:"id"`
 		UserID    string  `json:"user_id"`
-		Tier      string  `json:"tier"`
 		IsActive  bool    `json:"is_active"`
 		ExpiresAt *string `json:"expires_at"`
 		Profiles  struct {
+			Tier             string  `json:"tier"`
 			FreeUSDRemaining float64 `json:"free_usd_remaining"`
 		} `json:"profiles"`
 	}
@@ -93,7 +93,7 @@ func (c *Client) ResolveKey(keyHash string) (KeyRecord, error) {
 	return KeyRecord{
 		ID:               row.ID,
 		UserID:           row.UserID,
-		Tier:             row.Tier,
+		Tier:             row.Profiles.Tier,
 		IsActive:         row.IsActive,
 		ExpiresAt:        row.ExpiresAt,
 		FreeUSDRemaining: row.Profiles.FreeUSDRemaining,

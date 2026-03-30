@@ -78,7 +78,7 @@ func (c *keyCache) set(hash string, record platform.KeyRecord) {
 // Keys are cached for 60 seconds to avoid a DB round-trip on every request.
 // A revoked key can still be used for up to 60 seconds after revocation.
 func Auth(pc *platform.Client) func(http.Handler) http.Handler {
-	cache := newKeyCache(60 * time.Second)
+	var cache AuthCache = newKeyCache(60 * time.Second)
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
