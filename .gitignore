@@ -94,6 +94,11 @@ release-*/
 # Local test configuration
 test_config.json
 
+# Sensitive test scripts (may contain API keys or credentials)
+test_supabase.sh
+test_auth.sh
+test_session.sh
+
 # Test coverage
 coverage.txt
 coverage.html
