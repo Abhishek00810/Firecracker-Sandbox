@@ -692,6 +692,15 @@ func (f *FireCrackerManager) CreateTemplate(ctx context.Context, cfg VMConfig, s
 		slog.Info("kernel warmed up in template VM")
 	}
 
+	// Warm up the Node bridge before snapshotting. node_bridge.js process and its
+	// vm context are captured in snapshot RAM — every restored VM inherits the warm
+	// node bridge for free, eliminating the ~10s cold start.
+	if _, err := vsock.Execute("1+1", "node", 30); err != nil {
+		slog.Warn("node bridge warmup failed for template, snapshot will have cold node bridge", "err", err)
+	} else {
+		slog.Info("node bridge warmed up in template VM")
+	}
+
 	// Take snapshot
 	snapPath := filepath.Join(snapDir, "template.snap")
 	memPath := filepath.Join(snapDir, "template.mem")

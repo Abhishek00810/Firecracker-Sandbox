@@ -185,6 +185,54 @@ asyncio.run(main())
 | Node.js | `"node"` | Persistent kernel — state survives across session calls |
 | Bash | `"bash"` | Fresh process per call |
 
+### Python
+
+```python
+result = sb.run("print(1 + 1)", language="python")
+print(result.stdout)  # 2
+```
+
+State persists across session calls:
+
+```python
+with sb.session() as sess:
+    sess.run("const x = 10", language="python")  # wrong — see Node example
+    sess.run("import math")
+    result = sess.run("print(math.pi)")
+    print(result.stdout)  # 3.141592653589793
+```
+
+### Node.js
+
+```python
+result = sb.run("console.log(1 + 1)", language="node")
+print(result.stdout)  # 2
+```
+
+State persists across session calls:
+
+```python
+with sb.session() as sess:
+    sess.run("const x = 10", language="node")
+    result = sess.run("console.log(x * 3)", language="node")
+    print(result.stdout)  # 30
+```
+
+### Bash
+
+```python
+result = sb.run("echo hello && ls /usr", language="bash")
+print(result.stdout)
+```
+
+Bash runs in a **fresh process** on every call — no state is shared between calls:
+
+```python
+result = sb.run("export MY_VAR=hello", language="bash")
+result = sb.run("echo $MY_VAR", language="bash")
+print(result.stdout)  # (empty — fresh process, variable is gone)
+```
+
 ---
 
 ## Error handling
