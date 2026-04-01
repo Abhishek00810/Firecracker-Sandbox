@@ -30,7 +30,6 @@ except Exception as e:
 
 KERNEL_NAMES = {
     "python": "python3",
-    "node":   "javascript",  # requires ijavascript
 }
 
 def strip_ansi(text):

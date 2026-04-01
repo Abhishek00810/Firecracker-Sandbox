@@ -112,7 +112,6 @@ func (kb *KernelBridge) execute(code string, timeoutSec int) (*ExecutionResponse
 // kernelLanguages are routed through kernel_bridge.py for persistent state.
 var kernelLanguages = map[string]bool{
 	"python": true,
-	"node":   true,
 }
 
 var (
@@ -145,17 +144,153 @@ func evictKernel(language string) {
 	kernelsMu.Unlock()
 }
 
-// ─── Execution Router
+// ─── Node Bridge ──────────────────────────────────────────────────────────────
+
+// NodeBridge wraps a long-lived node_bridge.js process.
+// Same stdin/stdout JSON protocol as KernelBridge.
+type NodeBridge struct {
+	cmd          *exec.Cmd
+	stdin        io.WriteCloser
+	stdout       *bufio.Scanner
+	bridgeStderr *bytes.Buffer
+}
+
+func newNodeBridge() (*NodeBridge, error) {
+	cmd := exec.Command("/usr/bin/node", "/usr/local/bin/node_bridge.js")
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("stdin pipe: %w", err)
+	}
+
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("stdout pipe: %w", err)
+	}
+
+	stderrBuf := new(bytes.Buffer)
+	cmd.Stderr = io.MultiWriter(log.Writer(), stderrBuf)
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start node_bridge.js: %w", err)
+	}
+
+	log.Printf("node bridge started pid=%d", cmd.Process.Pid)
+
+	return &NodeBridge{
+		cmd:          cmd,
+		stdin:        stdin,
+		stdout:       bufio.NewScanner(stdoutPipe),
+		bridgeStderr: stderrBuf,
+	}, nil
+}
+
+func (nb *NodeBridge) execute(code string, timeoutSec int) (*ExecutionResponse, error) {
+	req := map[string]interface{}{
+		"code":    code,
+		"timeout": timeoutSec,
+	}
+	data, _ := json.Marshal(req)
+	data = append(data, '\n')
+
+	if _, err := nb.stdin.Write(data); err != nil {
+		return nil, fmt.Errorf("write to node bridge: %w", err)
+	}
+
+	if !nb.stdout.Scan() {
+		if err := nb.stdout.Err(); err != nil {
+			return nil, fmt.Errorf("node bridge stdout: %w", err)
+		}
+		return nil, fmt.Errorf("node bridge process closed: %s", nb.bridgeStderr.String())
+	}
+
+	var resp ExecutionResponse
+	if err := json.Unmarshal(nb.stdout.Bytes(), &resp); err != nil {
+		return nil, fmt.Errorf("decode node bridge response: %w", err)
+	}
+
+	return &resp, nil
+}
+
+var (
+	nodeBridgeMu sync.Mutex
+	nodeBridge   *NodeBridge
+)
+
+func getOrStartNodeBridge() (*NodeBridge, error) {
+	nodeBridgeMu.Lock()
+	defer nodeBridgeMu.Unlock()
+
+	if nodeBridge != nil {
+		slog.Info("node bridge: found existing")
+		return nodeBridge, nil
+	}
+	slog.Info("node bridge: starting new")
+
+	nb, err := newNodeBridge()
+	if err != nil {
+		return nil, err
+	}
+
+	nodeBridge = nb
+	return nb, nil
+}
+
+func evictNodeBridge() {
+	nodeBridgeMu.Lock()
+	nodeBridge = nil
+	nodeBridgeMu.Unlock()
+}
+
+// ─── Execution Router ─────────────────────────────────────────────────────────
 
 func executeCode(req ExecutionRequest) ExecutionResponse {
 	startTime := time.Now()
 
-	// python/node → persistent Jupyter kernel (state survives between calls)
-	// bash        → direct exec (new process per call, no state)
+	// node   → persistent node_bridge.js (vm module, no ZMQ)
+	// python → persistent Jupyter kernel via kernel_bridge.py
+	// bash   → direct exec (new process per call, no state)
+	if req.Language == "node" {
+		return executeViaNodeBridge(req, startTime)
+	}
 	if kernelLanguages[req.Language] {
 		return executeViaKernel(req, startTime)
 	}
 	return executeDirect(req, startTime)
+}
+
+func executeViaNodeBridge(req ExecutionRequest, startTime time.Time) ExecutionResponse {
+	timeout := 30
+	if req.Timeout > 0 {
+		timeout = req.Timeout
+		if timeout > 30 {
+			timeout = 30
+		}
+	}
+
+	nb, err := getOrStartNodeBridge()
+	if err != nil {
+		log.Printf("node bridge start failed err=%v", err)
+		return ExecutionResponse{
+			Stderr:   fmt.Sprintf("failed to start node bridge: %v", err),
+			ExitCode: -1,
+			Duration: time.Since(startTime).Seconds(),
+		}
+	}
+
+	resp, err := nb.execute(req.Code, timeout)
+	if err != nil {
+		evictNodeBridge()
+		log.Printf("node bridge execution failed err=%v — evicted", err)
+		return ExecutionResponse{
+			Stderr:   fmt.Sprintf("node bridge error: %v", err),
+			ExitCode: -1,
+			Duration: time.Since(startTime).Seconds(),
+		}
+	}
+
+	resp.Duration = time.Since(startTime).Seconds()
+	return *resp
 }
 
 func executeViaKernel(req ExecutionRequest, startTime time.Time) ExecutionResponse {

@@ -98,6 +98,10 @@ test_config.json
 test_supabase.sh
 test_auth.sh
 test_session.sh
+test_sdk.py
+test_api.sh
+test_node.sh
+guest-agent/test_node_bridge.sh
 
 # Test coverage
 coverage.txt
