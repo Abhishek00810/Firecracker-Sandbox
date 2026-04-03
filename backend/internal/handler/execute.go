@@ -3,6 +3,7 @@ package handler
 import (
 	"backend/internal/metrics"
 	"backend/internal/middleware"
+	"backend/internal/platform"
 	"backend/internal/queue"
 	"backend/internal/ratelimit"
 	"backend/internal/tierconfig"
@@ -16,7 +17,7 @@ import (
 
 
 
-func ExecuteHandler(freeQueue *queue.JobQueue, premiumQueue *queue.JobQueue, freeLimiter *ratelimit.TenantLimiter, premiumLimiter *ratelimit.TenantLimiter) http.HandlerFunc {
+func ExecuteHandler(freeQueue *queue.JobQueue, premiumQueue *queue.JobQueue, freeLimiter *ratelimit.TenantLimiter, premiumLimiter *ratelimit.TenantLimiter, platformClient *platform.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := middleware.RequestIDFromContext(r.Context())
 
@@ -80,6 +81,16 @@ func ExecuteHandler(freeQueue *queue.JobQueue, premiumQueue *queue.JobQueue, fre
 		}
 
 		metrics.RecordExecutionEnd(duration, errType)
+
+		go platformClient.InsertUsageLog(r.Context(), platform.UsageLog{
+			APIKeyID:      auth.APIKeyID,
+			UserID:        auth.TenantID,
+			ExecutionType: "execute",
+			Language:      req.Language,
+			DurationMs:    int(duration * 1000),
+			ExitCode:      int(result.Result.ExitCode),
+			CostUSD:       0.0,
+		})
 
 		output := &ExecutionOutput{
 			Stdout:            result.Result.Stdout,

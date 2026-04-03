@@ -160,9 +160,9 @@ func main() {
 	premiumLimiter := ratelimit.NewTenantLimiter(rate.Limit(proTc.RateLimit), proTc.RateBurst)
 
 	http.HandleFunc("/health", healthHandler)
-	http.HandleFunc("/execute", handler.ExecuteHandler(freeQueue, premiumQueue, freeLimiter, premiumLimiter))
-	http.HandleFunc("/session", handler.SessionHandler(sessionMgr))
-	http.HandleFunc("/session/", handler.SessionHandler(sessionMgr))
+	http.HandleFunc("/execute", handler.ExecuteHandler(freeQueue, premiumQueue, freeLimiter, premiumLimiter, platformClient))
+	http.HandleFunc("/session", handler.SessionHandler(sessionMgr, platformClient))
+	http.HandleFunc("/session/", handler.SessionHandler(sessionMgr, platformClient))
 
 	metricsHandler := func(w http.ResponseWriter, r *http.Request) {
 		snap := metrics.GetSnapshot()

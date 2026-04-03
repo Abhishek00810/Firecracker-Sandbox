@@ -2,6 +2,7 @@ package handler
 
 import (
 	"backend/internal/middleware"
+	"backend/internal/platform"
 	"backend/internal/session"
 	"encoding/json"
 	"fmt"
@@ -17,7 +18,7 @@ import (
 //	POST   /session/:id/run  → run code in session
 //	DELETE /session/:id      → destroy session
 //	GET    /session/:id      → session info
-func SessionHandler(mgr *session.Manager) http.HandlerFunc {
+func SessionHandler(mgr *session.Manager, platformClient *platform.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := middleware.RequestIDFromContext(r.Context())
 
@@ -81,6 +82,16 @@ func SessionHandler(mgr *session.Manager) http.HandlerFunc {
 					TenantID: auth.TenantID,
 					Tier:     auth.Config.Name,
 				},
+			})
+
+			go platformClient.InsertUsageLog(r.Context(), platform.UsageLog{
+				APIKeyID:      auth.APIKeyID,
+				UserID:        auth.TenantID,
+				ExecutionType: "session_create",
+				Language:      "",
+				DurationMs:    0,
+				ExitCode:      0,
+				CostUSD:       0.0,
 			})
 
 		// POST /session/:id/run — execute code in session
@@ -151,6 +162,16 @@ func SessionHandler(mgr *session.Manager) http.HandlerFunc {
 					Message: fmt.Sprintf("process exited with code %d", result.ExitCode),
 				}
 			}
+
+			go platformClient.InsertUsageLog(r.Context(), platform.UsageLog{
+				APIKeyID:      auth.APIKeyID,
+				UserID:        auth.TenantID,
+				ExecutionType: "session_run",
+				Language:      req.Language,
+				DurationMs:    int(execDurationMs),
+				ExitCode:      int(result.ExitCode),
+				CostUSD:       0.0,
+			})
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(runResp)
