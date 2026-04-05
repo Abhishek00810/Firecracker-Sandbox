@@ -25,13 +25,13 @@ type UsageLog struct {
 func (c *Client) InsertUsageLog(ctx context.Context, log UsageLog) {
 	body, err := json.Marshal(log)
 	if err != nil {
-		slog.Warn("usage log marshal failed", "err", err)
+		slog.Warn("usage log marshal failed: ", "err", err)
 		return
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/rest/v1/usage_logs", bytes.NewReader(body))
 	if err != nil {
-		slog.Warn("usage log request build failed", "err", err)
+		slog.Warn("usage log request build failed: ", "err", err)
 		return
 	}
 
@@ -49,6 +49,6 @@ func (c *Client) InsertUsageLog(ctx context.Context, log UsageLog) {
 
 	if resp.StatusCode >= 300 {
 		slog.Warn("usage log insert returned unexpected status", "status", resp.StatusCode,
-			"err", fmt.Errorf("supabase returned status %d", resp.StatusCode))
+			"err", fmt.Errorf("supabase returned status: %d", resp.StatusCode))
 	}
 }
