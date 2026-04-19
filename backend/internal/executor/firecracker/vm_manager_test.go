@@ -7,7 +7,7 @@ import (
 
 func TestCreate(t *testing.T) {
 	// Setup
-	manager := NewFirecrackerManager("/tmp/test-fc", "./assets")
+	manager := NewFirecrackerManager("/tmp/test-fc", "./assets", "/bin/true")
 
 	// Create a VM
 	cfg := VMConfig{

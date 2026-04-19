@@ -2,6 +2,7 @@ package main
 
 import (
 	"backend/internal/cgroup"
+	"backend/internal/config"
 	"backend/internal/executor/firecracker"
 	"backend/internal/handler"
 	"backend/internal/metrics"
@@ -17,7 +18,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -56,41 +56,33 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	setupLogger()
 
-	supabaseURL := os.Getenv("SUPABASE_URL")
-	serviceRoleKey := os.Getenv("SUPABASE_SERVICE_ROLE_KEY")
-	if supabaseURL == "" || serviceRoleKey == "" {
-		slog.Error("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set")
+	cfg, err := config.Load()
+	if err != nil {
+		slog.Error("startup validation failed", "err", err)
 		os.Exit(1)
 	}
-	platformClient := platform.NewClient(supabaseURL, serviceRoleKey)
+	for _, warning := range cfg.Warnings {
+		slog.Warn("startup warning", "message", warning)
+	}
+
+	platformClient := platform.NewClient(cfg.SupabaseURL, cfg.ServiceRoleKey)
 
 	if err := cgroup.Init(); err != nil {
 		slog.Warn("cgroup init failed, limits will not be enforced", "err", err)
 	}
 
-	socketDir := filepath.Join(os.TempDir(), "fc-sockets")
-	assetsPath := os.Getenv("ASSETS_PATH")
-	if assetsPath == "" {
-		assetsPath = "/app/assets"
-	}
-
-	if err := os.MkdirAll(socketDir, 0755); err != nil {
-		slog.Error("failed to create socket directory", "err", err)
-		os.Exit(1)
-	}
-
 	freeTc := tierconfig.Tiers[tierconfig.Free]
 	proTc := tierconfig.Tiers[tierconfig.Pro]
 
-	vmManager := firecracker.NewFirecrackerManager(socketDir, assetsPath)
+	vmManager := firecracker.NewFirecrackerManager(cfg.SocketDir, cfg.AssetsPath, cfg.FirecrackerBinary)
 
 	config := firecracker.VMConfig{
 		VCPUCount:  2,
 		MemSizeMiB: 256,
 		Timeout:    30 * time.Second,
-		KernelPath: filepath.Join(assetsPath, "kernel/vmlinux"),
-		RootfsPath: filepath.Join(assetsPath, "rootfs/rootfs-alpine.ext4"),
-		InitrdPath: filepath.Join(assetsPath, "initramfs.cpio.gz"),
+		KernelPath: cfg.KernelPath,
+		RootfsPath: cfg.RootfsPath,
+		InitrdPath: cfg.InitrdPath,
 		BootArgs:   "console=ttyS0 reboot=k panic=1 pci=off",
 	}
 
@@ -118,9 +110,8 @@ func main() {
 
 	// Create a snapshot template once at startup: boot one VM, warm up kernels,
 	// freeze it. All pool VMs and sessions restore from this snapshot in ~100ms.
-	snapDir := "/dev/shm/fc-snapshots"
 	var template *firecracker.SnapshotTemplate
-	if tmpl, err := vmManager.CreateTemplate(context.Background(), config, snapDir); err != nil {
+	if tmpl, err := vmManager.CreateTemplate(context.Background(), config, cfg.SnapshotDir); err != nil {
 		slog.Warn("snapshot template creation failed, falling back to cold boot", "err", err)
 	} else {
 		template = tmpl
@@ -177,7 +168,7 @@ func main() {
 
 	http.HandleFunc("/metrics", metricsHandler)
 
-	port := ":8080"
+	port := ":" + cfg.Port
 	slog.Info("server is running", "port", port)
 
 	quit := make(chan os.Signal, 1)

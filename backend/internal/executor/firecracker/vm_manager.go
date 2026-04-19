@@ -115,6 +115,7 @@ type VMStateChange struct {
 type FireCrackerManager struct {
 	SocketDir  string
 	AssetsPath string
+	BinaryPath string
 	Vms        map[string]*MicroVM
 	mu         sync.RWMutex
 	nextCID    atomic.Uint32
@@ -131,10 +132,11 @@ type VMManager interface {
 	LoadFromSnapshot(ctx context.Context, cfg VMConfig, tmpl *SnapshotTemplate) (*MicroVM, error)
 }
 
-func NewFirecrackerManager(socketDir, assetsPath string) *FireCrackerManager {
+func NewFirecrackerManager(socketDir, assetsPath, binaryPath string) *FireCrackerManager {
 	return &FireCrackerManager{
 		SocketDir:  socketDir,
 		AssetsPath: assetsPath,
+		BinaryPath: binaryPath,
 		Vms:        make(map[string]*MicroVM),
 	}
 }
@@ -299,12 +301,7 @@ func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
 		slog.Warn("failed to write network config to rootfs, VM will boot without network", "err", err)
 	}
 
-	firecrackerBinary := os.Getenv("FIRECRACKER_BINARY")
-	if firecrackerBinary == "" {
-		firecrackerBinary = "/app/firecracker/firecracker-v1.7.0-aarch64"
-	}
-
-	cmd := exec.Command(firecrackerBinary, "--api-sock", vm.SocketPath)
+	cmd := exec.Command(f.BinaryPath, "--api-sock", vm.SocketPath)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -500,12 +497,8 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 	socketPath := f.getSocketPath(vmID)
 	vsockPath := filepath.Join(f.SocketDir, fmt.Sprintf("vsock-%s.sock", vmID))
 
-	firecrackerBinary := os.Getenv("FIRECRACKER_BINARY")
-	if firecrackerBinary == "" {
-		firecrackerBinary = "/app/firecracker/firecracker-v1.7.0-aarch64"
-	}
 	var stdout, stderr bytes.Buffer
-	cmd := exec.Command(firecrackerBinary, "--api-sock", socketPath)
+	cmd := exec.Command(f.BinaryPath, "--api-sock", socketPath)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
