@@ -49,9 +49,15 @@ type MetricsSnapshot struct {
 	SystemErrCount   int64   `json:"system_err_count"`
 	ActiveExecutions int64   `json:"active_executions"`
 	// Populated by caller:
-	QueueDepth      int `json:"queue_depth"`
-	VMPoolAvailable int `json:"vm_pool_available"`
-	VMPoolInUse     int `json:"vm_pool_in_use"`
+	QueueDepth        int `json:"queue_depth"`
+	VMPoolAvailable   int `json:"vm_pool_available"`
+	VMPoolInUse       int `json:"vm_pool_in_use"`
+	FreeQueueDepth    int `json:"free_queue_depth"`
+	ProQueueDepth     int `json:"pro_queue_depth"`
+	FreePoolAvailable int `json:"free_pool_available"`
+	FreePoolInUse     int `json:"free_pool_in_use"`
+	ProPoolAvailable  int `json:"pro_pool_available"`
+	ProPoolInUse      int `json:"pro_pool_in_use"`
 }
 
 func RecordExecutionStart() {

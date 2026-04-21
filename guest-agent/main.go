@@ -20,7 +20,7 @@ import (
 
 const (
 	DefaultTimeout = 15 * time.Second
-	MaxTimeout     = 30 * time.Second
+	MaxTimeout     = 60 * time.Second
 )
 
 // request from host
@@ -298,11 +298,11 @@ func executeCode(req ExecutionRequest) ExecutionResponse {
 }
 
 func executeViaNodeBridge(req ExecutionRequest, startTime time.Time) ExecutionResponse {
-	timeout := 30
+	timeout := int(MaxTimeout.Seconds())
 	if req.Timeout > 0 {
 		timeout = req.Timeout
-		if timeout > 30 {
-			timeout = 30
+		if timeout > int(MaxTimeout.Seconds()) {
+			timeout = int(MaxTimeout.Seconds())
 		}
 	}
 
@@ -332,11 +332,11 @@ func executeViaNodeBridge(req ExecutionRequest, startTime time.Time) ExecutionRe
 }
 
 func executeViaKernel(req ExecutionRequest, startTime time.Time) ExecutionResponse {
-	timeout := 30
+	timeout := int(MaxTimeout.Seconds())
 	if req.Timeout > 0 {
 		timeout = req.Timeout
-		if timeout > 30 {
-			timeout = 30
+		if timeout > int(MaxTimeout.Seconds()) {
+			timeout = int(MaxTimeout.Seconds())
 		}
 	}
 

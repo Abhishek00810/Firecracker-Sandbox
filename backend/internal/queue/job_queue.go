@@ -4,7 +4,6 @@ import (
 	"backend/internal/executor"
 	"context"
 	"errors"
-	"time"
 )
 
 type JobResult struct {
@@ -36,9 +35,7 @@ func NewJobQueue(exec executor.Executor, maxWorkers int) *JobQueue {
 func (q *JobQueue) worker() {
 	// reading jobs from channel this is just task implementation
 	for job := range q.jobs {
-		ctx, cancel := context.WithTimeout(job.Ctx, 12*time.Second)
-		result, err := q.executor.Execute(ctx, job.Code, job.Language)
-		cancel()
+		result, err := q.executor.Execute(job.Ctx, job.Code, job.Language)
 		job.ResultCh <- JobResult{
 			Result: result,
 			Err:    err,

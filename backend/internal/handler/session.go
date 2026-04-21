@@ -18,7 +18,7 @@ import (
 //	POST   /session/:id/run  → run code in session
 //	DELETE /session/:id      → destroy session
 //	GET    /session/:id      → session info
-func SessionHandler(mgr *session.Manager, platformClient *platform.Client) http.HandlerFunc {
+func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := middleware.RequestIDFromContext(r.Context())
 
@@ -84,7 +84,7 @@ func SessionHandler(mgr *session.Manager, platformClient *platform.Client) http.
 				},
 			})
 
-			go platformClient.InsertUsageLog(r.Context(), platform.UsageLog{
+			go usageLogger.InsertUsageLog(r.Context(), platform.UsageLog{
 				APIKeyID:      auth.APIKeyID,
 				UserID:        auth.TenantID,
 				ExecutionType: "session_create",
@@ -163,7 +163,7 @@ func SessionHandler(mgr *session.Manager, platformClient *platform.Client) http.
 				}
 			}
 
-			go platformClient.InsertUsageLog(r.Context(), platform.UsageLog{
+			go usageLogger.InsertUsageLog(r.Context(), platform.UsageLog{
 				APIKeyID:      auth.APIKeyID,
 				UserID:        auth.TenantID,
 				ExecutionType: "session_run",

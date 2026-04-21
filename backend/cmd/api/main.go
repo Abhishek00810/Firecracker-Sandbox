@@ -159,9 +159,15 @@ func main() {
 		snap := metrics.GetSnapshot()
 		freeAvail, freeInUse := freePool.Stats()
 		premAvail, premInUse := premiumPool.Stats()
+		snap.FreePoolAvailable = freeAvail
+		snap.FreePoolInUse = freeInUse
+		snap.ProPoolAvailable = premAvail
+		snap.ProPoolInUse = premInUse
+		snap.FreeQueueDepth = freeQueue.Depth()
+		snap.ProQueueDepth = premiumQueue.Depth()
 		snap.VMPoolAvailable = freeAvail + premAvail
 		snap.VMPoolInUse = freeInUse + premInUse
-		snap.QueueDepth = freeQueue.Depth() + premiumQueue.Depth()
+		snap.QueueDepth = snap.FreeQueueDepth + snap.ProQueueDepth
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(snap)
 	}

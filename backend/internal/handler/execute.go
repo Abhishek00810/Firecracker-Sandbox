@@ -7,6 +7,7 @@ import (
 	"backend/internal/queue"
 	"backend/internal/ratelimit"
 	"backend/internal/tierconfig"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -14,7 +15,7 @@ import (
 	"time"
 )
 
-func ExecuteHandler(freeQueue *queue.JobQueue, premiumQueue *queue.JobQueue, freeLimiter *ratelimit.TenantLimiter, premiumLimiter *ratelimit.TenantLimiter, platformClient *platform.Client) http.HandlerFunc {
+func ExecuteHandler(freeQueue *queue.JobQueue, premiumQueue *queue.JobQueue, freeLimiter *ratelimit.TenantLimiter, premiumLimiter *ratelimit.TenantLimiter, usageLogger platform.UsageLogger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := middleware.RequestIDFromContext(r.Context())
 
@@ -46,7 +47,10 @@ func ExecuteHandler(freeQueue *queue.JobQueue, premiumQueue *queue.JobQueue, fre
 			return
 		}
 
-		resultCh, err := jobQueue.Submit(r.Context(), req.Code, req.Language)
+		execCtx, cancel := context.WithTimeout(r.Context(), auth.Config.MaxExecTimeout)
+		defer cancel()
+
+		resultCh, err := jobQueue.Submit(execCtx, req.Code, req.Language)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 			return
@@ -79,7 +83,7 @@ func ExecuteHandler(freeQueue *queue.JobQueue, premiumQueue *queue.JobQueue, fre
 
 		metrics.RecordExecutionEnd(duration, errType)
 
-		go platformClient.InsertUsageLog(r.Context(), platform.UsageLog{
+		go usageLogger.InsertUsageLog(r.Context(), platform.UsageLog{
 			APIKeyID:      auth.APIKeyID,
 			UserID:        auth.TenantID,
 			ExecutionType: "execute",

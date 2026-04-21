@@ -53,13 +53,17 @@ func NewVMPoolWithSnapshot(n int, cfg VMConfig, mgr VMManager, cgroupConfig cgro
 }
 
 func (p *VMPool) addVM() error {
+	start := time.Now()
 	ctx := context.Background()
 	var vm *MicroVM
 	var err error
+	restoreMode := "cold_boot"
 	if p.template != nil {
+		restoreMode = "snapshot_restore"
 		vm, err = p.manager.LoadFromSnapshot(ctx, p.config, p.template)
 		if err != nil {
 			slog.Warn("snapshot restore failed, falling back to cold boot", "err", err)
+			restoreMode = "snapshot_fallback_cold_boot"
 			vm, err = p.manager.Create(ctx, p.config)
 			if err != nil {
 				return err
@@ -98,13 +102,6 @@ func (p *VMPool) addVM() error {
 		return fmt.Errorf("vsock never became ready for VM %s", vm.ID)
 	}
 
-	// Warm up the Python kernel so the first real request is fast.
-	vsock := NewVsockClient(vm.VsockPath)
-	if _, err := vsock.Execute("pass", "python", 30); err != nil {
-		slog.Warn("kernel warmup failed", "vm_id", vm.ID, "err", err)
-	}
-	slog.Info("kernel warmed up", "vm_id", vm.ID)
-
 	var cg *cgroup.Cgroup
 	if vm.Process != nil && vm.Process.Process != nil {
 		cg, err = cgroup.New("default", vm.ID, p.cgroupConfig)
@@ -130,18 +127,35 @@ func (p *VMPool) addVM() error {
 	p.mu.Unlock()
 	p.vms <- pooledVM
 
+	slog.Info("pool vm added",
+		"vm_id", vm.ID,
+		"mode", restoreMode,
+		"duration_ms", time.Since(start).Milliseconds(),
+		"pool_available", len(p.vms),
+	)
+
 	return nil
 }
 
 func (p *VMPool) Acquire(timeout time.Duration) (*PooledVM, error) {
+	start := time.Now()
 	select {
 	case vm := <-p.vms:
 		p.mu.Lock()
 		vm.InUse = true
 		vm.LastUsed = time.Now()
 		p.mu.Unlock()
+		slog.Info("pool acquire succeeded",
+			"vm_id", vm.VM.ID,
+			"wait_ms", time.Since(start).Milliseconds(),
+			"pool_available", len(p.vms),
+		)
 		return vm, nil
 	case <-time.After(timeout):
+		slog.Warn("pool acquire timed out",
+			"wait_ms", time.Since(start).Milliseconds(),
+			"pool_available", len(p.vms),
+		)
 		return nil, fmt.Errorf("timeout: no VM available")
 	}
 }
@@ -150,6 +164,7 @@ func (p *VMPool) Release(vm *PooledVM) {
 	// Destroy the used VM — its rootfs may have been modified during execution.
 	// Never return a dirty VM to the pool.
 	go func() {
+		start := time.Now()
 		ctx := context.Background()
 
 		p.mu.Lock()
@@ -168,7 +183,12 @@ func (p *VMPool) Release(vm *PooledVM) {
 		// Replenish pool — uses snapshot restore if template is set, cold boot otherwise
 		if err := p.addVM(); err != nil {
 			slog.Error("failed to replenish pool after releasing VM", "vm_id", vm.VM.ID, "err", err)
+			return
 		}
+		slog.Info("pool release replenished",
+			"vm_id", vm.VM.ID,
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
 	}()
 }
 

@@ -675,25 +675,6 @@ func (f *FireCrackerManager) CreateTemplate(ctx context.Context, cfg VMConfig, s
 		return nil, fmt.Errorf("vsock never became ready for template VM")
 	}
 
-	// Warm up the Python kernel before snapshotting. The kernel_bridge.py process,
-	// ipykernel process, IPC sockets, and guest-agent's kernels map are all captured
-	// in the snapshot RAM — every restored VM inherits the live kernel for free.
-	if _, err := vsock.Execute("pass", "python", 30); err != nil {
-		slog.Warn("kernel warmup failed for template, snapshot will have cold kernel", "err", err,
-			"vm_console", vm.Stderr.String())
-	} else {
-		slog.Info("kernel warmed up in template VM")
-	}
-
-	// Warm up the Node bridge before snapshotting. node_bridge.js process and its
-	// vm context are captured in snapshot RAM — every restored VM inherits the warm
-	// node bridge for free, eliminating the ~10s cold start.
-	if _, err := vsock.Execute("1+1", "node", 30); err != nil {
-		slog.Warn("node bridge warmup failed for template, snapshot will have cold node bridge", "err", err)
-	} else {
-		slog.Info("node bridge warmed up in template VM")
-	}
-
 	// Take snapshot
 	snapPath := filepath.Join(snapDir, "template.snap")
 	memPath := filepath.Join(snapDir, "template.mem")
