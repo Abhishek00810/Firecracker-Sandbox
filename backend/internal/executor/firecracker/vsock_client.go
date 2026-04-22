@@ -17,6 +17,7 @@ type VsockClient struct {
 type ExecuteRequest struct {
 	Code     string `json:"code"`
 	Language string `json:"language"`
+	Mode     string `json:"mode"`
 	Timeout  int    `json:"timeout"` // seconds
 }
 
@@ -56,7 +57,7 @@ func (v *VsockClient) Ping() bool {
 	return string(buf[:2]) == "OK"
 }
 
-func (v *VsockClient) Execute(code, language string, timeoutSec int) (*ExecuteResponse, error) {
+func (v *VsockClient) Execute(code, language, mode string, timeoutSec int) (*ExecuteResponse, error) {
 	// Retry the handshake up to 3 times with 100ms gaps.
 	// Firecracker's vsock proxy can transiently reject connections (EOF on
 	// handshake read) between consecutive requests — a brief wait resolves it.
@@ -109,6 +110,7 @@ func (v *VsockClient) Execute(code, language string, timeoutSec int) (*ExecuteRe
 		Code:     code,
 		Language: language,
 		Timeout:  timeoutSec,
+		Mode:     mode,
 	}
 
 	if err := json.NewEncoder(conn).Encode(req); err != nil {

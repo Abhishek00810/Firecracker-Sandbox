@@ -119,7 +119,7 @@ func (m *Manager) Create(ctx context.Context, tier string) (*Session, error) {
 	// Warm up Python kernel on cold boot only.
 	// Snapshot-restored VMs already have a live kernel in memory.
 	if m.template == nil {
-		if _, err := vsockClient.Execute("pass", "python", 30); err != nil {
+		if _, err := vsockClient.Execute("pass", "python", "stateful", 30); err != nil {
 			slog.Warn("session: python warmup failed", "vm_id", vm.ID, "err", err)
 		}
 	}
@@ -177,7 +177,7 @@ func (m *Manager) Execute(ctx context.Context, sessionID, code, language string)
 	sess.LastUsed = time.Now()
 
 	vsockClient := firecracker.NewVsockClient(sess.VM.VsockPath)
-	resp, err := vsockClient.Execute(code, language, 30)
+	resp, err := vsockClient.Execute(code, language, "stateful", 30)
 	if err != nil {
 		return executor.ExecutionResult{}, fmt.Errorf("execution failed: %w", err)
 	}

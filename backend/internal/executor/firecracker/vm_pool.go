@@ -102,6 +102,12 @@ func (p *VMPool) addVM() error {
 		return fmt.Errorf("vsock never became ready for VM %s", vm.ID)
 	}
 
+	vsock := NewVsockClient(vm.VsockPath)
+	if _, err := vsock.Execute("1+1", "node", "stateless", 30); err != nil {
+		slog.Warn("node bridge warmup failed", "vm_id", vm.ID, "err", err)
+	}
+	slog.Info("node bridge warmed up", "vm_id", vm.ID)
+
 	var cg *cgroup.Cgroup
 	if vm.Process != nil && vm.Process.Process != nil {
 		cg, err = cgroup.New("default", vm.ID, p.cgroupConfig)
@@ -185,7 +191,7 @@ func (p *VMPool) Release(vm *PooledVM) {
 			slog.Error("failed to replenish pool after releasing VM", "vm_id", vm.VM.ID, "err", err)
 			return
 		}
-		slog.Info("pool release replenished",
+		slog.Info("pool release replenished...",
 			"vm_id", vm.VM.ID,
 			"duration_ms", time.Since(start).Milliseconds(),
 		)

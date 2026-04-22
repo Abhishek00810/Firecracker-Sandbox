@@ -28,6 +28,7 @@ type ExecutionRequest struct {
 	Code     string `json:"code"`
 	Language string `json:"language"`
 	Timeout  int    `json:"timeout"`
+	Mode     string `json:"mode"`
 }
 
 // response to host
@@ -289,10 +290,13 @@ func executeCode(req ExecutionRequest) ExecutionResponse {
 	// python → persistent Jupyter kernel via kernel_bridge.py
 	// bash   → direct exec (new process per call, no state)
 	if req.Language == "node" {
+		log.Printf("executeCode node branch mode=%s", req.Mode)
 		return executeViaNodeBridge(req, startTime)
 	}
-	if kernelLanguages[req.Language] {
-		return executeViaKernel(req, startTime)
+	if req.Language == "python" {
+		if req.Mode == "stateful" {
+			return executeViaKernel(req, startTime)
+		}
 	}
 	return executeDirect(req, startTime)
 }
@@ -321,12 +325,13 @@ func executeViaNodeBridge(req ExecutionRequest, startTime time.Time) ExecutionRe
 		evictNodeBridge()
 		log.Printf("node bridge execution failed err=%v — evicted", err)
 		return ExecutionResponse{
-			Stderr:   fmt.Sprintf("node bridge error: %v", err),
+			Stderr:   fmt.Sprintf("[debug] path=node_bridge\nnode bridge error: %v", err),
 			ExitCode: -1,
 			Duration: time.Since(startTime).Seconds(),
 		}
 	}
 
+	resp.Stderr = "[debug] path=node_bridge\n" + resp.Stderr
 	resp.Duration = time.Since(startTime).Seconds()
 	return *resp
 }
@@ -356,23 +361,29 @@ func executeViaKernel(req ExecutionRequest, startTime time.Time) ExecutionRespon
 		evictKernel(req.Language)
 		log.Printf("kernel execution failed language=%s err=%v — evicted", req.Language, err)
 		return ExecutionResponse{
-			Stderr:   fmt.Sprintf("kernel error: %v", err),
+			Stderr:   fmt.Sprintf("[debug] path=kernel_bridge\nkernel error: %v", err),
 			ExitCode: -1,
 			Duration: time.Since(startTime).Seconds(),
 		}
 	}
 
+	resp.Stderr = "[debug] path=kernel_bridge\n" + resp.Stderr
 	resp.Duration = time.Since(startTime).Seconds()
 	return *resp
 }
 
 func executeDirect(req ExecutionRequest, startTime time.Time) ExecutionResponse {
+	log.Printf("executeDirect invoked language=%s mode=%s", req.Language, req.Mode)
 	var cmd *exec.Cmd
 
 	// Use absolute paths since we're running as PID 1 without proper PATH
 	switch req.Language {
 	case "bash":
 		cmd = exec.Command("/bin/bash", "-c", req.Code)
+	case "python":
+		cmd = exec.Command("/usr/bin/python3", "-c", req.Code)
+	case "node":
+		cmd = exec.Command("/usr/bin/node", "-e", req.Code)
 	default:
 		return ExecutionResponse{
 			Stderr:   fmt.Sprintf("unsupported language: %s", req.Language),
@@ -393,6 +404,7 @@ func executeDirect(req ExecutionRequest, startTime time.Time) ExecutionResponse 
 			Duration: time.Since(startTime).Seconds(),
 		}
 	}
+	log.Printf("executeDirect started language=%s pid=%d timeout_req=%d", req.Language, cmd.Process.Pid, req.Timeout)
 
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
@@ -408,6 +420,7 @@ func executeDirect(req ExecutionRequest, startTime time.Time) ExecutionResponse 
 	exitCode := 0
 	select {
 	case err := <-done:
+		log.Printf("executeDirect finished language=%s pid=%d duration_ms=%d err=%v", req.Language, cmd.Process.Pid, time.Since(startTime).Milliseconds(), err)
 		if err != nil {
 			if exitErr, ok := err.(*exec.ExitError); ok {
 				exitCode = exitErr.ExitCode()
@@ -419,6 +432,7 @@ func executeDirect(req ExecutionRequest, startTime time.Time) ExecutionResponse 
 		log.Printf("process timeout after %v, killing...", timeout)
 		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		cmd.Wait()
+		log.Printf("executeDirect timed out language=%s pid=%d duration_ms=%d", req.Language, cmd.Process.Pid, time.Since(startTime).Milliseconds())
 		return ExecutionResponse{
 			Stdout:   stdout.String(),
 			Stderr:   stderr.String() + fmt.Sprintf("\n[Timeout: Process killed after %v]", timeout),
@@ -429,7 +443,7 @@ func executeDirect(req ExecutionRequest, startTime time.Time) ExecutionResponse 
 
 	return ExecutionResponse{
 		Stdout:   stdout.String(),
-		Stderr:   stderr.String(),
+		Stderr:   "[debug] path=execute_direct\n" + stderr.String(),
 		ExitCode: exitCode,
 		Duration: time.Since(startTime).Seconds(),
 	}

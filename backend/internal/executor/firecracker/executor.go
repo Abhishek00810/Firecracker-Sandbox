@@ -36,12 +36,18 @@ func (f *FirecrackerExecutor) Execute(ctx context.Context, code, language string
 	// Execute code via vsock
 	vsockClient := NewVsockClient(pooledVM.VM.VsockPath)
 	timeoutSec := requestTimeoutSeconds(ctx, 30)
-	resp, err := vsockClient.Execute(code, language, timeoutSec)
+	resp, err := vsockClient.Execute(code, language, "stateless", timeoutSec)
 	if err != nil {
 		slog.Warn("execution failed", "vm_id", pooledVM.VM.ID, "err", err,
 			"vm_console", pooledVM.VM.Stderr.String())
 		return executor.ExecutionResult{}, fmt.Errorf("failed to execute: %w", err)
 	}
+	slog.Info("execution succeeded",
+		"vm_id", pooledVM.VM.ID,
+		"language", language,
+		"guest_duration_ms", resp.Duration*1000,
+		"vm_console", pooledVM.VM.Stderr.String(),
+	)
 	duration := time.Since(startTime).Seconds()
 
 	return executor.ExecutionResult{
