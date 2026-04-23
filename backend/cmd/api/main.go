@@ -118,10 +118,10 @@ func main() {
 		slog.Info("snapshot template ready", "snap", tmpl.SnapPath)
 	}
 
-	freePool := firecracker.NewVMPoolWithSnapshot(freeTc.PoolSize, config, vmManager, freeCgroupCfg, template)
-	premiumPool := firecracker.NewVMPoolWithSnapshot(proTc.PoolSize, config, vmManager, premiumCgroupCfg, template)
-	freeSessionPool := firecracker.NewVMPoolWithSnapshot(freeTc.PoolSize, config, vmManager, freeSessionCgroupCfg, template)
-	proSessionPool := firecracker.NewVMPoolWithSnapshot(proTc.PoolSize, config, vmManager, premiumSessionCgroupCfg, template)
+	freePool := firecracker.NewVMPoolWithSnapshot(freeTc.PoolSize, config, vmManager, freeCgroupCfg, template, false, false)
+	premiumPool := firecracker.NewVMPoolWithSnapshot(proTc.PoolSize, config, vmManager, premiumCgroupCfg, template, false, true)
+	freeSessionPool := firecracker.NewVMPoolWithSnapshot(freeTc.PoolSize, config, vmManager, freeSessionCgroupCfg, template, false, false)
+	proSessionPool := firecracker.NewVMPoolWithSnapshot(proTc.PoolSize, config, vmManager, premiumSessionCgroupCfg, template, true, false)
 	slog.Info("VM pools initialized")
 
 	sessionMgr := session.NewManager(

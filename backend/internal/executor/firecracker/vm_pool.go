@@ -10,14 +10,16 @@ import (
 )
 
 type VMPool struct {
-	mu           sync.Mutex
-	vms          chan *PooledVM       // queue of available VMs
-	vmMap        map[string]*PooledVM // ALL VMs
-	config       VMConfig
-	manager      VMManager
-	size         int
-	cgroupConfig cgroup.Config
-	template     *SnapshotTemplate // nil = cold boot
+	mu                 sync.Mutex
+	vms                chan *PooledVM       // queue of available VMs
+	vmMap              map[string]*PooledVM // ALL VMs
+	config             VMConfig
+	manager            VMManager
+	size               int
+	cgroupConfig       cgroup.Config
+	template           *SnapshotTemplate // nil = cold boot
+	warmPythonStateful bool
+	warmNodeBridge     bool
 }
 
 type PooledVM struct {
@@ -29,18 +31,21 @@ type PooledVM struct {
 }
 
 func NewVMPool(n int, cfg VMConfig, mgr VMManager, cgroupConfig cgroup.Config) *VMPool {
-	return NewVMPoolWithSnapshot(n, cfg, mgr, cgroupConfig, nil)
+	return NewVMPoolWithSnapshot(n, cfg, mgr, cgroupConfig, nil, false, false)
 }
 
-func NewVMPoolWithSnapshot(n int, cfg VMConfig, mgr VMManager, cgroupConfig cgroup.Config, tmpl *SnapshotTemplate) *VMPool {
+func NewVMPoolWithSnapshot(n int, cfg VMConfig, mgr VMManager, cgroupConfig cgroup.Config, tmpl *SnapshotTemplate,
+	warmPythonStateful bool, warmNodeBridge bool) *VMPool {
 	pool := &VMPool{
-		vms:          make(chan *PooledVM, n),
-		vmMap:        make(map[string]*PooledVM),
-		size:         n,
-		config:       cfg,
-		manager:      mgr,
-		cgroupConfig: cgroupConfig,
-		template:     tmpl,
+		vms:                make(chan *PooledVM, n),
+		vmMap:              make(map[string]*PooledVM),
+		size:               n,
+		config:             cfg,
+		manager:            mgr,
+		cgroupConfig:       cgroupConfig,
+		template:           tmpl,
+		warmPythonStateful: warmPythonStateful,
+		warmNodeBridge:     warmNodeBridge,
 	}
 
 	for i := 0; i < n; i++ {
@@ -103,10 +108,22 @@ func (p *VMPool) addVM() error {
 	}
 
 	vsock := NewVsockClient(vm.VsockPath)
-	if _, err := vsock.Execute("1+1", "node", "stateless", 30); err != nil {
-		slog.Warn("node bridge warmup failed", "vm_id", vm.ID, "err", err)
+
+	if p.warmPythonStateful {
+		if _, err := vsock.Execute("pass", "python", "stateful", 30); err != nil {
+			slog.Warn("python stateful warmup failed", "vm_id", vm.ID, "err", err)
+		} else {
+			slog.Info("python stateful warmed up", "vm_id", vm.ID)
+		}
 	}
-	slog.Info("node bridge warmed up", "vm_id", vm.ID)
+
+	if p.warmNodeBridge {
+		if _, err := vsock.Execute("1+1", "node", "stateless", 30); err != nil {
+			slog.Warn("node bridge warmup failed", "vm_id", vm.ID, "err", err)
+		} else {
+			slog.Info("node bridge warmed up", "vm_id", vm.ID)
+		}
+	}
 
 	var cg *cgroup.Cgroup
 	if vm.Process != nil && vm.Process.Process != nil {
