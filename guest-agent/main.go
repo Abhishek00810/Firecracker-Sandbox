@@ -325,13 +325,12 @@ func executeViaNodeBridge(req ExecutionRequest, startTime time.Time) ExecutionRe
 		evictNodeBridge()
 		log.Printf("node bridge execution failed err=%v — evicted", err)
 		return ExecutionResponse{
-			Stderr:   fmt.Sprintf("[debug] path=node_bridge\nnode bridge error: %v", err),
+			Stderr:   fmt.Sprintf("node bridge error: %v", err),
 			ExitCode: -1,
 			Duration: time.Since(startTime).Seconds(),
 		}
 	}
 
-	resp.Stderr = "[debug] path=node_bridge\n" + resp.Stderr
 	resp.Duration = time.Since(startTime).Seconds()
 	return *resp
 }
@@ -361,13 +360,12 @@ func executeViaKernel(req ExecutionRequest, startTime time.Time) ExecutionRespon
 		evictKernel(req.Language)
 		log.Printf("kernel execution failed language=%s err=%v — evicted", req.Language, err)
 		return ExecutionResponse{
-			Stderr:   fmt.Sprintf("[debug] path=kernel_bridge\nkernel error: %v", err),
+			Stderr:   fmt.Sprintf("kernel error: %v", err),
 			ExitCode: -1,
 			Duration: time.Since(startTime).Seconds(),
 		}
 	}
 
-	resp.Stderr = "[debug] path=kernel_bridge\n" + resp.Stderr
 	resp.Duration = time.Since(startTime).Seconds()
 	return *resp
 }
@@ -443,7 +441,7 @@ func executeDirect(req ExecutionRequest, startTime time.Time) ExecutionResponse 
 
 	return ExecutionResponse{
 		Stdout:   stdout.String(),
-		Stderr:   "[debug] path=execute_direct\n" + stderr.String(),
+		Stderr:   stderr.String(),
 		ExitCode: exitCode,
 		Duration: time.Since(startTime).Seconds(),
 	}
