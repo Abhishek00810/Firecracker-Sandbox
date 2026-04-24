@@ -2,19 +2,26 @@ package firecracker
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
 func TestCreate(t *testing.T) {
 	// Setup
-	manager := NewFirecrackerManager("/tmp/test-fc", "./assets", "/bin/true")
+	socketDir := t.TempDir()
+	manager := NewFirecrackerManager(socketDir, "./assets", "/bin/true")
+	rootfsPath := filepath.Join(t.TempDir(), "rootfs.ext4")
+	if err := os.WriteFile(rootfsPath, []byte("rootfs"), 0644); err != nil {
+		t.Fatalf("write temp rootfs: %v", err)
+	}
 
 	// Create a VM
 	cfg := VMConfig{
 		VCPUCount:  2,
 		MemSizeMiB: 256,
 		KernelPath: "/path/to/kernel",
-		RootfsPath: "/path/to/rootfs",
+		RootfsPath: rootfsPath,
 		BootArgs:   "console=ttyS0",
 	}
 
