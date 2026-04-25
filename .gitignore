@@ -85,8 +85,8 @@ temp/
 
 # Firecracker artifacts
 *.ext4
-vmlinux
 assets/initramfs.cpio.gz
+vmlinux
 firecracker-socket
 # Firecracker binary archives
 firecracker-*.tgz

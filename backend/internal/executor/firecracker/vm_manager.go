@@ -373,6 +373,15 @@ func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
 		return fmt.Errorf("failed to set vsock: %w", err)
 	}
 
+	// Enable virtio-rng entropy device: feeds host entropy into the guest at boot.
+	// Required for kernels < 4.19 (our kernel is 4.14) where random.trust_cpu=on
+	// is not supported. Without this, Node.js v20+ blocks indefinitely on getrandom()
+	// because the guest CRNG never reaches full initialization in nested-virt environments.
+	// The seeded CRNG state is captured in the snapshot so restored VMs start ready.
+	if err := f.putJSON(client, "http://localhost/entropy", struct{}{}); err != nil {
+		slog.Warn("entropy device setup failed, node/python bridges may hang on getrandom()", "vm_id", vmID, "err", err)
+	}
+
 	// Create TAP device on the host and wire it into Firecracker.
 	// Non-fatal: VM boots without network if TAP setup fails (e.g. no permissions).
 	// NETWORK CARD
