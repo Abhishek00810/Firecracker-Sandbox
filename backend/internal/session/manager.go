@@ -119,7 +119,7 @@ func (m *Manager) Create(ctx context.Context, tier string) (*Session, error) {
 	// Warm up Python kernel on cold boot only.
 	// Snapshot-restored VMs already have a live kernel in memory.
 	if m.template == nil {
-		if _, err := vsockClient.Execute("pass", "python", "stateful", 30); err != nil {
+		if _, err := vsockClient.Execute("pass", "python", "stateful", 60); err != nil {
 			slog.Warn("session: python warmup failed", "vm_id", vm.ID, "err", err)
 		}
 	}

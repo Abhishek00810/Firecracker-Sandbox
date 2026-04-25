@@ -111,13 +111,13 @@ func (p *VMPool) addVM() error {
 	vsock := NewVsockClient(vm.VsockPath)
 
 	if p.warmPythonStateful {
-		if err := logWarmupResult(vsock, vm.ID, "python stateful", "pass", "python", "stateful", 30); err != nil {
+		if err := logWarmupResult(vsock, vm.ID, "python stateful", "pass", "python", "stateful", 60); err != nil {
 			slog.Warn("python stateful warmup failed", "vm_id", vm.ID, "err", err)
 		}
 	}
 
 	if p.warmNodeBridge {
-		if err := logWarmupResult(vsock, vm.ID, "node bridge", "1+1", "node", "stateless", 30); err != nil {
+		if err := logWarmupResult(vsock, vm.ID, "node bridge", "1+1", "node", "stateless", 60); err != nil {
 			slog.Warn("node bridge warmup failed", "vm_id", vm.ID, "err", err)
 		}
 	}
