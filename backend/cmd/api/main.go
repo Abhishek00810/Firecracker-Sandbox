@@ -83,7 +83,7 @@ func main() {
 		KernelPath: cfg.KernelPath,
 		RootfsPath: cfg.RootfsPath,
 		InitrdPath: cfg.InitrdPath,
-		BootArgs:   "console=ttyS0 reboot=k panic=1 pci=off",
+		BootArgs:   "console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on",
 	}
 
 	freeCgroupCfg := cgroup.Config{
