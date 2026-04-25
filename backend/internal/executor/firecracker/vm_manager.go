@@ -605,21 +605,30 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 
 	// Reconfigure guest network via vsock — guest still has template's old IP baked in.
 	// We flush and reassign a unique IP so routing works correctly.
+	// Ping loop exits as soon as vsock is ready (up to 60s). On nested virt (Azure)
+	// vsock can take 15-30s to reinitialize after snapshot restore. Only run Execute
+	// if ping actually succeeded — otherwise we'd block for the full vsock timeout.
 	if tapName != "" {
 		vc := NewVsockClient(vsockPath)
-		deadline := time.Now().Add(5 * time.Second)
+		pinged := false
+		deadline := time.Now().Add(60 * time.Second)
 		for time.Now().Before(deadline) {
 			if vc.Ping() {
+				pinged = true
 				break
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
-		netCmd := fmt.Sprintf(
-			"ip addr flush dev eth0; ip addr add %s/30 dev eth0; ip link set eth0 up; ip route add default via %s; echo nameserver 8.8.8.8 > /etc/resolv.conf",
-			guestIP, hostIP,
-		)
-		if _, err := vc.Execute(netCmd, "bash", "stateless", 10); err != nil {
-			slog.Warn("guest network reconfiguration failed", "vm_id", vmID, "err", err)
+		if pinged {
+			netCmd := fmt.Sprintf(
+				"ip addr flush dev eth0; ip addr add %s/30 dev eth0; ip link set eth0 up; ip route add default via %s; echo nameserver 8.8.8.8 > /etc/resolv.conf",
+				guestIP, hostIP,
+			)
+			if _, err := vc.Execute(netCmd, "bash", "stateless", 10); err != nil {
+				slog.Warn("guest network reconfiguration failed", "vm_id", vmID, "err", err)
+			}
+		} else {
+			slog.Warn("vsock never became ready, skipping network reconfig", "vm_id", vmID)
 		}
 	}
 
