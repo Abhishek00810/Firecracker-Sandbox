@@ -690,7 +690,11 @@ func (f *FireCrackerManager) CreateTemplate(ctx context.Context, cfg VMConfig, s
 	// while still logging runtime-specific issues for diagnosis.
 	nodeResp, err := vsock.Execute("1+1", "node", "stateless", 60)
 	if err != nil {
-		slog.Warn("template node warmup transport failed", "vm_id", vm.ID, "err", err)
+		slog.Warn("template node warmup transport failed",
+			"vm_id", vm.ID,
+			"err", err,
+			"vm_console", vm.Stdout.String(),
+		)
 	} else {
 		nodeStderr := strings.TrimSpace(nodeResp.Stderr)
 		if nodeResp.ExitCode != 0 || strings.Contains(strings.ToLower(nodeStderr), "timeout") {
@@ -699,6 +703,7 @@ func (f *FireCrackerManager) CreateTemplate(ctx context.Context, cfg VMConfig, s
 				"exit_code", nodeResp.ExitCode,
 				"stderr", nodeStderr,
 				"guest_duration_ms", int64(nodeResp.Duration*1000),
+				"vm_console", vm.Stdout.String(),
 			)
 		} else {
 			slog.Info("template node warmup succeeded",
@@ -710,7 +715,11 @@ func (f *FireCrackerManager) CreateTemplate(ctx context.Context, cfg VMConfig, s
 
 	pyResp, err := vsock.Execute("pass", "python", "stateful", 60)
 	if err != nil {
-		slog.Warn("template python warmup transport failed", "vm_id", vm.ID, "err", err)
+		slog.Warn("template python warmup transport failed",
+			"vm_id", vm.ID,
+			"err", err,
+			"vm_console", vm.Stdout.String(),
+		)
 	} else {
 		pyStderr := strings.TrimSpace(pyResp.Stderr)
 		if pyResp.ExitCode != 0 || strings.Contains(strings.ToLower(pyStderr), "timeout") {
@@ -719,6 +728,7 @@ func (f *FireCrackerManager) CreateTemplate(ctx context.Context, cfg VMConfig, s
 				"exit_code", pyResp.ExitCode,
 				"stderr", pyStderr,
 				"guest_duration_ms", int64(pyResp.Duration*1000),
+				"vm_console", vm.Stdout.String(),
 			)
 		} else {
 			slog.Info("template python warmup succeeded",
