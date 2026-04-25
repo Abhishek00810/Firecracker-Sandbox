@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -683,6 +684,52 @@ func (f *FireCrackerManager) CreateTemplate(ctx context.Context, cfg VMConfig, s
 		f.Destroy(ctx, vm.ID)
 		return nil, fmt.Errorf("vsock never became ready for template VM")
 	}
+
+	// Pre-warm bridges inside the template VM so restored VMs inherit
+	// already-live runtimes instead of paying cold bridge startup cost.
+	nodeResp, err := vsock.Execute("1+1", "node", "stateless", 60)
+	if err != nil {
+		slog.Error("template node warmup transport failed", "vm_id", vm.ID, "err", err)
+		f.Destroy(ctx, vm.ID)
+		return nil, fmt.Errorf("template node warmup transport failed: %w", err)
+	}
+	nodeStderr := strings.TrimSpace(nodeResp.Stderr)
+	if nodeResp.ExitCode != 0 || strings.Contains(strings.ToLower(nodeStderr), "timeout") {
+		slog.Error("template node warmup failed",
+			"vm_id", vm.ID,
+			"exit_code", nodeResp.ExitCode,
+			"stderr", nodeStderr,
+			"guest_duration_ms", int64(nodeResp.Duration*1000),
+		)
+		f.Destroy(ctx, vm.ID)
+		return nil, fmt.Errorf("template node warmup failed: exit=%d stderr=%q", nodeResp.ExitCode, nodeStderr)
+	}
+	slog.Info("template node warmup succeeded",
+		"vm_id", vm.ID,
+		"guest_duration_ms", int64(nodeResp.Duration*1000),
+	)
+
+	pyResp, err := vsock.Execute("pass", "python", "stateful", 60)
+	if err != nil {
+		slog.Error("template python warmup transport failed", "vm_id", vm.ID, "err", err)
+		f.Destroy(ctx, vm.ID)
+		return nil, fmt.Errorf("template python warmup transport failed: %w", err)
+	}
+	pyStderr := strings.TrimSpace(pyResp.Stderr)
+	if pyResp.ExitCode != 0 || strings.Contains(strings.ToLower(pyStderr), "timeout") {
+		slog.Error("template python warmup failed",
+			"vm_id", vm.ID,
+			"exit_code", pyResp.ExitCode,
+			"stderr", pyStderr,
+			"guest_duration_ms", int64(pyResp.Duration*1000),
+		)
+		f.Destroy(ctx, vm.ID)
+		return nil, fmt.Errorf("template python warmup failed: exit=%d stderr=%q", pyResp.ExitCode, pyStderr)
+	}
+	slog.Info("template python warmup succeeded",
+		"vm_id", vm.ID,
+		"guest_duration_ms", int64(pyResp.Duration*1000),
+	)
 
 	// Take snapshot
 	snapPath := filepath.Join(snapDir, "template.snap")
