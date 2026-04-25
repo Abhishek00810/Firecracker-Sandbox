@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 )
@@ -106,20 +105,6 @@ func (p *VMPool) addVM() error {
 	}
 	if !vsockReady {
 		return fmt.Errorf("vsock never became ready for VM %s", vm.ID)
-	}
-
-	vsock := NewVsockClient(vm.VsockPath)
-
-	if p.warmPythonStateful {
-		if err := logWarmupResult(vsock, vm.ID, "python stateful", "pass", "python", "stateful", 60); err != nil {
-			slog.Warn("python stateful warmup failed", "vm_id", vm.ID, "err", err)
-		}
-	}
-
-	if p.warmNodeBridge {
-		if err := logWarmupResult(vsock, vm.ID, "node bridge", "1+1", "node", "stateless", 60); err != nil {
-			slog.Warn("node bridge warmup failed", "vm_id", vm.ID, "err", err)
-		}
 	}
 
 	var cg *cgroup.Cgroup
@@ -243,30 +228,4 @@ func (p *VMPool) Stats() (available, inUse int) {
 		inUse = 0
 	}
 	return
-}
-
-func logWarmupResult(vsock *VsockClient, vmID, label, code, language, mode string, timeoutSec int) error {
-	start := time.Now()
-	resp, err := vsock.Execute(code, language, mode, timeoutSec)
-	if err != nil {
-		return err
-	}
-
-	stderr := strings.TrimSpace(resp.Stderr)
-	timeoutLike := strings.Contains(strings.ToLower(stderr), "timeout")
-	if resp.ExitCode != 0 || timeoutLike {
-		return fmt.Errorf(
-			"unsuccessful warmup response: exit_code=%d duration=%.3fs stderr=%q",
-			resp.ExitCode,
-			resp.Duration,
-			stderr,
-		)
-	}
-
-	slog.Info(label+" warmed up",
-		"vm_id", vmID,
-		"duration_ms", time.Since(start).Milliseconds(),
-		"guest_duration_ms", int64(resp.Duration*1000),
-	)
-	return nil
 }
