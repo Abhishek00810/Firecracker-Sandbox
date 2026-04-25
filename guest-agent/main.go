@@ -88,10 +88,13 @@ func (kb *KernelBridge) execute(code string, timeoutSec int) (*ExecutionResponse
 	}
 	data, _ := json.Marshal(req)
 	data = append(data, '\n')
+	log.Printf("kernel bridge execute begin pid=%d timeout=%ds code_len=%d", kb.cmd.Process.Pid, timeoutSec, len(code))
 
 	if _, err := kb.stdin.Write(data); err != nil {
+		log.Printf("kernel bridge stdin write failed pid=%d err=%v", kb.cmd.Process.Pid, err)
 		return nil, fmt.Errorf("write to bridge: %w", err)
 	}
+	log.Printf("kernel bridge stdin write ok pid=%d bytes=%d", kb.cmd.Process.Pid, len(data))
 
 	type scanResult struct {
 		resp *ExecutionResponse
@@ -99,16 +102,21 @@ func (kb *KernelBridge) execute(code string, timeoutSec int) (*ExecutionResponse
 	}
 	ch := make(chan scanResult, 1)
 	go func() {
+		log.Printf("kernel bridge waiting for stdout pid=%d", kb.cmd.Process.Pid)
 		if !kb.stdout.Scan() {
 			if err := kb.stdout.Err(); err != nil {
+				log.Printf("kernel bridge stdout scan error pid=%d err=%v", kb.cmd.Process.Pid, err)
 				ch <- scanResult{nil, fmt.Errorf("bridge stdout: %w", err)}
 			} else {
+				log.Printf("kernel bridge stdout closed pid=%d stderr=%q", kb.cmd.Process.Pid, kb.bridgeStderr.String())
 				ch <- scanResult{nil, fmt.Errorf("bridge process closed: %s", kb.bridgeStderr.String())}
 			}
 			return
 		}
+		log.Printf("kernel bridge stdout line received pid=%d bytes=%d", kb.cmd.Process.Pid, len(kb.stdout.Bytes()))
 		var resp ExecutionResponse
 		if err := json.Unmarshal(kb.stdout.Bytes(), &resp); err != nil {
+			log.Printf("kernel bridge decode failed pid=%d payload=%q err=%v", kb.cmd.Process.Pid, string(kb.stdout.Bytes()), err)
 			ch <- scanResult{nil, fmt.Errorf("decode bridge response: %w", err)}
 			return
 		}
@@ -118,9 +126,13 @@ func (kb *KernelBridge) execute(code string, timeoutSec int) (*ExecutionResponse
 	deadline := time.Duration(timeoutSec+5) * time.Second
 	select {
 	case r := <-ch:
+		if r.err == nil && r.resp != nil {
+			log.Printf("kernel bridge execute complete pid=%d exit_code=%d duration=%.3fs", kb.cmd.Process.Pid, r.resp.ExitCode, r.resp.Duration)
+		}
 		return r.resp, r.err
 	case <-time.After(deadline):
 		if kb.cmd != nil && kb.cmd.Process != nil {
+			log.Printf("kernel bridge timeout pid=%d deadline=%v stderr=%q", kb.cmd.Process.Pid, deadline, kb.bridgeStderr.String())
 			kb.cmd.Process.Kill()
 		}
 		return nil, fmt.Errorf("kernel bridge response timeout after %v", deadline)
@@ -212,10 +224,13 @@ func (nb *NodeBridge) execute(code string, timeoutSec int) (*ExecutionResponse, 
 	}
 	data, _ := json.Marshal(req)
 	data = append(data, '\n')
+	log.Printf("node bridge execute begin pid=%d timeout=%ds code_len=%d", nb.cmd.Process.Pid, timeoutSec, len(code))
 
 	if _, err := nb.stdin.Write(data); err != nil {
+		log.Printf("node bridge stdin write failed pid=%d err=%v", nb.cmd.Process.Pid, err)
 		return nil, fmt.Errorf("write to node bridge: %w", err)
 	}
+	log.Printf("node bridge stdin write ok pid=%d bytes=%d", nb.cmd.Process.Pid, len(data))
 
 	type scanResult struct {
 		resp *ExecutionResponse
@@ -223,16 +238,21 @@ func (nb *NodeBridge) execute(code string, timeoutSec int) (*ExecutionResponse, 
 	}
 	ch := make(chan scanResult, 1)
 	go func() {
+		log.Printf("node bridge waiting for stdout pid=%d", nb.cmd.Process.Pid)
 		if !nb.stdout.Scan() {
 			if err := nb.stdout.Err(); err != nil {
+				log.Printf("node bridge stdout scan error pid=%d err=%v", nb.cmd.Process.Pid, err)
 				ch <- scanResult{nil, fmt.Errorf("node bridge stdout: %w", err)}
 			} else {
+				log.Printf("node bridge stdout closed pid=%d stderr=%q", nb.cmd.Process.Pid, nb.bridgeStderr.String())
 				ch <- scanResult{nil, fmt.Errorf("node bridge process closed: %s", nb.bridgeStderr.String())}
 			}
 			return
 		}
+		log.Printf("node bridge stdout line received pid=%d bytes=%d", nb.cmd.Process.Pid, len(nb.stdout.Bytes()))
 		var resp ExecutionResponse
 		if err := json.Unmarshal(nb.stdout.Bytes(), &resp); err != nil {
+			log.Printf("node bridge decode failed pid=%d payload=%q err=%v", nb.cmd.Process.Pid, string(nb.stdout.Bytes()), err)
 			ch <- scanResult{nil, fmt.Errorf("decode node bridge response: %w", err)}
 			return
 		}
@@ -242,9 +262,13 @@ func (nb *NodeBridge) execute(code string, timeoutSec int) (*ExecutionResponse, 
 	deadline := time.Duration(timeoutSec+5) * time.Second
 	select {
 	case r := <-ch:
+		if r.err == nil && r.resp != nil {
+			log.Printf("node bridge execute complete pid=%d exit_code=%d duration=%.3fs", nb.cmd.Process.Pid, r.resp.ExitCode, r.resp.Duration)
+		}
 		return r.resp, r.err
 	case <-time.After(deadline):
 		if nb.cmd != nil && nb.cmd.Process != nil {
+			log.Printf("node bridge timeout pid=%d deadline=%v stderr=%q", nb.cmd.Process.Pid, deadline, nb.bridgeStderr.String())
 			nb.cmd.Process.Kill()
 		}
 		return nil, fmt.Errorf("node bridge response timeout after %v", deadline)
@@ -471,6 +495,7 @@ func (c *fdConn) Write(p []byte) (n int, err error) {
 
 func handleConnection(connFd int) {
 	conn := &fdConn{fd: connFd}
+	log.Printf("connection accepted fd=%d", connFd)
 
 	var req ExecutionRequest
 	log.Println("waiting for request...")
@@ -489,6 +514,8 @@ func handleConnection(connFd int) {
 
 	if err := json.NewEncoder(conn).Encode(resp); err != nil {
 		log.Printf("encode response: %v", err)
+	} else {
+		log.Printf("response encoded fd=%d", connFd)
 	}
 }
 
