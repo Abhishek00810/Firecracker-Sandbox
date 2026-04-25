@@ -78,7 +78,7 @@ func (s *Store) EvictIdle(maxIdle time.Duration, maxLifetime time.Duration) []*S
 
 	var evicted []*Session
 	for id, sess := range s.sessions {
-		idleExpired     := maxIdle > 0 && time.Since(sess.LastUsed) > maxIdle
+		idleExpired := maxIdle > 0 && time.Since(sess.LastUsed) > maxIdle
 		lifetimeExpired := maxLifetime > 0 && time.Since(sess.CreatedAt) > maxLifetime
 		if idleExpired || lifetimeExpired {
 			evicted = append(evicted, sess)
