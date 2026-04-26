@@ -14,6 +14,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -471,6 +472,56 @@ func executeDirect(req ExecutionRequest, startTime time.Time) ExecutionResponse 
 	}
 }
 
+// ─── Entropy Seeding ─────────────────────────────────────────────────────────
+
+// seedCRNG injects entropy into the kernel's random pool via RNDADDENTROPY
+// ioctl. Required in nested-KVM environments (Hyper-V → KVM → Firecracker)
+// where virtio-rng fails to deliver entropy through DMA, leaving entropy_avail
+// permanently below 128 bits. Without this, Node.js v20+ blocks indefinitely
+// in getrandom() during V8 init. Data source is nanosecond timing jitter —
+// real unpredictability from CPU scheduling and hypervisor overhead variation.
+func seedCRNG() {
+	f, err := os.OpenFile("/dev/random", os.O_WRONLY, 0)
+	if err != nil {
+		log.Printf("seedCRNG: open /dev/random: %v", err)
+		return
+	}
+	defer f.Close()
+
+	// Collect 64 bytes of timing jitter across multiple calls.
+	var buf [64]byte
+	for i := 0; i < 64; i++ {
+		ns := time.Now().UnixNano()
+		buf[i] = byte(ns >> (uint(i%8) * 8))
+	}
+
+	// struct rnd_pool_info { int entropy_count; int buf_size; __u32 buf[]; }
+	// RNDADDENTROPY = _IOW('R', 3, int[2]) = 0x40085203
+	type randPoolInfo struct {
+		entropyCount int32
+		size         int32
+		buf          [64]byte
+	}
+	rpi := randPoolInfo{
+		entropyCount: 512, // claim 512 bits — well above the 128 needed for crng_init=2
+		size:         64,
+		buf:          buf,
+	}
+
+	const RNDADDENTROPY = 0x40085203
+	_, _, errno := syscall.Syscall(
+		syscall.SYS_IOCTL,
+		f.Fd(),
+		RNDADDENTROPY,
+		uintptr(unsafe.Pointer(&rpi)),
+	)
+	if errno != 0 {
+		log.Printf("seedCRNG: RNDADDENTROPY ioctl failed: %v", errno)
+		return
+	}
+	log.Printf("seedCRNG: injected 512 bits into entropy pool")
+}
+
 // ─── Vsock Listener ───────────────────────────────────────────────────────────
 
 // fdConn wraps a file descriptor to implement io.Reader/Writer
@@ -560,6 +611,12 @@ func readNetworkConfig() (guestIP, gwIP string) {
 }
 
 func main() {
+	// Seed the kernel CRNG immediately. In nested-KVM (Azure/Hyper-V), the
+	// virtio-rng device fails to deliver entropy via DMA so entropy_avail
+	// stays at ~38 bits forever — below the 128 bits getrandom() requires.
+	// This must run before any bridge process starts.
+	seedCRNG()
+
 	// bring up loopback interface so 127.0.0.1 works inside the VM
 	// required for ZMQ (jupyter kernel ↔ kernel_bridge.py communicate via TCP localhost)
 	// 1. assign 127.0.0.1/8 to lo (may already exist, ignore error)
