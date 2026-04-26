@@ -48,11 +48,17 @@ func NewVMPoolWithSnapshot(n int, cfg VMConfig, mgr VMManager, cgroupConfig cgro
 		warmNodeBridge:     warmNodeBridge,
 	}
 
+	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
-		if err := pool.addVM(); err != nil {
-			slog.Error("failed to add VM to pool", "index", i, "err", err)
-		}
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			if err := pool.addVM(); err != nil {
+				slog.Error("failed to add VM to pool", "index", idx, "err", err)
+			}
+		}(i)
 	}
+	wg.Wait()
 
 	return pool
 }
