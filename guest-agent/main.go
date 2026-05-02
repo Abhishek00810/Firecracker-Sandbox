@@ -660,9 +660,10 @@ func main() {
 				if err == nil {
 					break
 				}
-				log.Printf("reinit failed: %v — retrying in 100ms", err)
-				time.Sleep(100 * time.Millisecond)
+				log.Printf("reinit failed: %v — retrying in 20ms", err)
+				time.Sleep(20 * time.Millisecond)
 			}
+			fmt.Println("VSOCK_READY")
 			log.Println("vsock listener reinitialized")
 			continue
 		}

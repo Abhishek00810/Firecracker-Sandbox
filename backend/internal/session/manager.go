@@ -182,6 +182,11 @@ func (m *Manager) Execute(ctx context.Context, sessionID, code, language string)
 		return executor.ExecutionResult{}, fmt.Errorf("execution failed: %w", err)
 	}
 
+	sess.RunCount++
+	sess.TotalExecutionMs += resp.Duration * 1000
+	exitCode := resp.ExitCode
+	sess.LastExitCode = &exitCode
+
 	return executor.ExecutionResult{
 		Stdout:            resp.Stdout,
 		Stderr:            resp.Stderr,

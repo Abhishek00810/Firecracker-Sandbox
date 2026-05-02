@@ -9,15 +9,18 @@ import (
 )
 
 type Session struct {
-	ID        string
-	VM        *firecracker.MicroVM
-	Cgroup    *cgroup.Cgroup
-	Tier      string
-	CreatedAt time.Time
-	LastUsed  time.Time
-	mu        sync.Mutex            // serializes concurrent runs on same session
-	PooledVM  *firecracker.PooledVM // non-nil when VM came from a pool
-	Pool      *firecracker.VMPool   // which pool to release back to (matches PooledVM)
+	ID               string
+	VM               *firecracker.MicroVM
+	Cgroup           *cgroup.Cgroup
+	Tier             string
+	CreatedAt        time.Time
+	LastUsed         time.Time
+	RunCount         int
+	TotalExecutionMs float64
+	LastExitCode     *int
+	mu               sync.Mutex            // serializes concurrent runs on same session
+	PooledVM         *firecracker.PooledVM // non-nil when VM came from a pool
+	Pool             *firecracker.VMPool   // which pool to release back to (matches PooledVM)
 }
 
 type Store struct {

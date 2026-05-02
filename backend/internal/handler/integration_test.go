@@ -263,6 +263,10 @@ func (f *fakeSessionService) Execute(ctx context.Context, sessionID, code, langu
 		return executor.ExecutionResult{}, fmt.Errorf("session %s not found", sessionID)
 	}
 	sess.LastUsed = time.Now().UTC()
+	sess.RunCount++
+	sess.TotalExecutionMs += 7
+	exitCode := 0
+	sess.LastExitCode = &exitCode
 	return executor.ExecutionResult{
 		Stdout:            "session output\n",
 		ExitCode:          0,

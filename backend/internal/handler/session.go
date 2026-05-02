@@ -151,7 +151,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 					State:     "active",
 					LastUsed:  sessSt.LastUsed.Format(time.RFC3339),
 					ExpiresAt: sessSt.LastUsed.Add(sessTc.SessionIdleTimeout).Format(time.RFC3339),
-					RunCount:  0,
+					RunCount:  sessSt.RunCount,
 				},
 			}
 
@@ -218,9 +218,9 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 					IdleTimeoutMs:  int(sessTc.SessionIdleTimeout.Milliseconds()),
 				},
 				Stats: &SessionStats{
-					RunCount:         0,
-					TotalExecutionMs: 0,
-					LastExitCode:     nil,
+					RunCount:         sess.RunCount,
+					TotalExecutionMs: sess.TotalExecutionMs,
+					LastExitCode:     sess.LastExitCode,
 				},
 				Tenant: &TenantContext{
 					TenantID: auth.TenantID,
