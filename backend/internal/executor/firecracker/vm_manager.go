@@ -503,6 +503,7 @@ func (f *FireCrackerManager) Snapshot(ctx context.Context, vmID, snapPath, memPa
 
 func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig, tmpl *SnapshotTemplate) (*MicroVM, error) {
 	t0 := time.Now()
+	lastPhase := t0
 	vmID := uuid.New().String()
 	socketPath := f.getSocketPath(vmID)
 	vsockPath := filepath.Join(f.SocketDir, fmt.Sprintf("vsock-%s.sock", vmID))
@@ -522,6 +523,8 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+	socketReadyMs := time.Since(lastPhase).Milliseconds()
+	lastPhase = time.Now()
 	slog.Debug("restore: firecracker socket ready", "vm_id", vmID, "ms", time.Since(t0).Milliseconds())
 
 	client := &http.Client{
@@ -539,6 +542,8 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 	// are shared across all restores. Two concurrent restores would conflict trying
 	// to both recreate fctap0 and bind the same vsock path.
 	f.restoreMu.Lock()
+	lockWaitMs := time.Since(lastPhase).Milliseconds()
+	lastPhase = time.Now()
 	slog.Debug("restore: lock acquired", "vm_id", vmID, "ms", time.Since(t0).Milliseconds())
 
 	// Recreate the template's TAP device (no IP yet — just needs to exist for Firecracker).
@@ -567,6 +572,8 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 		exec.Command("ip", "link", "delete", tmpl.TapName).Run()
 		return nil, fmt.Errorf("snapshot load failed: %w", err)
 	}
+	snapshotLoadMs := time.Since(lastPhase).Milliseconds()
+	lastPhase = time.Now()
 
 	// Update lower drive — shared template rootfs (read-only); upper is tmpfs in RAM, no block device.
 	if err := f.patchJSON(client, "http://localhost/drives/lower", map[string]string{
@@ -578,6 +585,8 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 		exec.Command("ip", "link", "delete", tmpl.TapName).Run()
 		return nil, fmt.Errorf("lower drive update failed: %w", err)
 	}
+	drivePatchMs := time.Since(lastPhase).Milliseconds()
+	lastPhase = time.Now()
 
 	// Resume — Firecracker binds tmpl.VsockPath and uses tmpl.TapName
 	if err := f.patchJSON(client, "http://localhost/vm", VMStateChange{State: "Resumed"}); err != nil {
@@ -586,6 +595,8 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 		exec.Command("ip", "link", "delete", tmpl.TapName).Run()
 		return nil, fmt.Errorf("resume failed: %w", err)
 	}
+	resumeMs := time.Since(lastPhase).Milliseconds()
+	lastPhase = time.Now()
 
 	// Rename template TAP → unique name so the next restore can recreate tmpl.TapName fresh.
 	// Then assign unique IP to the renamed TAP for proper host routing.
@@ -611,6 +622,8 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 	// TAP and vsock are now unique to this VM — release the lock so the next
 	// restore can proceed with its own TAP/vsock setup in parallel.
 	f.restoreMu.Unlock()
+	postResumeRenameMs := time.Since(lastPhase).Milliseconds()
+	lastPhase = time.Now()
 	slog.Debug("restore: lock released", "vm_id", vmID, "ms", time.Since(t0).Milliseconds())
 
 	// Reconfigure guest network via vsock — guest still has template's old IP baked in.
@@ -618,6 +631,7 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 	// Ping loop exits as soon as vsock is ready (up to 60s). On nested virt (Azure)
 	// vsock can take 15-30s to reinitialize after snapshot restore. Only run Execute
 	// if ping actually succeeded — otherwise we'd block for the full vsock timeout.
+	var vsockPingReadyMs, netReconfigMs int64
 	if tapName != "" {
 		vc := NewVsockClient(vsockPath)
 		pinged := false
@@ -629,6 +643,8 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
+		vsockPingReadyMs = time.Since(lastPhase).Milliseconds()
+		lastPhase = time.Now()
 		if pinged {
 			netCmd := fmt.Sprintf(
 				"ip addr flush dev eth0; ip addr add %s/30 dev eth0; ip link set eth0 up; ip route add default via %s; echo nameserver 8.8.8.8 > /etc/resolv.conf",
@@ -640,6 +656,8 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 		} else {
 			slog.Warn("vsock never became ready, skipping network reconfig", "vm_id", vmID)
 		}
+		netReconfigMs = time.Since(lastPhase).Milliseconds()
+		lastPhase = time.Now()
 	}
 
 	vm := &MicroVM{
@@ -658,6 +676,20 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 	f.mu.Lock()
 	f.Vms[vmID] = vm
 	f.mu.Unlock()
+
+	slog.Info("snapshot restore timings",
+		"vm_id", vmID,
+		"firecracker_socket_ms", socketReadyMs,
+		"restore_lock_wait_ms", lockWaitMs,
+		"snapshot_load_ms", snapshotLoadMs,
+		"drive_patch_ms", drivePatchMs,
+		"resume_ms", resumeMs,
+		"post_resume_rename_ms", postResumeRenameMs,
+		"vsock_ping_ready_ms", vsockPingReadyMs,
+		"net_reconfig_ms", netReconfigMs,
+		"finalize_ms", time.Since(lastPhase).Milliseconds(),
+		"total_ms", time.Since(t0).Milliseconds(),
+	)
 
 	return vm, nil
 }

@@ -65,6 +65,7 @@ func NewVMPoolWithSnapshot(n int, cfg VMConfig, mgr VMManager, cgroupConfig cgro
 
 func (p *VMPool) addVM() error {
 	start := time.Now()
+	lastPhase := start
 	ctx := context.Background()
 	var vm *MicroVM
 	var err error
@@ -94,6 +95,8 @@ func (p *VMPool) addVM() error {
 			return err
 		}
 	}
+	restoreAcquireMs := time.Since(lastPhase).Milliseconds()
+	lastPhase = time.Now()
 
 	// Poll until the vsock handshake actually succeeds.
 	// Checking file existence is not enough — for snapshot-restored VMs the
@@ -112,6 +115,8 @@ func (p *VMPool) addVM() error {
 	if !vsockReady {
 		return fmt.Errorf("vsock never became ready for VM %s", vm.ID)
 	}
+	postRestoreVsockMs := time.Since(lastPhase).Milliseconds()
+	lastPhase = time.Now()
 
 	var cg *cgroup.Cgroup
 	if vm.Process != nil && vm.Process.Process != nil {
@@ -124,6 +129,8 @@ func (p *VMPool) addVM() error {
 			cg = nil
 		}
 	}
+	cgroupSetupMs := time.Since(lastPhase).Milliseconds()
+	lastPhase = time.Now()
 
 	pooledVM := &PooledVM{
 		VM:           vm,
@@ -141,6 +148,10 @@ func (p *VMPool) addVM() error {
 	slog.Info("pool vm added",
 		"vm_id", vm.ID,
 		"mode", restoreMode,
+		"restore_acquire_ms", restoreAcquireMs,
+		"post_restore_vsock_ms", postRestoreVsockMs,
+		"cgroup_setup_ms", cgroupSetupMs,
+		"pool_insert_ms", time.Since(lastPhase).Milliseconds(),
 		"duration_ms", time.Since(start).Milliseconds(),
 		"pool_available", len(p.vms),
 	)
