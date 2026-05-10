@@ -709,7 +709,7 @@ func (f *FireCrackerManager) CreateTemplate(ctx context.Context, cfg VMConfig, s
 		return nil, err
 	}
 
-	// Wait until guest agent is actually accepting connections
+	// Wait until guest agent is actually accepting connections check this our
 	vsock := NewVsockClient(vm.VsockPath)
 	vsockReady := false
 	deadline := time.Now().Add(30 * time.Second)
