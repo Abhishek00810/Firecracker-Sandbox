@@ -647,7 +647,7 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 		lastPhase = time.Now()
 		if pinged {
 			netCmd := fmt.Sprintf(
-				"ip addr flush dev eth0; ip addr add %s/30 dev eth0; ip link set eth0 up; ip route add default via %s; echo nameserver 8.8.8.8 > /etc/resolv.conf",
+				"ip addr flush dev eth0; ip addr add %s/30 dev eth0; ip route add default via %s; echo nameserver 8.8.8.8 > /etc/resolv.conf",
 				guestIP, hostIP,
 			)
 			if _, err := vc.Execute(netCmd, "bash", "stateless", 10); err != nil {
