@@ -559,20 +559,36 @@ type incomingMessage struct {
 
 // handleNetworkConfig reconfigures eth0 directly without spawning bash.
 // Called after snapshot restore when the VM still has the template's IP.
-func handleNetworkConfig(conn io.Writer, guestIP, gwIP string) {
-	batch := fmt.Sprintf(
-		"addr flush dev eth0\naddr add %s/30 dev eth0\nroute replace default via %s\n",
-		guestIP, gwIP,
-	)
-	cmd := exec.Command("/sbin/ip", "-batch", "-")
-	cmd.Stdin = strings.NewReader(batch)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		log.Printf("network config: ip batch failed: %v: %s", err, out)
+func runIP(args ...string) (time.Duration, error) {
+	t := time.Now()
+	out, err := exec.Command("/sbin/ip", args...).CombinedOutput()
+	elapsed := time.Since(t)
+	if err != nil {
+		log.Printf("ip %v: failed in %dms: %v: %s", args, elapsed.Milliseconds(), err, out)
+	} else {
+		log.Printf("ip %v: ok in %dms", args, elapsed.Milliseconds())
 	}
+	return elapsed, err
+}
+
+func handleNetworkConfig(conn io.Writer, guestIP, gwIP string) {
+	t0 := time.Now()
+	log.Printf("configure_network start: guest=%s gw=%s", guestIP, gwIP)
+
+	runIP("addr", "flush", "dev", "eth0")
+	log.Printf("configure_network: after addr flush, elapsed=%dms", time.Since(t0).Milliseconds())
+
+	runIP("addr", "add", guestIP+"/30", "dev", "eth0")
+	log.Printf("configure_network: after addr add, elapsed=%dms", time.Since(t0).Milliseconds())
+
+	runIP("route", "replace", "default", "via", gwIP)
+	log.Printf("configure_network: after route replace, elapsed=%dms", time.Since(t0).Milliseconds())
+
 	if err := os.WriteFile("/etc/resolv.conf", []byte("nameserver 8.8.8.8\n"), 0644); err != nil {
 		log.Printf("network config: write resolv.conf: %v", err)
 	}
-	log.Printf("network configured: guest=%s gw=%s", guestIP, gwIP)
+
+	log.Printf("configure_network done: total=%dms", time.Since(t0).Milliseconds())
 	json.NewEncoder(conn).Encode(struct {
 		Success bool `json:"success"`
 	}{Success: true})

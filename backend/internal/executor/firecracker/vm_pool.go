@@ -108,18 +108,24 @@ func (p *VMPool) addVM() error {
 	// may not be ready yet (virtio-vsock transport resets on snapshot restore,
 	// and the guest agent needs to reinitialize its listener).
 	vsockReady := false
+	vsockAttempts := 0
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
+		vsockAttempts++
 		if NewVsockClient(vm.VsockPath).Ping() {
 			vsockReady = true
 			break
 		}
+		slog.Debug("vsock ping failed, retrying", "vm_id", vm.ID, "attempt", vsockAttempts, "elapsed_ms", time.Since(lastPhase).Milliseconds())
 		time.Sleep(200 * time.Millisecond)
 	}
 	if !vsockReady {
 		return fmt.Errorf("vsock never became ready for VM %s", vm.ID)
 	}
 	postRestoreVsockMs := time.Since(lastPhase).Milliseconds()
+	if vsockAttempts > 1 {
+		slog.Warn("vsock took multiple attempts to become ready", "vm_id", vm.ID, "attempts", vsockAttempts, "ms", postRestoreVsockMs)
+	}
 	lastPhase = time.Now()
 
 	var cg *cgroup.Cgroup
