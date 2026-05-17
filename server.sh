@@ -47,7 +47,7 @@ cd "$SCRIPT_DIR/guest-agent"
 GOOS=linux GOARCH=amd64 /usr/local/go/bin/go build -o guest-agent-amd64 .
 
 echo "[server] Updating rootfs..."
-ROOTFS="$ASSETS_PATH/rootfs/rootfs-alpine.ext4"
+ROOTFS="${ASSETS_PATH:-$SCRIPT_DIR/assets}/rootfs/rootfs-alpine.ext4"
 sudo umount /mnt 2>/dev/null || true
 sudo mount -o loop "$ROOTFS" /mnt
 sudo cp guest-agent-amd64 /mnt/usr/local/bin/guest-agent
