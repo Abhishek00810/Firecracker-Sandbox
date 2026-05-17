@@ -41,7 +41,21 @@ source "$ENV_FILE"
 set +a
 echo "[server] Environment loaded from $ENV_FILE"
 
-# ── 5. Start the server ───────────────────────────────────────────────────────
+# ── 5. Build guest-agent and update rootfs ───────────────────────────────────
+echo "[server] Building guest-agent..."
+cd "$SCRIPT_DIR/guest-agent"
+GOOS=linux GOARCH=amd64 /usr/local/go/bin/go build -o guest-agent-amd64 .
+
+echo "[server] Updating rootfs..."
+ROOTFS="$ASSETS_PATH/rootfs/rootfs-alpine.ext4"
+sudo umount /mnt 2>/dev/null || true
+sudo mount -o loop "$ROOTFS" /mnt
+sudo cp guest-agent-amd64 /mnt/usr/local/bin/guest-agent
+sudo chmod +x /mnt/usr/local/bin/guest-agent
+sudo umount /mnt
+echo "[server] Rootfs updated"
+
+# ── 6. Start the server ───────────────────────────────────────────────────────
 echo "[server] Starting backend (logs below)..."
 cd "$BACKEND_DIR"
 exec sudo -E env PATH="$PATH" /usr/local/go/bin/go run ./cmd/api/main.go
