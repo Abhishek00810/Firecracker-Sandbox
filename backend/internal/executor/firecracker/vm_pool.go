@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -15,7 +16,9 @@ type VMPool struct {
 	vmMap              map[string]*PooledVM // ALL VMs
 	config             VMConfig
 	manager            VMManager
-	size               int
+	minSize            int
+	maxSize            int
+	pendingAdds        atomic.Int32
 	cgroupConfig       cgroup.Config
 	template           *SnapshotTemplate // nil = cold boot
 	warmPythonStateful bool
@@ -30,16 +33,17 @@ type PooledVM struct {
 	Cgroup       *cgroup.Cgroup
 }
 
-func NewVMPool(n int, cfg VMConfig, mgr VMManager, cgroupConfig cgroup.Config) *VMPool {
-	return NewVMPoolWithSnapshot(n, cfg, mgr, cgroupConfig, nil, false, false)
+func NewVMPool(minSize, maxSize int, cfg VMConfig, mgr VMManager, cgroupConfig cgroup.Config) *VMPool {
+	return NewVMPoolWithSnapshot(minSize, maxSize, cfg, mgr, cgroupConfig, nil, false, false)
 }
 
-func NewVMPoolWithSnapshot(n int, cfg VMConfig, mgr VMManager, cgroupConfig cgroup.Config, tmpl *SnapshotTemplate,
+func NewVMPoolWithSnapshot(minSize, maxSize int, cfg VMConfig, mgr VMManager, cgroupConfig cgroup.Config, tmpl *SnapshotTemplate,
 	warmPythonStateful bool, warmNodeBridge bool) *VMPool {
 	pool := &VMPool{
-		vms:                make(chan *PooledVM, n),
+		vms:                make(chan *PooledVM, maxSize),
 		vmMap:              make(map[string]*PooledVM),
-		size:               n,
+		minSize:            minSize,
+		maxSize:            maxSize,
 		config:             cfg,
 		manager:            mgr,
 		cgroupConfig:       cgroupConfig,
@@ -49,7 +53,7 @@ func NewVMPoolWithSnapshot(n int, cfg VMConfig, mgr VMManager, cgroupConfig cgro
 	}
 
 	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
+	for i := 0; i < minSize; i++ {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
@@ -159,8 +163,31 @@ func (p *VMPool) addVM() error {
 	return nil
 }
 
+// tryScaleUp spawns one addVM goroutine if the pool has headroom under maxSize.
+func (p *VMPool) tryScaleUp() {
+	p.mu.Lock()
+	total := len(p.vmMap) + int(p.pendingAdds.Load())
+	p.mu.Unlock()
+	if total >= p.maxSize {
+		slog.Warn("pool at capacity, cannot scale up", "total", total, "max", p.maxSize)
+		return
+	}
+	p.pendingAdds.Add(1)
+	go func() {
+		defer p.pendingAdds.Add(-1)
+		if err := p.addVM(); err != nil {
+			slog.Error("on-demand VM restore failed", "err", err)
+		}
+	}()
+}
+
 func (p *VMPool) Acquire(timeout time.Duration) (*PooledVM, error) {
 	start := time.Now()
+	// If no VM is immediately available, kick off an on-demand restore
+	// so something is coming even while we block below.
+	if len(p.vms) == 0 {
+		p.tryScaleUp()
+	}
 	select {
 	case vm := <-p.vms:
 		p.mu.Lock()
@@ -191,6 +218,7 @@ func (p *VMPool) Release(vm *PooledVM) {
 
 		p.mu.Lock()
 		delete(p.vmMap, vm.VM.ID)
+		remaining := len(p.vmMap)
 		p.mu.Unlock()
 
 		if err := p.manager.Destroy(ctx, vm.VM.ID); err != nil {
@@ -202,15 +230,26 @@ func (p *VMPool) Release(vm *PooledVM) {
 			}
 		}
 
-		// Replenish pool — uses snapshot restore if template is set, cold boot otherwise
-		if err := p.addVM(); err != nil {
-			slog.Error("failed to replenish pool after releasing VM", "vm_id", vm.VM.ID, "err", err)
-			return
+		// Only replenish if the pool has dropped below the warm minimum.
+		// Burst VMs (above minSize) are intentionally not replaced — the pool
+		// shrinks back to steady state naturally after traffic subsides.
+		if remaining < p.minSize {
+			if err := p.addVM(); err != nil {
+				slog.Error("failed to replenish pool after releasing VM", "vm_id", vm.VM.ID, "err", err)
+				return
+			}
+			slog.Info("pool release replenished",
+				"vm_id", vm.VM.ID,
+				"duration_ms", time.Since(start).Milliseconds(),
+			)
+		} else {
+			slog.Info("pool release complete, no replenish needed",
+				"vm_id", vm.VM.ID,
+				"remaining", remaining,
+				"min_size", p.minSize,
+				"duration_ms", time.Since(start).Milliseconds(),
+			)
 		}
-		slog.Info("pool release replenished...",
-			"vm_id", vm.VM.ID,
-			"duration_ms", time.Since(start).Milliseconds(),
-		)
 	}()
 }
 

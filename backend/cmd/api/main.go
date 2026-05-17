@@ -118,10 +118,10 @@ func main() {
 		slog.Info("snapshot template ready", "snap", tmpl.SnapPath)
 	}
 
-	freePool := firecracker.NewVMPoolWithSnapshot(freeTc.PoolSize, config, vmManager, freeCgroupCfg, template, false, false)
-	premiumPool := firecracker.NewVMPoolWithSnapshot(proTc.PoolSize, config, vmManager, premiumCgroupCfg, template, false, true)
-	freeSessionPool := firecracker.NewVMPoolWithSnapshot(freeTc.PoolSize, config, vmManager, freeSessionCgroupCfg, template, false, false)
-	proSessionPool := firecracker.NewVMPoolWithSnapshot(proTc.PoolSize, config, vmManager, premiumSessionCgroupCfg, template, true, false)
+	freePool := firecracker.NewVMPoolWithSnapshot(freeTc.MinPoolSize, freeTc.MaxPoolSize, config, vmManager, freeCgroupCfg, template, false, false)
+	premiumPool := firecracker.NewVMPoolWithSnapshot(proTc.MinPoolSize, proTc.MaxPoolSize, config, vmManager, premiumCgroupCfg, template, false, true)
+	freeSessionPool := firecracker.NewVMPoolWithSnapshot(freeTc.MinPoolSize, freeTc.MaxPoolSize, config, vmManager, freeSessionCgroupCfg, template, false, false)
+	proSessionPool := firecracker.NewVMPoolWithSnapshot(proTc.MinPoolSize, proTc.MaxPoolSize, config, vmManager, premiumSessionCgroupCfg, template, true, false)
 	slog.Info("VM pools initialized")
 
 	sessionMgr := session.NewManager(
@@ -139,12 +139,12 @@ func main() {
 
 	freeExec := firecracker.NewFirecrackerExecutor(vmManager)
 	freeExec.Pool = freePool
-	freeQueue := queue.NewJobQueue(freeExec, freeTc.Workers)
+	freeQueue := queue.NewJobQueue(freeExec, freeTc.MaxPoolSize)
 	freeQueue.Start()
 
 	premiumExec := firecracker.NewFirecrackerExecutor(vmManager)
 	premiumExec.Pool = premiumPool
-	premiumQueue := queue.NewJobQueue(premiumExec, proTc.Workers)
+	premiumQueue := queue.NewJobQueue(premiumExec, proTc.MaxPoolSize)
 	premiumQueue.Start()
 
 	freeLimiter := ratelimit.NewTenantLimiter(rate.Limit(freeTc.RateLimit), freeTc.RateBurst)

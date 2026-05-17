@@ -14,8 +14,8 @@ type TierConfig struct {
 	RateLimit          float64       // requests/sec, cast to rate.Limit in main.go
 	RateBurst          int           // burst bucket size
 	MaxExecTimeout     time.Duration // max execution time per request
-	Workers            int           // job queue worker count
-	PoolSize           int           // pre-booted VM pool size
+	MinPoolSize        int           // always-warm VMs kept in pool (0 = fully on-demand)
+	MaxPoolSize        int           // hard cap on concurrent VMs for this tier
 	MaxSessions        int           // 0 = sessions not allowed for this tier
 	SessionIdleTimeout time.Duration // reaper evicts after this idle time
 	SessionMaxLifetime time.Duration // hard ceiling regardless of activity (0 = no limit)
@@ -27,8 +27,8 @@ var Tiers = map[string]TierConfig{
 		RateLimit:          2.0,
 		RateBurst:          5,
 		MaxExecTimeout:     10 * time.Second,
-		Workers:            5,
-		PoolSize:           3,
+		MinPoolSize:        0,
+		MaxPoolSize:        8,
 		MaxSessions:        1,
 		SessionIdleTimeout: 5 * time.Minute,
 		SessionMaxLifetime: 2 * time.Hour,
@@ -38,8 +38,8 @@ var Tiers = map[string]TierConfig{
 		RateLimit:          10.0,
 		RateBurst:          20,
 		MaxExecTimeout:     60 * time.Second,
-		Workers:            10,
-		PoolSize:           3,
+		MinPoolSize:        2,
+		MaxPoolSize:        16,
 		MaxSessions:        3,
 		SessionIdleTimeout: 15 * time.Minute,
 		SessionMaxLifetime: 24 * time.Hour,
