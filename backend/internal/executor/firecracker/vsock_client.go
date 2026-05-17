@@ -29,6 +29,71 @@ type ExecuteResponse struct {
 	Duration float64 `json:"duration"`
 }
 
+// ConfigureNetwork sends a configure_network message to the guest agent,
+// which reconfigures eth0 directly in Go without spawning bash.
+func (v *VsockClient) ConfigureNetwork(guestIP, gwIP string) error {
+	var (
+		conn net.Conn
+		err  error
+		buf  = make([]byte, 32)
+		n    int
+	)
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(100 * time.Millisecond)
+		}
+		conn, err = net.DialTimeout("unix", v.socketPath, v.timeout)
+		if err != nil {
+			continue
+		}
+		conn.SetDeadline(time.Now().Add(5 * time.Second))
+		if _, err = conn.Write([]byte("CONNECT 52\n")); err != nil {
+			conn.Close()
+			continue
+		}
+		n, err = conn.Read(buf)
+		if err != nil {
+			conn.Close()
+			continue
+		}
+		break
+	}
+	if err != nil {
+		return fmt.Errorf("vsock handshake failed: %w", err)
+	}
+	defer conn.Close()
+
+	if n < 2 || string(buf[:2]) != "OK" {
+		return fmt.Errorf("vsock handshake rejected: %s", string(buf[:n]))
+	}
+
+	req := struct {
+		Type    string `json:"type"`
+		GuestIP string `json:"guest_ip"`
+		GWIP    string `json:"gw_ip"`
+	}{
+		Type:    "configure_network",
+		GuestIP: guestIP,
+		GWIP:    gwIP,
+	}
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		return fmt.Errorf("send configure_network: %w", err)
+	}
+
+	var resp struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error,omitempty"`
+	}
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		return fmt.Errorf("read configure_network response: %w", err)
+	}
+	if !resp.Success {
+		return fmt.Errorf("configure_network: %s", resp.Error)
+	}
+	return nil
+}
+
 func NewVsockClient(socketPath string) *VsockClient {
 	return &VsockClient{
 		socketPath: socketPath,

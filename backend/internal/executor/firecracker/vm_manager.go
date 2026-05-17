@@ -646,11 +646,7 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 		vsockPingReadyMs = time.Since(lastPhase).Milliseconds()
 		lastPhase = time.Now()
 		if pinged {
-			netCmd := fmt.Sprintf(
-				"ip addr flush dev eth0; ip addr add %s/30 dev eth0; ip route add default via %s; echo nameserver 8.8.8.8 > /etc/resolv.conf",
-				guestIP, hostIP,
-			)
-			if _, err := vc.Execute(netCmd, "bash", "stateless", 10); err != nil {
+			if err := vc.ConfigureNetwork(guestIP, hostIP); err != nil {
 				slog.Warn("guest network reconfiguration failed", "vm_id", vmID, "err", err)
 			}
 		} else {

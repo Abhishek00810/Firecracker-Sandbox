@@ -544,13 +544,47 @@ func (c *fdConn) Write(p []byte) (n int, err error) {
 	return unix.Write(c.fd, p)
 }
 
+// incomingMessage is a union of all message types the host can send.
+// Type == "configure_network" → network reconfiguration after snapshot restore.
+// Type == "" (default)        → code execution request.
+type incomingMessage struct {
+	Type     string `json:"type"`
+	Code     string `json:"code"`
+	Language string `json:"language"`
+	Timeout  int    `json:"timeout"`
+	Mode     string `json:"mode"`
+	GuestIP  string `json:"guest_ip"`
+	GWIP     string `json:"gw_ip"`
+}
+
+// handleNetworkConfig reconfigures eth0 directly without spawning bash.
+// Called after snapshot restore when the VM still has the template's IP.
+func handleNetworkConfig(conn io.Writer, guestIP, gwIP string) {
+	batch := fmt.Sprintf(
+		"addr flush dev eth0\naddr add %s/30 dev eth0\nroute replace default via %s\n",
+		guestIP, gwIP,
+	)
+	cmd := exec.Command("/sbin/ip", "-batch", "-")
+	cmd.Stdin = strings.NewReader(batch)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		log.Printf("network config: ip batch failed: %v: %s", err, out)
+	}
+	if err := os.WriteFile("/etc/resolv.conf", []byte("nameserver 8.8.8.8\n"), 0644); err != nil {
+		log.Printf("network config: write resolv.conf: %v", err)
+	}
+	log.Printf("network configured: guest=%s gw=%s", guestIP, gwIP)
+	json.NewEncoder(conn).Encode(struct {
+		Success bool `json:"success"`
+	}{Success: true})
+}
+
 func handleConnection(connFd int) {
 	conn := &fdConn{fd: connFd}
 	log.Printf("connection accepted fd=%d", connFd)
 
-	var req ExecutionRequest
+	var msg incomingMessage
 	log.Println("waiting for request...")
-	if err := json.NewDecoder(conn).Decode(&req); err != nil {
+	if err := json.NewDecoder(conn).Decode(&msg); err != nil {
 		log.Printf("decode request: %v", err)
 		json.NewEncoder(conn).Encode(ExecutionResponse{
 			Stderr:   fmt.Sprintf("failed to decode request: %v", err),
@@ -559,6 +593,17 @@ func handleConnection(connFd int) {
 		return
 	}
 
+	if msg.Type == "configure_network" {
+		handleNetworkConfig(conn, msg.GuestIP, msg.GWIP)
+		return
+	}
+
+	req := ExecutionRequest{
+		Code:     msg.Code,
+		Language: msg.Language,
+		Timeout:  msg.Timeout,
+		Mode:     msg.Mode,
+	}
 	log.Printf("execute language=%s code_len=%d", req.Language, len(req.Code))
 	resp := executeCode(req)
 	log.Printf("done exit_code=%d duration=%.2fs", resp.ExitCode, resp.Duration)
