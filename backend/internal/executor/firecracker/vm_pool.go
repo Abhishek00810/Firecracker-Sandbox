@@ -112,11 +112,18 @@ func (p *VMPool) addVM() error {
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		vsockAttempts++
-		if NewVsockClient(vm.VsockPath).Ping() {
+		ok, stage, pingElapsed := NewVsockClient(vm.VsockPath).Ping()
+		if ok {
 			vsockReady = true
 			break
 		}
-		slog.Debug("vsock ping failed, retrying", "vm_id", vm.ID, "attempt", vsockAttempts, "elapsed_ms", time.Since(lastPhase).Milliseconds())
+		slog.Warn("vsock ping failed",
+			"vm_id", vm.ID,
+			"attempt", vsockAttempts,
+			"failed_at", stage,
+			"ping_ms", pingElapsed.Milliseconds(),
+			"elapsed_ms", time.Since(lastPhase).Milliseconds(),
+		)
 		time.Sleep(200 * time.Millisecond)
 	}
 	if !vsockReady {

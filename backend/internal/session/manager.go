@@ -109,7 +109,7 @@ func (m *Manager) Create(ctx context.Context, tier string) (*Session, error) {
 	vsockClient := firecracker.NewVsockClient(vm.VsockPath)
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		if vsockClient.Ping() {
+		if ok, _, _ := vsockClient.Ping(); ok {
 			break
 		}
 		time.Sleep(200 * time.Millisecond)

@@ -637,7 +637,7 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 		pinged := false
 		deadline := time.Now().Add(60 * time.Second)
 		for time.Now().Before(deadline) {
-			if vc.Ping() {
+			if ok, _, _ := vc.Ping(); ok {
 				pinged = true
 				break
 			}
@@ -710,7 +710,7 @@ func (f *FireCrackerManager) CreateTemplate(ctx context.Context, cfg VMConfig, s
 	vsockReady := false
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		if vsock.Ping() {
+		if ok, _, _ := vsock.Ping(); ok {
 			vsockReady = true
 			break
 		}
