@@ -575,8 +575,11 @@ func handleNetworkConfig(conn io.Writer, guestIP, gwIP string) {
 	t0 := time.Now()
 	log.Printf("configure_network start: guest=%s gw=%s", guestIP, gwIP)
 
-	runIP("addr", "flush", "dev", "eth0")
-	log.Printf("configure_network: after addr flush, elapsed=%dms", time.Since(t0).Milliseconds())
+	// Remove only the known template IP (always 172.16.0.2/30 — allocation index 0).
+	// Using targeted addr del instead of addr flush avoids triggering virtio event
+	// loop disruption that blocks vsock for ~4.4s on bare KVM.
+	runIP("addr", "del", "172.16.0.2/30", "dev", "eth0")
+	log.Printf("configure_network: after addr del, elapsed=%dms", time.Since(t0).Milliseconds())
 
 	runIP("addr", "add", guestIP+"/30", "dev", "eth0")
 	log.Printf("configure_network: after addr add, elapsed=%dms", time.Since(t0).Milliseconds())
