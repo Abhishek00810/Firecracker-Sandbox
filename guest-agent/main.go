@@ -9,6 +9,7 @@ import (
 	"log"
 	"log/slog"
 	"os"
+	"strconv"
 	"os/exec"
 	"strings"
 	"sync"
@@ -557,32 +558,22 @@ type incomingMessage struct {
 	GWIP     string `json:"gw_ip"`
 }
 
-// handleNetworkConfig reconfigures eth0 directly without spawning bash.
-// Called after snapshot restore when the VM still has the template's IP.
-func runIP(args ...string) (time.Duration, error) {
-	t := time.Now()
-	out, err := exec.Command("/sbin/ip", args...).CombinedOutput()
-	elapsed := time.Since(t)
-	if err != nil {
-		log.Printf("ip %v: failed in %dms: %v: %s", args, elapsed.Milliseconds(), err, out)
-	} else {
-		log.Printf("ip %v: ok in %dms", args, elapsed.Milliseconds())
-	}
-	return elapsed, err
-}
-
+// handleNetworkConfig reconfigures eth0 using netlink directly — no exec.Command,
+// no gratuitous ARP. On bare KVM x86_64, ip addr add triggers a gratuitous ARP
+// which causes a softirq storm that starves vsock for ~4.4s. Netlink with
+// IFA_F_NODAD|IFA_F_NOPREFIXROUTE suppresses the ARP announcement entirely.
 func handleNetworkConfig(conn io.Writer, guestIP, gwIP string) {
 	t0 := time.Now()
 	log.Printf("configure_network start: guest=%s gw=%s", guestIP, gwIP)
 
-	// Skip address deletion — any RTM_DELADDR event (flush or del) disrupts the
-	// virtio event loop on bare KVM, blocking vsock for ~4.4s. The template IP
-	// (172.16.0.2/30) stays on eth0 as a harmless dead-end: nothing routes to it
-	// since fctap0 is gone, and outbound traffic uses the new IP via the route below.
-	runIP("addr", "add", guestIP+"/30", "dev", "eth0")
+	if err := netlinkAddAddr("eth0", guestIP+"/30"); err != nil {
+		log.Printf("configure_network: netlinkAddAddr: %v", err)
+	}
 	log.Printf("configure_network: after addr add, elapsed=%dms", time.Since(t0).Milliseconds())
 
-	runIP("route", "replace", "default", "via", gwIP)
+	if err := netlinkReplaceDefaultRoute(gwIP); err != nil {
+		log.Printf("configure_network: netlinkReplaceDefaultRoute: %v", err)
+	}
 	log.Printf("configure_network: after route replace, elapsed=%dms", time.Since(t0).Milliseconds())
 
 	if err := os.WriteFile("/etc/resolv.conf", []byte("nameserver 8.8.8.8\n"), 0644); err != nil {
@@ -593,6 +584,168 @@ func handleNetworkConfig(conn io.Writer, guestIP, gwIP string) {
 	json.NewEncoder(conn).Encode(struct {
 		Success bool `json:"success"`
 	}{Success: true})
+}
+
+// parseIPv4 parses a dotted-decimal IPv4 string into 4 bytes.
+// Pure string ops — no "net" package, so the binary stays statically linked.
+func parseIPv4(s string) ([4]byte, error) {
+	var ip [4]byte
+	parts := strings.Split(s, ".")
+	if len(parts) != 4 {
+		return ip, fmt.Errorf("invalid IPv4: %s", s)
+	}
+	for i, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 || n > 255 {
+			return ip, fmt.Errorf("invalid octet %q in %s", p, s)
+		}
+		ip[i] = byte(n)
+	}
+	return ip, nil
+}
+
+// netlinkAddAddr assigns cidr (e.g. "172.16.5.2/30") to iface without sending
+// a gratuitous ARP. IFA_F_NODAD suppresses Duplicate Address Detection (and the
+// associated ARP/ND announcements that would flood the virtio-net device).
+func netlinkAddAddr(iface, cidr string) error {
+	slash := strings.LastIndex(cidr, "/")
+	if slash < 0 {
+		return fmt.Errorf("invalid cidr: %s", cidr)
+	}
+	ipBytes, err := parseIPv4(cidr[:slash])
+	if err != nil {
+		return fmt.Errorf("parse ip: %w", err)
+	}
+	prefixLen, err := strconv.Atoi(cidr[slash+1:])
+	if err != nil || prefixLen < 0 || prefixLen > 32 {
+		return fmt.Errorf("parse prefix len in %s: %w", cidr, err)
+	}
+
+	// Read interface index from sysfs — no "net" package needed.
+	ifindexRaw, err := os.ReadFile("/sys/class/net/" + iface + "/ifindex")
+	if err != nil {
+		return fmt.Errorf("read ifindex for %s: %w", iface, err)
+	}
+	ifindex, err := strconv.Atoi(strings.TrimSpace(string(ifindexRaw)))
+	if err != nil {
+		return fmt.Errorf("parse ifindex: %w", err)
+	}
+
+	sock, err := unix.Socket(unix.AF_NETLINK, unix.SOCK_RAW|unix.SOCK_CLOEXEC, unix.NETLINK_ROUTE)
+	if err != nil {
+		return fmt.Errorf("netlink socket: %w", err)
+	}
+	defer unix.Close(sock)
+
+	// Build RTM_NEWADDR message
+	msg := make([]byte, unix.SizeofNlMsghdr+unix.SizeofIfAddrmsg)
+	hdr := (*unix.NlMsghdr)(unsafe.Pointer(&msg[0]))
+	hdr.Type = unix.RTM_NEWADDR
+	hdr.Flags = unix.NLM_F_REQUEST | unix.NLM_F_CREATE | unix.NLM_F_REPLACE | unix.NLM_F_ACK
+	hdr.Seq = 1
+
+	ifa := (*unix.IfAddrmsg)(unsafe.Pointer(&msg[unix.SizeofNlMsghdr]))
+	ifa.Family = unix.AF_INET
+	ifa.Prefixlen = uint8(prefixLen)
+	ifa.Flags = unix.IFA_F_NODAD // suppress ARP/DAD announcements
+	ifa.Index = uint32(ifindex)
+
+	// IFA_LOCAL attribute (the IP address)
+	attr := make([]byte, unix.SizeofRtAttr+4)
+	rta := (*unix.RtAttr)(unsafe.Pointer(&attr[0]))
+	rta.Type = unix.IFA_LOCAL
+	rta.Len = uint16(unix.SizeofRtAttr + 4)
+	copy(attr[unix.SizeofRtAttr:], ipBytes[:])
+
+	msg = append(msg, attr...)
+	hdr = (*unix.NlMsghdr)(unsafe.Pointer(&msg[0]))
+	hdr.Len = uint32(len(msg))
+
+	sa := &unix.SockaddrNetlink{Family: unix.AF_NETLINK}
+	if err := unix.Sendto(sock, msg, 0, sa); err != nil {
+		return fmt.Errorf("sendto: %w", err)
+	}
+
+	// Read ACK
+	buf := make([]byte, 4096)
+	n, _, err := unix.Recvfrom(sock, buf, 0)
+	if err != nil {
+		return fmt.Errorf("recvfrom: %w", err)
+	}
+	if n < unix.SizeofNlMsghdr {
+		return fmt.Errorf("short netlink response: %d bytes", n)
+	}
+	resp := (*unix.NlMsghdr)(unsafe.Pointer(&buf[0]))
+	if resp.Type == unix.NLMSG_ERROR {
+		errno := *(*int32)(unsafe.Pointer(&buf[unix.SizeofNlMsghdr]))
+		if errno != 0 {
+			return fmt.Errorf("netlink error: %w", syscall.Errno(-errno))
+		}
+	}
+	return nil
+}
+
+// netlinkReplaceDefaultRoute sets the default route via gwIP using netlink.
+func netlinkReplaceDefaultRoute(gwIP string) error {
+	gw, err := parseIPv4(gwIP)
+	if err != nil {
+		return fmt.Errorf("invalid gateway IP: %w", err)
+	}
+
+	sock, err := unix.Socket(unix.AF_NETLINK, unix.SOCK_RAW|unix.SOCK_CLOEXEC, unix.NETLINK_ROUTE)
+	if err != nil {
+		return fmt.Errorf("netlink socket: %w", err)
+	}
+	defer unix.Close(sock)
+
+	msg := make([]byte, unix.SizeofNlMsghdr+unix.SizeofRtMsg)
+	hdr := (*unix.NlMsghdr)(unsafe.Pointer(&msg[0]))
+	hdr.Type = unix.RTM_NEWROUTE
+	hdr.Flags = unix.NLM_F_REQUEST | unix.NLM_F_CREATE | unix.NLM_F_REPLACE | unix.NLM_F_ACK
+	hdr.Seq = 1
+
+	rtm := (*unix.RtMsg)(unsafe.Pointer(&msg[unix.SizeofNlMsghdr]))
+	rtm.Family = unix.AF_INET
+	rtm.Dst_len = 0 // default route
+	rtm.Src_len = 0
+	rtm.Tos = 0
+	rtm.Table = unix.RT_TABLE_MAIN
+	rtm.Protocol = unix.RTPROT_BOOT
+	rtm.Scope = unix.RT_SCOPE_UNIVERSE
+	rtm.Type = unix.RTN_UNICAST
+
+	// RTA_GATEWAY attribute
+	attr := make([]byte, unix.SizeofRtAttr+4)
+	rta := (*unix.RtAttr)(unsafe.Pointer(&attr[0]))
+	rta.Type = unix.RTA_GATEWAY
+	rta.Len = uint16(unix.SizeofRtAttr + 4)
+	copy(attr[unix.SizeofRtAttr:], gw[:])
+
+	msg = append(msg, attr...)
+	hdr = (*unix.NlMsghdr)(unsafe.Pointer(&msg[0]))
+	hdr.Len = uint32(len(msg))
+
+	sa := &unix.SockaddrNetlink{Family: unix.AF_NETLINK}
+	if err := unix.Sendto(sock, msg, 0, sa); err != nil {
+		return fmt.Errorf("sendto: %w", err)
+	}
+
+	buf := make([]byte, 4096)
+	n, _, err := unix.Recvfrom(sock, buf, 0)
+	if err != nil {
+		return fmt.Errorf("recvfrom: %w", err)
+	}
+	if n < unix.SizeofNlMsghdr {
+		return fmt.Errorf("short netlink response: %d bytes", n)
+	}
+	resp := (*unix.NlMsghdr)(unsafe.Pointer(&buf[0]))
+	if resp.Type == unix.NLMSG_ERROR {
+		errno := *(*int32)(unsafe.Pointer(&buf[unix.SizeofNlMsghdr]))
+		if errno != 0 {
+			return fmt.Errorf("netlink error: %w", syscall.Errno(-errno))
+		}
+	}
+	return nil
 }
 
 func handleConnection(connFd int) {

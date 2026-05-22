@@ -194,31 +194,45 @@ func (p *VMPool) tryScaleUp() {
 	}()
 }
 
-func (p *VMPool) Acquire(timeout time.Duration) (*PooledVM, error) {
+func (p *VMPool) Acquire(ctx context.Context) (*PooledVM, error) {
 	start := time.Now()
-	// If no VM is immediately available, kick off an on-demand restore
-	// so something is coming even while we block below.
-	if len(p.vms) == 0 {
-		p.tryScaleUp()
-	}
+
+	// Non-blocking check first — if a warm VM is ready, return instantly.
 	select {
 	case vm := <-p.vms:
 		p.mu.Lock()
 		vm.InUse = true
 		vm.LastUsed = time.Now()
 		p.mu.Unlock()
-		slog.Info("pool acquire succeeded",
+		slog.Info("pool acquire succeeded (warm)",
 			"vm_id", vm.VM.ID,
 			"wait_ms", time.Since(start).Milliseconds(),
 			"pool_available", len(p.vms),
 		)
 		return vm, nil
-	case <-time.After(timeout):
-		slog.Warn("pool acquire timed out",
+	default:
+	}
+
+	// Pool empty — kick off a restore and wait exactly as long as it takes.
+	p.tryScaleUp()
+	select {
+	case vm := <-p.vms:
+		p.mu.Lock()
+		vm.InUse = true
+		vm.LastUsed = time.Now()
+		p.mu.Unlock()
+		slog.Info("pool acquire succeeded (restored)",
+			"vm_id", vm.VM.ID,
 			"wait_ms", time.Since(start).Milliseconds(),
 			"pool_available", len(p.vms),
 		)
-		return nil, fmt.Errorf("timeout: no VM available")
+		return vm, nil
+	case <-ctx.Done():
+		slog.Warn("pool acquire cancelled",
+			"wait_ms", time.Since(start).Milliseconds(),
+			"pool_available", len(p.vms),
+		)
+		return nil, fmt.Errorf("context cancelled waiting for VM: %w", ctx.Err())
 	}
 }
 

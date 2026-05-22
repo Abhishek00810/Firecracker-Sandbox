@@ -64,102 +64,30 @@ func (m *Manager) Create(ctx context.Context, tier string) (*Session, error) {
 	if tier == tierconfig.Pro {
 		pool = m.proPool
 	}
-	if pool != nil {
-		pvm, err := pool.Acquire(5 * time.Second)
-		if err == nil {
-			sess := &Session{
-				ID:        uuid.New().String(),
-				VM:        pvm.VM,
-				Cgroup:    pvm.Cgroup,
-				PooledVM:  pvm,
-				Pool:      pool,
-				Tier:      tier,
-				CreatedAt: time.Now(),
-				LastUsed:  time.Now(),
-			}
-			if err := m.store.Add(sess); err != nil {
-				pool.Release(pvm)
-				return nil, err
-			}
-			slog.Info("session created from pool", "session_id", sess.ID, "vm_id", pvm.VM.ID, "tier", tier, "ms", time.Since(t0).Milliseconds())
-			return sess, nil
-		}
-		slog.Warn("session: pool acquire failed, falling back to direct restore", "err", err)
+	if pool == nil {
+		return nil, fmt.Errorf("no VM pool configured for tier %s", tier)
 	}
 
-	// slow path: restore directly (no pool or pool exhausted)
-	var vm *firecracker.MicroVM
-	var err error
-	if m.template != nil {
-		vm, err = m.vmManager.LoadFromSnapshot(ctx, m.vmConfig, m.template)
-		if err != nil {
-			slog.Warn("session: snapshot restore failed, falling back to cold boot", "err", err)
-			vm, err = coldBoot(ctx, m.vmManager, m.vmConfig)
-		}
-	} else {
-		vm, err = coldBoot(ctx, m.vmManager, m.vmConfig)
-	}
-
+	pvm, err := pool.Acquire(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create session VM: %w", err)
-	}
-	slog.Info("session: vm ready", "vm_id", vm.ID, "ms", time.Since(t0).Milliseconds())
-
-	// Wait until the guest agent is actually accepting connections.
-	vsockClient := firecracker.NewVsockClient(vm.VsockPath)
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		if ok, _, _ := vsockClient.Ping(); ok {
-			break
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	slog.Info("session: vsock ready", "vm_id", vm.ID, "ms", time.Since(t0).Milliseconds())
-
-	// Warm up Python kernel on cold boot only.
-	// Snapshot-restored VMs already have a live kernel in memory.
-	if m.template == nil {
-		if _, err := vsockClient.Execute("pass", "python", "stateful", 60); err != nil {
-			slog.Warn("session: python warmup failed", "vm_id", vm.ID, "err", err)
-		}
-	}
-	slog.Info("session: warmup done", "vm_id", vm.ID, "ms", time.Since(t0).Milliseconds())
-
-	// pick cgroup config and tenant path based on tier
-	tenantID := "session-free"
-	cgroupCfg := m.freeCgroupCfg
-	if tier == tierconfig.Pro {
-		tenantID = "session-pro"
-		cgroupCfg = m.premiumCgroupCfg
-	}
-
-	var cg *cgroup.Cgroup
-	if vm.Process != nil && vm.Process.Process != nil {
-		cg, err = cgroup.New(tenantID, vm.ID, cgroupCfg)
-		if err != nil {
-			slog.Warn("session: cgroup creation failed", "vm_id", vm.ID, "err", err)
-		} else if err = cg.AddPID(vm.Process.Process.Pid); err != nil {
-			slog.Warn("session: cgroup add pid failed", "vm_id", vm.ID, "err", err)
-			cg.Destroy()
-			cg = nil
-		}
+		return nil, fmt.Errorf("failed to acquire VM: %w", err)
 	}
 
 	sess := &Session{
 		ID:        uuid.New().String(),
-		VM:        vm,
-		Cgroup:    cg,
+		VM:        pvm.VM,
+		Cgroup:    pvm.Cgroup,
+		PooledVM:  pvm,
+		Pool:      pool,
 		Tier:      tier,
 		CreatedAt: time.Now(),
 		LastUsed:  time.Now(),
 	}
-
 	if err := m.store.Add(sess); err != nil {
-		m.vmManager.Destroy(ctx, vm.ID)
+		pool.Release(pvm)
 		return nil, err
 	}
-
-	slog.Info("session created", "session_id", sess.ID, "vm_id", vm.ID, "tier", tier)
+	slog.Info("session created", "session_id", sess.ID, "vm_id", pvm.VM.ID, "tier", tier, "ms", time.Since(t0).Milliseconds())
 	return sess, nil
 }
 
@@ -248,16 +176,6 @@ func (m *Manager) reaper() {
 	}
 }
 
-func coldBoot(ctx context.Context, mgr *firecracker.FireCrackerManager, cfg firecracker.VMConfig) (*firecracker.MicroVM, error) {
-	vm, err := mgr.Create(ctx, cfg)
-	if err != nil {
-		return nil, err
-	}
-	if err := mgr.Boot(ctx, vm.ID); err != nil {
-		return nil, err
-	}
-	return vm, nil
-}
 
 func (m *Manager) Shutdown(ctx context.Context) {
 	sessions := m.store.All()
