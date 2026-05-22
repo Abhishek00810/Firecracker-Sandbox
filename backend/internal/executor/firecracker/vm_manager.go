@@ -631,7 +631,7 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 	// Ping loop exits as soon as vsock is ready (up to 60s). On nested virt (Azure)
 	// vsock can take 15-30s to reinitialize after snapshot restore. Only run Execute
 	// if ping actually succeeded — otherwise we'd block for the full vsock timeout.
-	var vsockPingReadyMs, netReconfigMs int64
+	var vsockPingReadyMs, netReconfigMs, postReconfigVsockMs int64
 	if tapName != "" {
 		vc := NewVsockClient(vsockPath)
 		pinged := false
@@ -649,11 +649,35 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 			if err := vc.ConfigureNetwork(guestIP, hostIP); err != nil {
 				slog.Warn("guest network reconfiguration failed", "vm_id", vmID, "err", err)
 			}
+			netReconfigMs = time.Since(lastPhase).Milliseconds()
+			lastPhase = time.Now()
+
+			// ConfigureNetwork closes the vsock connection, which on bare-metal x86_64
+			// triggers a virtio-vsock teardown interrupt (~4s vCPU stall). Wait here
+			// until vsock is ready again so addVM() gets a fully-warm VM.
+			vsockReady := false
+			postReconfigDeadline := time.Now().Add(10 * time.Second)
+			postReconfigAttempts := 0
+			for time.Now().Before(postReconfigDeadline) {
+				postReconfigAttempts++
+				if ok, _, _ := vc.Ping(); ok {
+					vsockReady = true
+					break
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+			postReconfigVsockMs = time.Since(lastPhase).Milliseconds()
+			lastPhase = time.Now()
+			if !vsockReady {
+				slog.Warn("vsock did not recover after network reconfig", "vm_id", vmID, "ms", postReconfigVsockMs)
+			} else if postReconfigAttempts > 1 {
+				slog.Info("vsock recovered after network reconfig", "vm_id", vmID, "attempts", postReconfigAttempts, "ms", postReconfigVsockMs)
+			}
 		} else {
 			slog.Warn("vsock never became ready, skipping network reconfig", "vm_id", vmID)
+			netReconfigMs = time.Since(lastPhase).Milliseconds()
+			lastPhase = time.Now()
 		}
-		netReconfigMs = time.Since(lastPhase).Milliseconds()
-		lastPhase = time.Now()
 	}
 
 	vm := &MicroVM{
@@ -683,6 +707,7 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 		"post_resume_rename_ms", postResumeRenameMs,
 		"vsock_ping_ready_ms", vsockPingReadyMs,
 		"net_reconfig_ms", netReconfigMs,
+		"post_reconfig_vsock_ms", postReconfigVsockMs,
 		"finalize_ms", time.Since(lastPhase).Milliseconds(),
 		"total_ms", time.Since(t0).Milliseconds(),
 	)
