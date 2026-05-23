@@ -74,8 +74,8 @@ for i in $(seq 0 $((SLOT_COUNT-1))); do
     sudo ip netns exec fc-ns-$i ip link set fc-tap-$i up
 
     # veth pair: veth-fc-$i in default ns, veth-ns-$i in fc-ns-$i
-    H_IP="10.66.$i.1"
-    N_IP="10.66.$i.2"
+    H_IP="10.$((66 + i/256)).$((i % 256)).1"
+    N_IP="10.$((66 + i/256)).$((i % 256)).2"
     sudo ip link add veth-fc-$i type veth peer name veth-ns-$i
     sudo ip link set veth-ns-$i netns fc-ns-$i
     sudo ip addr add $H_IP/30 dev veth-fc-$i
