@@ -74,7 +74,10 @@ func main() {
 	freeTc := tierconfig.Tiers[tierconfig.Free]
 	proTc := tierconfig.Tiers[tierconfig.Pro]
 
-	vmManager := firecracker.NewFirecrackerManager(cfg.SocketDir, cfg.AssetsPath, cfg.FirecrackerBinary)
+	// Total slots = sum of all pool maxSizes across all four pools + buffer.
+	// Each slot is a pre-created netns+TAP+veth set up by server.sh.
+	slotCount := freeTc.MaxPoolSize*2 + proTc.MaxPoolSize*2 + 16
+	vmManager := firecracker.NewFirecrackerManager(cfg.SocketDir, cfg.AssetsPath, cfg.FirecrackerBinary, slotCount)
 
 	config := firecracker.VMConfig{
 		VCPUCount:  2,

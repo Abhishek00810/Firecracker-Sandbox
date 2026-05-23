@@ -10,7 +10,7 @@ import (
 func TestCreate(t *testing.T) {
 	// Setup
 	socketDir := t.TempDir()
-	manager := NewFirecrackerManager(socketDir, "./assets", "/bin/true")
+	manager := NewFirecrackerManager(socketDir, "./assets", "/bin/true", 8)
 	rootfsPath := filepath.Join(t.TempDir(), "rootfs.ext4")
 	if err := os.WriteFile(rootfsPath, []byte("rootfs"), 0644); err != nil {
 		t.Fatalf("write temp rootfs: %v", err)

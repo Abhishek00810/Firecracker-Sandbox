@@ -52,6 +52,7 @@ type MicroVM struct {
 	VsockPath  string
 	SocketPath string
 	TapName    string // host TAP device name, empty if network setup failed
+	Slot       int    // network slot index (>= 0), or -1 for cold-boot VMs
 	CreatedAt  time.Time
 	Process    *exec.Cmd
 	Stdout     *bytes.Buffer
@@ -113,6 +114,34 @@ type VMStateChange struct {
 	State string `json:"state"`
 }
 
+// SlotPool manages pre-created network slots (netns + TAP + veth + iptables)
+// set up by server.sh. Each slot is a self-contained network environment that
+// a restored VM can be placed into without any guest-side reconfiguration.
+type SlotPool struct {
+	slots chan int
+}
+
+func newSlotPool(count int) *SlotPool {
+	sp := &SlotPool{slots: make(chan int, count)}
+	for i := 0; i < count; i++ {
+		sp.slots <- i
+	}
+	return sp
+}
+
+func (s *SlotPool) Acquire(ctx context.Context) (int, error) {
+	select {
+	case slot := <-s.slots:
+		return slot, nil
+	case <-ctx.Done():
+		return -1, fmt.Errorf("context cancelled waiting for network slot: %w", ctx.Err())
+	}
+}
+
+func (s *SlotPool) Release(slot int) {
+	s.slots <- slot
+}
+
 type FireCrackerManager struct {
 	SocketDir  string
 	AssetsPath string
@@ -120,8 +149,9 @@ type FireCrackerManager struct {
 	Vms        map[string]*MicroVM
 	mu         sync.RWMutex
 	nextCID    atomic.Uint32
-	nextNetIdx atomic.Uint32 // for TAP subnet allocation: index N → 172.16.N.0/30
-	restoreMu  sync.Mutex    // serializes snapshot restores — prevents vsock binding conflicts
+	nextNetIdx atomic.Uint32 // for TAP subnet allocation used by cold-boot VMs
+	restoreMu  sync.Mutex    // serializes snapshot restores — prevents vsock path conflicts
+	slotPool   *SlotPool     // pre-created network slots from server.sh
 }
 
 type VMManager interface {
@@ -133,12 +163,13 @@ type VMManager interface {
 	LoadFromSnapshot(ctx context.Context, cfg VMConfig, tmpl *SnapshotTemplate) (*MicroVM, error)
 }
 
-func NewFirecrackerManager(socketDir, assetsPath, binaryPath string) *FireCrackerManager {
+func NewFirecrackerManager(socketDir, assetsPath, binaryPath string, slotCount int) *FireCrackerManager {
 	return &FireCrackerManager{
 		SocketDir:  socketDir,
 		AssetsPath: assetsPath,
 		BinaryPath: binaryPath,
 		Vms:        make(map[string]*MicroVM),
+		slotPool:   newSlotPool(slotCount),
 	}
 }
 
@@ -256,6 +287,7 @@ func (f *FireCrackerManager) Create(ctx context.Context, cfg VMConfig) (*MicroVM
 		State:      VMStateCreated,
 		SocketPath: socketPath,
 		VsockPath:  vsockPath,
+		Slot:       -1, // cold-boot VM, not using slot pool
 		CreatedAt:  time.Now(),
 		Process:    nil,
 	}
@@ -464,8 +496,12 @@ func (f *FireCrackerManager) Destroy(ctx context.Context, vmID string) error {
 	}
 	// OverlayFS mode: lower is the shared rootfs (not deleted), upper is tmpfs in RAM (no file)
 
-	// Delete the TAP device allocated for this VM.
-	if vm.TapName != "" {
+	// Slot-based VMs (snapshot restores): return the slot to the pool so the next
+	// restore can reuse the pre-created netns + TAP. Cold-boot VMs (template creation)
+	// have Slot == -1 and own their TAP — delete it directly.
+	if vm.Slot >= 0 {
+		f.slotPool.Release(vm.Slot)
+	} else if vm.TapName != "" {
 		if out, err := exec.Command("ip", "link", "delete", vm.TapName).CombinedOutput(); err != nil {
 			slog.Warn("failed to delete TAP device", "tap", vm.TapName, "err", err, "output", string(out))
 		}
@@ -508,11 +544,24 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 	socketPath := f.getSocketPath(vmID)
 	vsockPath := filepath.Join(f.SocketDir, fmt.Sprintf("vsock-%s.sock", vmID))
 
+	// Acquire a pre-created network slot. Each slot has its own netns + TAP + veth
+	// + iptables rules set up by server.sh. The guest's baked-in gateway (172.16.0.1)
+	// matches the TAP's host IP in the slot, so no guest-side reconfiguration is needed.
+	slot, err := f.slotPool.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire network slot: %w", err)
+	}
+	nsName := fmt.Sprintf("fc-ns-%d", slot)
+	tapSlotName := fmt.Sprintf("fc-tap-%d", slot)
+
+	// Run Firecracker inside the slot's network namespace so it sees the slot's TAP.
+	// Unix sockets (API socket, vsock UDS) are filesystem-based and work across netns.
 	var stdout, stderr bytes.Buffer
-	cmd := exec.Command(f.BinaryPath, "--api-sock", socketPath)
+	cmd := exec.Command("ip", "netns", "exec", nsName, f.BinaryPath, "--api-sock", socketPath)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
+		f.slotPool.Release(slot)
 		return nil, fmt.Errorf("failed to start firecracker: %w", err)
 	}
 
@@ -535,150 +584,91 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 		},
 	}
 
-	// Allocate unique TAP/IP for this VM — atomic counter, no lock needed
-	tapName, hostIP, guestIP, _ := f.allocateNetwork()
+	// Rename slot TAP to the template TAP name inside the slot's netns.
+	// Firecracker's snapshot has tmpl.TapName baked in — it must find that name.
+	// Safe to do before the lock: each slot has its own namespace, no conflict.
+	if tmpl.TapName != "" {
+		if out, err := exec.Command("ip", "netns", "exec", nsName,
+			"ip", "link", "set", tapSlotName, "name", tmpl.TapName).CombinedOutput(); err != nil {
+			cmd.Process.Kill()
+			f.slotPool.Release(slot)
+			return nil, fmt.Errorf("TAP pre-rename failed in %s: %w: %s", nsName, err, out)
+		}
+	}
 
-	// Serialize only the TAP/vsock critical section: tmpl.TapName and tmpl.VsockPath
-	// are shared across all restores. Two concurrent restores would conflict trying
-	// to both recreate fctap0 and bind the same vsock path.
+	tapRenameMs := time.Since(lastPhase).Milliseconds()
+	lastPhase = time.Now()
+
+	// Serialize on vsock path: tmpl.VsockPath is shared across all concurrent restores.
+	// The lock covers only the snapshot load → resume → vsock rename window.
 	f.restoreMu.Lock()
 	lockWaitMs := time.Since(lastPhase).Milliseconds()
 	lastPhase = time.Now()
 	slog.Debug("restore: lock acquired", "vm_id", vmID, "ms", time.Since(t0).Milliseconds())
 
-	// Recreate the template's TAP device (no IP yet — just needs to exist for Firecracker).
-	// The template cleanup deleted it so it's free to recreate.
-	if tmpl.TapName != "" {
-		exec.Command("ip", "link", "delete", tmpl.TapName).Run() // clean stale if any
-		if out, err := exec.Command("ip", "tuntap", "add", tmpl.TapName, "mode", "tap").CombinedOutput(); err != nil {
-			slog.Warn("recreate template TAP failed, VM will boot without network", "tap", tmpl.TapName, "err", err, "out", string(out))
-		} else {
-			exec.Command("ip", "link", "set", tmpl.TapName, "up").Run()
-		}
+	restoreCleanup := func() {
+		f.restoreMu.Unlock()
+		cmd.Process.Kill()
+		// Rename TAP back so the slot is reusable
+		exec.Command("ip", "netns", "exec", nsName, "ip", "link", "set", tmpl.TapName, "name", tapSlotName).Run()
+		f.slotPool.Release(slot)
 	}
 
 	// Clean up stale vsock from a previous failed restore
 	os.Remove(tmpl.VsockPath)
 
-	// Load snapshot paused — Firecracker opens tmpl.TapName
+	// Load snapshot paused — Firecracker (in nsName) opens tmpl.TapName inside the netns
 	if err := f.putJSON(client, "http://localhost/snapshot/load", SnapshotLoadRequest{
 		SnapshotPath:        tmpl.SnapPath,
 		MemFilePath:         tmpl.MemPath,
 		EnableDiffSnapshots: false,
 		ResumeVM:            false,
 	}); err != nil {
-		f.restoreMu.Unlock()
-		cmd.Process.Kill()
-		exec.Command("ip", "link", "delete", tmpl.TapName).Run()
+		restoreCleanup()
 		return nil, fmt.Errorf("snapshot load failed: %w", err)
 	}
 	snapshotLoadMs := time.Since(lastPhase).Milliseconds()
 	lastPhase = time.Now()
 
-	// Update lower drive — shared template rootfs (read-only); upper is tmpfs in RAM, no block device.
+	// Update lower drive — shared template rootfs (read-only); upper is tmpfs in RAM
 	if err := f.patchJSON(client, "http://localhost/drives/lower", map[string]string{
 		"drive_id":     "lower",
 		"path_on_host": tmpl.RootfsPath,
 	}); err != nil {
-		f.restoreMu.Unlock()
-		cmd.Process.Kill()
-		exec.Command("ip", "link", "delete", tmpl.TapName).Run()
+		restoreCleanup()
 		return nil, fmt.Errorf("lower drive update failed: %w", err)
 	}
 	drivePatchMs := time.Since(lastPhase).Milliseconds()
 	lastPhase = time.Now()
 
-	// Resume — Firecracker binds tmpl.VsockPath and uses tmpl.TapName
+	// Resume — Firecracker binds tmpl.VsockPath; guest wakes up with its baked-in IP
 	if err := f.patchJSON(client, "http://localhost/vm", VMStateChange{State: "Resumed"}); err != nil {
-		f.restoreMu.Unlock()
-		cmd.Process.Kill()
-		exec.Command("ip", "link", "delete", tmpl.TapName).Run()
+		restoreCleanup()
 		return nil, fmt.Errorf("resume failed: %w", err)
 	}
 	resumeMs := time.Since(lastPhase).Milliseconds()
 	lastPhase = time.Now()
 
-	// Rename template TAP → unique name so the next restore can recreate tmpl.TapName fresh.
-	// Then assign unique IP to the renamed TAP for proper host routing.
-	if tmpl.TapName != "" {
-		if out, err := exec.Command("ip", "link", "set", tmpl.TapName, "name", tapName).CombinedOutput(); err != nil {
-			slog.Warn("TAP rename failed", "from", tmpl.TapName, "to", tapName, "err", err, "out", string(out))
-			tapName = ""
-		} else {
-			exec.Command("ip", "addr", "add", hostIP+"/30", "dev", tapName).Run()
-		}
-	}
-
 	// Rename vsock → unique per-VM path (fd survives rename, Firecracker keeps listening)
 	if err := os.Rename(tmpl.VsockPath, vsockPath); err != nil {
-		f.restoreMu.Unlock()
-		cmd.Process.Kill()
-		if tapName != "" {
-			exec.Command("ip", "link", "delete", tapName).Run()
-		}
+		restoreCleanup()
 		return nil, fmt.Errorf("vsock rename failed: %w", err)
 	}
 
-	// TAP and vsock are now unique to this VM — release the lock so the next
-	// restore can proceed with its own TAP/vsock setup in parallel.
 	f.restoreMu.Unlock()
 	postResumeRenameMs := time.Since(lastPhase).Milliseconds()
 	lastPhase = time.Now()
 	slog.Debug("restore: lock released", "vm_id", vmID, "ms", time.Since(t0).Milliseconds())
 
-	// Reconfigure guest network via vsock — guest still has template's old IP baked in.
-	// We flush and reassign a unique IP so routing works correctly.
-	// Ping loop exits as soon as vsock is ready (up to 60s). On nested virt (Azure)
-	// vsock can take 15-30s to reinitialize after snapshot restore. Only run Execute
-	// if ping actually succeeded — otherwise we'd block for the full vsock timeout.
-	var vsockPingReadyMs, netReconfigMs, postReconfigVsockMs int64
-	if tapName != "" {
-		vc := NewVsockClient(vsockPath)
-		pinged := false
-		deadline := time.Now().Add(60 * time.Second)
-		for time.Now().Before(deadline) {
-			if ok, _, _ := vc.Ping(); ok {
-				pinged = true
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-		vsockPingReadyMs = time.Since(lastPhase).Milliseconds()
-		lastPhase = time.Now()
-		if pinged {
-			if err := vc.ConfigureNetwork(guestIP, hostIP); err != nil {
-				slog.Warn("guest network reconfiguration failed", "vm_id", vmID, "err", err)
-			}
-			netReconfigMs = time.Since(lastPhase).Milliseconds()
-			lastPhase = time.Now()
-
-			// ConfigureNetwork closes the vsock connection, which on bare-metal x86_64
-			// triggers a virtio-vsock teardown interrupt (~4s vCPU stall). Wait here
-			// until vsock is ready again so addVM() gets a fully-warm VM.
-			vsockReady := false
-			postReconfigDeadline := time.Now().Add(10 * time.Second)
-			postReconfigAttempts := 0
-			for time.Now().Before(postReconfigDeadline) {
-				postReconfigAttempts++
-				if ok, _, _ := vc.Ping(); ok {
-					vsockReady = true
-					break
-				}
-				time.Sleep(100 * time.Millisecond)
-			}
-			postReconfigVsockMs = time.Since(lastPhase).Milliseconds()
-			lastPhase = time.Now()
-			if !vsockReady {
-				slog.Warn("vsock did not recover after network reconfig", "vm_id", vmID, "ms", postReconfigVsockMs)
-			} else if postReconfigAttempts > 1 {
-				slog.Info("vsock recovered after network reconfig", "vm_id", vmID, "attempts", postReconfigAttempts, "ms", postReconfigVsockMs)
-			}
-		} else {
-			slog.Warn("vsock never became ready, skipping network reconfig", "vm_id", vmID)
-			netReconfigMs = time.Since(lastPhase).Milliseconds()
-			lastPhase = time.Now()
-		}
+	// Rename tmpl.TapName back to the slot name now that the lock is released.
+	// The slot TAP keeps its pre-assigned IP (172.16.0.1/30) — no IP add needed.
+	if tmpl.TapName != "" {
+		exec.Command("ip", "netns", "exec", nsName, "ip", "link", "set", tmpl.TapName, "name", tapSlotName).Run()
 	}
+
+	// No configure_network call: the guest's baked-in IP (172.16.0.2) and gateway
+	// (172.16.0.1) match the slot TAP's pre-configured address. No vsock round-trip,
+	// no virtio-vsock teardown interrupt, no ~4s stall.
 
 	vm := &MicroVM{
 		ID:         vmID,
@@ -686,7 +676,8 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 		State:      VMStateRunning,
 		SocketPath: socketPath,
 		VsockPath:  vsockPath,
-		TapName:    tapName,
+		TapName:    tapSlotName,
+		Slot:       slot,
 		CreatedAt:  time.Now(),
 		Process:    cmd,
 		Stdout:     &stdout,
@@ -699,15 +690,14 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 
 	slog.Info("snapshot restore timings",
 		"vm_id", vmID,
+		"slot", slot,
 		"firecracker_socket_ms", socketReadyMs,
+		"tap_rename_ms", tapRenameMs,
 		"restore_lock_wait_ms", lockWaitMs,
 		"snapshot_load_ms", snapshotLoadMs,
 		"drive_patch_ms", drivePatchMs,
 		"resume_ms", resumeMs,
 		"post_resume_rename_ms", postResumeRenameMs,
-		"vsock_ping_ready_ms", vsockPingReadyMs,
-		"net_reconfig_ms", netReconfigMs,
-		"post_reconfig_vsock_ms", postReconfigVsockMs,
 		"finalize_ms", time.Since(lastPhase).Milliseconds(),
 		"total_ms", time.Since(t0).Milliseconds(),
 	)
