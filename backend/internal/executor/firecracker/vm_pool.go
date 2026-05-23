@@ -194,7 +194,7 @@ func (p *VMPool) tryScaleUp() {
 	}()
 }
 
-func (p *VMPool) Acquire(ctx context.Context) (*PooledVM, error) {
+func (p *VMPool) Acquire(ctx context.Context) (*PooledVM, bool, error) {
 	start := time.Now()
 
 	// Non-blocking check first — if a warm VM is ready, return instantly.
@@ -209,7 +209,7 @@ func (p *VMPool) Acquire(ctx context.Context) (*PooledVM, error) {
 			"wait_ms", time.Since(start).Milliseconds(),
 			"pool_available", len(p.vms),
 		)
-		return vm, nil
+		return vm, true, nil
 	default:
 	}
 
@@ -226,13 +226,13 @@ func (p *VMPool) Acquire(ctx context.Context) (*PooledVM, error) {
 			"wait_ms", time.Since(start).Milliseconds(),
 			"pool_available", len(p.vms),
 		)
-		return vm, nil
+		return vm, false, nil
 	case <-ctx.Done():
 		slog.Warn("pool acquire cancelled",
 			"wait_ms", time.Since(start).Milliseconds(),
 			"pool_available", len(p.vms),
 		)
-		return nil, fmt.Errorf("context cancelled waiting for VM: %w", ctx.Err())
+		return nil, false, fmt.Errorf("context cancelled waiting for VM: %w", ctx.Err())
 	}
 }
 

@@ -25,7 +25,7 @@ func (f *FirecrackerExecutor) Execute(ctx context.Context, code, language string
 	}
 
 	// Acquire VM from pool
-	pooledVM, err := f.Pool.Acquire(ctx)
+	pooledVM, _, err := f.Pool.Acquire(ctx)
 	if err != nil {
 		return executor.ExecutionResult{}, fmt.Errorf("failed to acquire VM: %w", err)
 	}

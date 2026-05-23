@@ -68,7 +68,7 @@ func (m *Manager) Create(ctx context.Context, tier string) (*Session, error) {
 		return nil, fmt.Errorf("no VM pool configured for tier %s", tier)
 	}
 
-	pvm, err := pool.Acquire(ctx)
+	pvm, warm, err := pool.Acquire(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to acquire VM: %w", err)
 	}
@@ -87,7 +87,7 @@ func (m *Manager) Create(ctx context.Context, tier string) (*Session, error) {
 		pool.Release(pvm)
 		return nil, err
 	}
-	slog.Info("session created", "session_id", sess.ID, "vm_id", pvm.VM.ID, "tier", tier, "ms", time.Since(t0).Milliseconds())
+	slog.Info("session created", "session_id", sess.ID, "vm_id", pvm.VM.ID, "tier", tier, "warm", warm, "ms", time.Since(t0).Milliseconds())
 	return sess, nil
 }
 
