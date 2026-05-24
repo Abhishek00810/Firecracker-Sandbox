@@ -35,7 +35,7 @@ sudo rm -f /tmp/fc-sockets/*.sock 2>/dev/null || true
 # Each slot gets an isolated netns with a TAP (same IP as template host so
 # the guest's baked-in gateway works on restore without any reconfiguration)
 # and a veth pair for outbound internet access from user code.
-SLOT_COUNT=500
+SLOT_COUNT=64
 TEMPLATE_HOST_IP="172.16.0.1"   # must match allocateNetwork() index-0 host IP
 
 echo "[server] Setting up $SLOT_COUNT network slots..."
