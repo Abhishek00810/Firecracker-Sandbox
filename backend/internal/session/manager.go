@@ -55,11 +55,11 @@ func NewManager(
 	return m
 }
 
-// Create boots a VM and binds it to a new session
-func (m *Manager) Create(ctx context.Context, tier string) (*Session, error) {
+// Create boots a VM and binds it to a new session. env vars are injected into
+// the persistent shell so commands like git can access GITHUB_TOKEN etc.
+func (m *Manager) Create(ctx context.Context, tier string, env map[string]string) (*Session, error) {
 	t0 := time.Now()
 
-	// fast path: acquire pre-warmed VM from the tier's pool (vsock + kernel already ready)
 	pool := m.freePool
 	if tier == tierconfig.Pro {
 		pool = m.proPool
@@ -87,8 +87,53 @@ func (m *Manager) Create(ctx context.Context, tier string) (*Session, error) {
 		pool.Release(pvm)
 		return nil, err
 	}
+
+	// Inject env vars into the VM's persistent shell if provided
+	if len(env) > 0 {
+		vsockClient := firecracker.NewVsockClient(pvm.VM.VsockPath)
+		if err := vsockClient.SetEnv(env); err != nil {
+			slog.Warn("set_env failed", "session_id", sess.ID, "err", err)
+		}
+	}
+
 	slog.Info("session created", "session_id", sess.ID, "vm_id", pvm.VM.ID, "tier", tier, "warm", warm, "ms", time.Since(t0).Milliseconds())
 	return sess, nil
+}
+
+// Exec runs a shell command in the session's persistent bash process
+func (m *Manager) Exec(ctx context.Context, sessionID, command string, timeoutSec int) (executor.ExecutionResult, error) {
+	sess, ok := m.store.Get(sessionID)
+	if !ok {
+		return executor.ExecutionResult{}, fmt.Errorf("session %s not found", sessionID)
+	}
+
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+
+	sess.LastUsed = time.Now()
+
+	if timeoutSec <= 0 {
+		timeoutSec = 30
+	}
+
+	vsockClient := firecracker.NewVsockClient(sess.VM.VsockPath)
+	resp, err := vsockClient.Exec(command, timeoutSec)
+	if err != nil {
+		return executor.ExecutionResult{}, fmt.Errorf("exec failed: %w", err)
+	}
+
+	sess.RunCount++
+	exitCode := resp.ExitCode
+	sess.LastExitCode = &exitCode
+
+	return executor.ExecutionResult{
+		Stdout:            resp.Stdout,
+		Stderr:            resp.Stderr,
+		Duration:          resp.Duration,
+		GuestDuration:     resp.Duration,
+		ExitCode:          int64(resp.ExitCode),
+		TerminationReason: "success",
+	}, nil
 }
 
 // Execute runs code inside an existing session's VM

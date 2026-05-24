@@ -114,6 +114,7 @@ sudo umount /mnt 2>/dev/null || true
 sudo mount -o loop "$ROOTFS" /mnt
 sudo cp guest-agent-amd64 /mnt/usr/local/bin/guest-agent
 sudo chmod +x /mnt/usr/local/bin/guest-agent
+sudo chroot /mnt apk add --no-cache git 2>/dev/null || true
 sudo umount /mnt
 echo "[server] Rootfs updated"
 

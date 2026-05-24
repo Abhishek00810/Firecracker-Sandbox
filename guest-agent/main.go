@@ -547,15 +547,19 @@ func (c *fdConn) Write(p []byte) (n int, err error) {
 
 // incomingMessage is a union of all message types the host can send.
 // Type == "configure_network" → network reconfiguration after snapshot restore.
+// Type == "set_env"           → inject env vars into the persistent shell.
+// Type == "exec"              → run a shell command in the persistent bash session.
 // Type == "" (default)        → code execution request.
 type incomingMessage struct {
-	Type     string `json:"type"`
-	Code     string `json:"code"`
-	Language string `json:"language"`
-	Timeout  int    `json:"timeout"`
-	Mode     string `json:"mode"`
-	GuestIP  string `json:"guest_ip"`
-	GWIP     string `json:"gw_ip"`
+	Type     string            `json:"type"`
+	Code     string            `json:"code"`
+	Language string            `json:"language"`
+	Timeout  int               `json:"timeout"`
+	Mode     string            `json:"mode"`
+	GuestIP  string            `json:"guest_ip"`
+	GWIP     string            `json:"gw_ip"`
+	Command  string            `json:"command"`
+	Env      map[string]string `json:"env"`
 }
 
 // handleNetworkConfig reconfigures eth0 using netlink directly — no exec.Command,
@@ -748,6 +752,187 @@ func netlinkReplaceDefaultRoute(gwIP string) error {
 	return nil
 }
 
+// ─── Persistent Shell Session ─────────────────────────────────────────────────
+
+const shellSentinel = "__EXEC_DONE__"
+
+type ShellSession struct {
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdout *bufio.Scanner
+}
+
+var (
+	shellMu     sync.Mutex
+	globalShell *ShellSession
+)
+
+func newShellSession(env map[string]string) (*ShellSession, error) {
+	cmd := exec.Command("/bin/bash")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	// Build env: inherit current env, then apply overrides
+	base := os.Environ()
+	for k, v := range env {
+		base = append(base, k+"="+v)
+	}
+	cmd.Env = base
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("stdin pipe: %w", err)
+	}
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("stdout pipe: %w", err)
+	}
+	cmd.Stderr = log.Writer()
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start bash: %w", err)
+	}
+
+	sh := &ShellSession{
+		cmd:    cmd,
+		stdin:  stdin,
+		stdout: bufio.NewScanner(stdoutPipe),
+	}
+
+	// Set default working directory and configure git identity placeholders
+	fmt.Fprintf(sh.stdin, "mkdir -p /workspace && cd /workspace\n")
+	fmt.Fprintf(sh.stdin, "export GIT_TERMINAL_PROMPT=0\n") // never prompt for credentials — fail fast
+	log.Printf("shell session started pid=%d", cmd.Process.Pid)
+	return sh, nil
+}
+
+func getOrStartShell(env map[string]string) (*ShellSession, error) {
+	shellMu.Lock()
+	defer shellMu.Unlock()
+	if globalShell != nil {
+		return globalShell, nil
+	}
+	sh, err := newShellSession(env)
+	if err != nil {
+		return nil, err
+	}
+	globalShell = sh
+	return sh, nil
+}
+
+func evictShell() {
+	shellMu.Lock()
+	if globalShell != nil {
+		globalShell.cmd.Process.Kill()
+		globalShell = nil
+	}
+	shellMu.Unlock()
+}
+
+type shellResult struct {
+	lines    []string
+	exitCode int
+	err      error
+}
+
+func (s *ShellSession) exec(command string, timeoutSec int) (stdout, stderr string, exitCode int, err error) {
+	const stderrFile = "/tmp/.exec_stderr"
+
+	// Wrap command: redirect stderr to tmp file, print sentinel with exit code when done
+	wrapped := fmt.Sprintf("{ %s\n} 2>%s\n__ec=$?; printf '\\n%s%%d\\n' $__ec\n",
+		command, stderrFile, shellSentinel)
+
+	if _, writeErr := fmt.Fprint(s.stdin, wrapped); writeErr != nil {
+		return "", "", -1, fmt.Errorf("write to shell stdin: %w", writeErr)
+	}
+
+	ch := make(chan shellResult, 1)
+	go func() {
+		var lines []string
+		for s.stdout.Scan() {
+			line := s.stdout.Text()
+			if strings.HasPrefix(line, shellSentinel) {
+				code, _ := strconv.Atoi(strings.TrimPrefix(line, shellSentinel))
+				ch <- shellResult{lines, code, nil}
+				return
+			}
+			lines = append(lines, line)
+		}
+		ch <- shellResult{nil, -1, fmt.Errorf("shell process died")}
+	}()
+
+	if timeoutSec <= 0 {
+		timeoutSec = 30
+	}
+
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			return "", "", -1, r.err
+		}
+		if len(r.lines) > 0 {
+			stdout = strings.Join(r.lines, "\n") + "\n"
+		}
+		stderrBytes, _ := os.ReadFile(stderrFile)
+		return stdout, string(stderrBytes), r.exitCode, nil
+	case <-time.After(time.Duration(timeoutSec) * time.Second):
+		return "", "", -1, fmt.Errorf("command timed out after %ds", timeoutSec)
+	}
+}
+
+func handleExec(conn io.Writer, command string, timeoutSec int) {
+	if timeoutSec <= 0 {
+		timeoutSec = 30
+	}
+	sh, err := getOrStartShell(nil)
+	if err != nil {
+		json.NewEncoder(conn).Encode(ExecutionResponse{
+			Stderr:   fmt.Sprintf("failed to start shell: %v", err),
+			ExitCode: -1,
+		})
+		return
+	}
+
+	stdout, stderr, exitCode, err := sh.exec(command, timeoutSec)
+	if err != nil {
+		evictShell()
+		json.NewEncoder(conn).Encode(ExecutionResponse{
+			Stderr:   fmt.Sprintf("shell exec error: %v", err),
+			ExitCode: -1,
+		})
+		return
+	}
+
+	json.NewEncoder(conn).Encode(ExecutionResponse{
+		Stdout:   stdout,
+		Stderr:   stderr,
+		ExitCode: exitCode,
+	})
+}
+
+func handleSetEnv(conn io.Writer, env map[string]string) {
+	shellMu.Lock()
+	defer shellMu.Unlock()
+
+	// Start a fresh shell with the provided env vars
+	if globalShell != nil {
+		globalShell.cmd.Process.Kill()
+		globalShell = nil
+	}
+
+	sh, err := newShellSession(env)
+	if err != nil {
+		json.NewEncoder(conn).Encode(struct {
+			Success bool   `json:"success"`
+			Error   string `json:"error,omitempty"`
+		}{false, err.Error()})
+		return
+	}
+	globalShell = sh
+	json.NewEncoder(conn).Encode(struct {
+		Success bool `json:"success"`
+	}{true})
+}
+
 func handleConnection(connFd int) {
 	conn := &fdConn{fd: connFd}
 	log.Printf("connection accepted fd=%d", connFd)
@@ -765,6 +950,16 @@ func handleConnection(connFd int) {
 
 	if msg.Type == "configure_network" {
 		handleNetworkConfig(conn, msg.GuestIP, msg.GWIP)
+		return
+	}
+
+	if msg.Type == "set_env" {
+		handleSetEnv(conn, msg.Env)
+		return
+	}
+
+	if msg.Type == "exec" {
+		handleExec(conn, msg.Command, msg.Timeout)
 		return
 	}
 

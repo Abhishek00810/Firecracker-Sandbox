@@ -239,7 +239,20 @@ func newFakeSessionService() *fakeSessionService {
 	return &fakeSessionService{sessions: map[string]*session.Session{}}
 }
 
-func (f *fakeSessionService) Create(ctx context.Context, tier string) (*session.Session, error) {
+func (f *fakeSessionService) Exec(ctx context.Context, sessionID, command string, timeoutSec int) (executor.ExecutionResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.sessions[sessionID]; !ok {
+		return executor.ExecutionResult{}, fmt.Errorf("session %s not found", sessionID)
+	}
+	return executor.ExecutionResult{
+		Stdout:            "exec output\n",
+		ExitCode:          0,
+		TerminationReason: "success",
+	}, nil
+}
+
+func (f *fakeSessionService) Create(ctx context.Context, tier string, env map[string]string) (*session.Session, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 

@@ -126,12 +126,62 @@ func (v *VsockClient) Ping() (ok bool, stage string, elapsed time.Duration) {
 	return true, "ok", time.Since(t)
 }
 
-func (v *VsockClient) Execute(code, language, mode string, timeoutSec int) (*ExecuteResponse, error) {
-	// Retry the handshake up to 3 times with 100ms gaps.
-	// Firecracker's vsock proxy can transiently reject connections (EOF on
-	// handshake read) between consecutive requests — a brief wait resolves it.
-	// Retrying is safe here because code only executes AFTER a successful
-	// handshake, so a failed handshake means no code ran yet.
+func (v *VsockClient) SetEnv(env map[string]string) error {
+	conn, err := v.dial()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	req := struct {
+		Type string            `json:"type"`
+		Env  map[string]string `json:"env"`
+	}{Type: "set_env", Env: env}
+
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		return fmt.Errorf("send set_env: %w", err)
+	}
+
+	var resp struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error,omitempty"`
+	}
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		return fmt.Errorf("read set_env response: %w", err)
+	}
+	if !resp.Success {
+		return fmt.Errorf("set_env failed: %s", resp.Error)
+	}
+	return nil
+}
+
+func (v *VsockClient) Exec(command string, timeoutSec int) (*ExecuteResponse, error) {
+	conn, err := v.dial()
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	req := struct {
+		Type    string `json:"type"`
+		Command string `json:"command"`
+		Timeout int    `json:"timeout"`
+	}{Type: "exec", Command: command, Timeout: timeoutSec}
+
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		return nil, fmt.Errorf("send exec request: %w", err)
+	}
+
+	var resp ExecuteResponse
+	conn.SetDeadline(time.Now().Add(time.Duration(timeoutSec+10) * time.Second))
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		return nil, fmt.Errorf("read exec response: %w", err)
+	}
+	return &resp, nil
+}
+
+// dial performs the vsock handshake and returns a ready connection.
+func (v *VsockClient) dial() (net.Conn, error) {
 	var (
 		conn net.Conn
 		err  error
@@ -142,38 +192,38 @@ func (v *VsockClient) Execute(code, language, mode string, timeoutSec int) (*Exe
 		if attempt > 0 {
 			time.Sleep(100 * time.Millisecond)
 		}
-
 		conn, err = net.DialTimeout("unix", v.socketPath, v.timeout)
 		if err != nil {
 			continue
 		}
-
 		conn.SetDeadline(time.Now().Add(v.timeout))
-
 		if _, err = conn.Write([]byte("CONNECT 52\n")); err != nil {
 			conn.Close()
 			continue
 		}
-
 		n, err = conn.Read(buf)
 		if err != nil {
 			conn.Close()
 			continue
 		}
-
-		// Handshake succeeded — break and proceed with execution
 		break
 	}
-
 	if err != nil {
-		return nil, fmt.Errorf("failed to read vsock handshake response: %w", err)
+		return nil, fmt.Errorf("vsock handshake failed: %w", err)
+	}
+	if n < 2 || string(buf[:2]) != "OK" {
+		conn.Close()
+		return nil, fmt.Errorf("vsock handshake rejected: %s", string(buf[:n]))
+	}
+	return conn, nil
+}
+
+func (v *VsockClient) Execute(code, language, mode string, timeoutSec int) (*ExecuteResponse, error) {
+	conn, err := v.dial()
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect: %w", err)
 	}
 	defer conn.Close()
-
-	response := string(buf[:n])
-	if len(response) < 2 || response[:2] != "OK" {
-		return nil, fmt.Errorf("vsock handshake failed: %s", response)
-	}
 
 	req := ExecuteRequest{
 		Code:     code,

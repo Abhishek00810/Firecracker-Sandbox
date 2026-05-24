@@ -57,6 +57,14 @@ type ExecuteResponse struct {
 type CreateSessionRequest struct {
 	Language string            `json:"language,omitempty"`
 	Metadata map[string]string `json:"metadata,omitempty"`
+	Env      map[string]string `json:"env,omitempty"`
+}
+
+// --- POST /session/:id/exec ---
+
+type ExecInSessionRequest struct {
+	Command string `json:"command"`
+	Timeout int    `json:"timeout,omitempty"`
 }
 
 type CreateSessionResponse struct {

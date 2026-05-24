@@ -52,7 +52,10 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				return
 			}
 
-			sess, err := mgr.Create(r.Context(), auth.Config.Name)
+			var createReq CreateSessionRequest
+			json.NewDecoder(r.Body).Decode(&createReq)
+
+			sess, err := mgr.Create(r.Context(), auth.Config.Name, createReq.Env)
 			if err != nil {
 				slog.Error("failed to create session", "err", err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -107,8 +110,12 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				http.Error(w, "invalid request body", http.StatusBadRequest)
 				return
 			}
-			if req.Code == "" || req.Language == "" {
-				http.Error(w, "code and language are required", http.StatusBadRequest)
+			if req.Code == "" {
+				http.Error(w, "code is required", http.StatusBadRequest)
+				return
+			}
+			if req.Language == "" {
+				http.Error(w, "language is required", http.StatusBadRequest)
 				return
 			}
 
@@ -175,6 +182,88 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(runResp)
+
+		// POST /session/:id/exec — run a shell command in the session's persistent bash
+		case r.Method == http.MethodPost && strings.HasSuffix(path, "/exec"):
+			sessionID := strings.TrimSuffix(path, "/exec")
+			if sessionID == "" {
+				http.Error(w, "missing session id", http.StatusBadRequest)
+				return
+			}
+
+			var req ExecInSessionRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, "invalid request body", http.StatusBadRequest)
+				return
+			}
+			if req.Command == "" {
+				http.Error(w, "command is required", http.StatusBadRequest)
+				return
+			}
+
+			start := time.Now()
+			result, err := mgr.Exec(r.Context(), sessionID, req.Command, req.Timeout)
+			if err != nil {
+				slog.Error("session exec failed", "session_id", sessionID, "err", err)
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+			execDurationMs := time.Since(start).Seconds() * 1000
+
+			sessSt, _ := mgr.GetSession(sessionID)
+			sessTc := auth.Config
+
+			output := &ExecutionOutput{
+				Stdout:            result.Stdout,
+				Stderr:            result.Stderr,
+				ExitCode:          int(result.ExitCode),
+				TerminationReason: result.TerminationReason,
+				DurationMs:        execDurationMs,
+				GuestDurationMs:   result.GuestDuration * 1000,
+			}
+
+			execResp := SessionExecuteResponse{
+				Status:    "success",
+				RequestID: requestID,
+				SessionID: sessionID,
+				Result:    output,
+				Usage: &UsageInfo{
+					ExecutionTimeMs: result.GuestDuration * 1000,
+					QueueWaitMs:     0,
+					TimeoutLimitMs:  int(sessTc.MaxExecTimeout.Milliseconds()),
+				},
+				Tenant: &TenantContext{
+					TenantID: auth.TenantID,
+					Tier:     auth.Config.Name,
+				},
+				Session: &SessionState{
+					State:     "active",
+					LastUsed:  sessSt.LastUsed.Format(time.RFC3339),
+					ExpiresAt: sessSt.LastUsed.Add(sessTc.SessionIdleTimeout).Format(time.RFC3339),
+					RunCount:  sessSt.RunCount,
+				},
+			}
+
+			if result.ExitCode != 0 {
+				execResp.Status = "error"
+				execResp.Error = &ErrorDetail{
+					Code:    "exec_failed",
+					Message: fmt.Sprintf("command exited with code %d", result.ExitCode),
+				}
+			}
+
+			go usageLogger.InsertUsageLog(r.Context(), platform.UsageLog{
+				APIKeyID:      auth.APIKeyID,
+				UserID:        auth.TenantID,
+				ExecutionType: "session_exec",
+				Language:      "bash",
+				DurationMs:    int(execDurationMs),
+				ExitCode:      int(result.ExitCode),
+				CostUSD:       0.0,
+			})
+
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(execResp)
 
 		// DELETE /session/:id — destroy session
 		case r.Method == http.MethodDelete && path != "":
