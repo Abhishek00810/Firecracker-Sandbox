@@ -1,0 +1,42 @@
+FROM alpine:3.20
+
+# System packages
+RUN apk add --no-cache \
+    bash \
+    busybox \
+    iproute2 \
+    util-linux \
+    ca-certificates \
+    curl \
+    git \
+    openssh-client \
+    python3 \
+    py3-pip \
+    nodejs \
+    npm
+
+# Python kernel stack for stateful Python execution (kernel_bridge.py)
+RUN pip install --no-cache-dir --break-system-packages \
+    ipykernel==7.2.0 \
+    ipython==9.12.0 \
+    jupyter_client==8.8.0 \
+    jupyter_core==5.9.1 \
+    pyzmq==27.1.0 \
+    debugpy==1.8.20 \
+    psutil==7.2.2
+
+# Bridge scripts for stateful Python/Node execution
+COPY guest-agent/kernel_bridge.py /usr/local/bin/kernel_bridge.py
+COPY guest-agent/node_bridge.js   /usr/local/bin/node_bridge.js
+
+# Git: never prompt for credentials inside a VM
+RUN git config --global credential.helper ""
+ENV GIT_TERMINAL_PROMPT=0
+
+# Bake in DNS so VMs can resolve hostnames without relying on network config flow
+RUN echo "nameserver 8.8.8.8" > /etc/resolv.conf
+
+RUN mkdir -p /workspace
+
+# guest-agent binary is injected by server.sh at startup (not baked in here
+# so the binary can be updated without rebuilding the full rootfs)
