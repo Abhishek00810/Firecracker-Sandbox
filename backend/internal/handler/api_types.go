@@ -40,7 +40,6 @@ type ExecuteRequest struct {
 	Code     string `json:"code"`
 	Language string `json:"language"`
 	Timeout  *int   `json:"timeout,omitempty"`
-	Stdin    string `json:"stdin,omitempty"`
 }
 
 type ExecuteResponse struct {
@@ -55,9 +54,7 @@ type ExecuteResponse struct {
 // --- POST /session ---
 
 type CreateSessionRequest struct {
-	Language string            `json:"language,omitempty"`
-	Metadata map[string]string `json:"metadata,omitempty"`
-	Env      map[string]string `json:"env,omitempty"`
+	Env map[string]string `json:"env,omitempty"`
 }
 
 // --- POST /session/:id/exec ---
@@ -76,14 +73,12 @@ type CreateSessionResponse struct {
 }
 
 type SessionDetail struct {
-	SessionID string            `json:"session_id"`
-	State     string            `json:"state"`
-	Tier      string            `json:"tier"`
-	Language  string            `json:"language,omitempty"`
-	CreatedAt string            `json:"created_at"`
-	LastUsed  string            `json:"last_used"`
-	ExpiresAt string            `json:"expires_at"`
-	Metadata  map[string]string `json:"metadata,omitempty"`
+	SessionID string `json:"session_id"`
+	State     string `json:"state"`
+	Tier      string `json:"tier"`
+	CreatedAt string `json:"created_at"`
+	LastUsed  string `json:"last_used"`
+	ExpiresAt string `json:"expires_at"`
 }
 
 type SessionLimits struct {
@@ -98,8 +93,6 @@ type SessionLimits struct {
 type RunInSessionRequest struct {
 	Code     string `json:"code"`
 	Language string `json:"language"`
-	Timeout  *int   `json:"timeout,omitempty"`
-	Stdin    string `json:"stdin,omitempty"`
 }
 
 type SessionExecuteResponse struct {

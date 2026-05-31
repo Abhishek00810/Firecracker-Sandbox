@@ -221,7 +221,6 @@ func (m *Manager) reaper() {
 	}
 }
 
-
 func (m *Manager) Shutdown(ctx context.Context) {
 	sessions := m.store.All()
 	for _, sess := range sessions {
