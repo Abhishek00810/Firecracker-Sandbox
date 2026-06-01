@@ -9,8 +9,8 @@ import (
 	"log"
 	"log/slog"
 	"os"
-	"strconv"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -798,6 +798,9 @@ func newShellSession(env map[string]string) (*ShellSession, error) {
 		stdout: bufio.NewScanner(stdoutPipe),
 	}
 
+	if token, ok := env["GITHUB_TOKEN"]; ok && token != "" {
+		fmt.Fprintf(sh.stdin, "git config --global url.\"https://%s@github.com/\".insteadOf \"https://github.com/\"\n", token)
+	}
 	// Set default working directory and configure git identity placeholders
 	fmt.Fprintf(sh.stdin, "mkdir -p /workspace && cd /workspace\n")
 	fmt.Fprintf(sh.stdin, "export GIT_TERMINAL_PROMPT=0\n") // never prompt for credentials — fail fast
