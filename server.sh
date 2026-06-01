@@ -83,6 +83,7 @@ for i in $(seq 0 $((SLOT_COUNT-1))); do
     sudo ip netns exec fc-ns-$i ip addr add $N_IP/30 dev veth-ns-$i
     sudo ip netns exec fc-ns-$i ip link set veth-ns-$i up
     sudo ip netns exec fc-ns-$i ip route add default via $H_IP
+    sudo ip netns exec fc-ns-$i iptables -t nat -A POSTROUTING -s 172.16.0.0/30 -o veth-ns-$i -j MASQUERADE
 
     # Outbound NAT for user code making network requests inside the sandbox
     if [ -n "$MAIN_IF" ]; then
