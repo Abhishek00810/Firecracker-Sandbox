@@ -88,10 +88,19 @@ func (m *Manager) Create(ctx context.Context, tier string, env map[string]string
 		return nil, err
 	}
 
+	// Open a persistent vsock connection for this session — reused for all exec/run calls
+	vsockClient := firecracker.NewVsockClient(pvm.VM.VsockPath)
+	conn, err := vsockClient.Connect()
+	if err != nil {
+		pool.Release(pvm)
+		m.store.Delete(sess.ID)
+		return nil, fmt.Errorf("vsock connect failed: %w", err)
+	}
+	sess.VsockConn = conn
+
 	// Inject env vars into the VM's persistent shell if provided
 	if len(env) > 0 {
-		vsockClient := firecracker.NewVsockClient(pvm.VM.VsockPath)
-		if err := vsockClient.SetEnv(env); err != nil {
+		if err := vsockClient.SetEnvOnConn(conn, env); err != nil {
 			slog.Warn("set_env failed", "session_id", sess.ID, "err", err)
 		}
 	}
@@ -117,7 +126,7 @@ func (m *Manager) Exec(ctx context.Context, sessionID, command string, timeoutSe
 	}
 
 	vsockClient := firecracker.NewVsockClient(sess.VM.VsockPath)
-	resp, err := vsockClient.Exec(command, timeoutSec)
+	resp, err := vsockClient.ExecOnConn(sess.VsockConn, command, timeoutSec)
 	if err != nil {
 		return executor.ExecutionResult{}, fmt.Errorf("exec failed: %w", err)
 	}
@@ -150,7 +159,7 @@ func (m *Manager) Execute(ctx context.Context, sessionID, code, language string)
 	sess.LastUsed = time.Now()
 
 	vsockClient := firecracker.NewVsockClient(sess.VM.VsockPath)
-	resp, err := vsockClient.Execute(code, language, "stateful", 30)
+	resp, err := vsockClient.ExecuteOnConn(sess.VsockConn, code, language, "stateful", 30)
 	if err != nil {
 		return executor.ExecutionResult{}, fmt.Errorf("execution failed: %w", err)
 	}
@@ -175,6 +184,10 @@ func (m *Manager) Destroy(ctx context.Context, sessionID string) error {
 	sess, ok := m.store.Delete(sessionID)
 	if !ok {
 		return fmt.Errorf("session %s not found", sessionID)
+	}
+
+	if sess.VsockConn != nil {
+		sess.VsockConn.Close()
 	}
 
 	if sess.PooledVM != nil && sess.Pool != nil {
@@ -209,6 +222,9 @@ func (m *Manager) reaper() {
 		evicted := m.store.EvictIdle(m.idleTimeout, m.maxLifetime)
 		for _, sess := range evicted {
 			slog.Info("session idle timeout, destroying", "session_id", sess.ID, "idle_for", time.Since(sess.LastUsed))
+			if sess.VsockConn != nil {
+				sess.VsockConn.Close()
+			}
 			if sess.PooledVM != nil && sess.Pool != nil {
 				sess.Pool.Release(sess.PooledVM)
 			} else {

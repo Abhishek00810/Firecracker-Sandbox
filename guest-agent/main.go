@@ -940,45 +940,40 @@ func handleConnection(connFd int) {
 	conn := &fdConn{fd: connFd}
 	log.Printf("connection accepted fd=%d", connFd)
 
-	var msg incomingMessage
-	log.Println("waiting for request...")
-	if err := json.NewDecoder(conn).Decode(&msg); err != nil {
-		log.Printf("decode request: %v", err)
-		json.NewEncoder(conn).Encode(ExecutionResponse{
-			Stderr:   fmt.Sprintf("failed to decode request: %v", err),
-			ExitCode: -1,
-		})
-		return
-	}
+	for {
+		var msg incomingMessage
+		if err := json.NewDecoder(conn).Decode(&msg); err != nil {
+			log.Printf("connection closed fd=%d: %v", connFd, err)
+			return
+		}
 
-	if msg.Type == "configure_network" {
-		handleNetworkConfig(conn, msg.GuestIP, msg.GWIP)
-		return
-	}
+		if msg.Type == "configure_network" {
+			handleNetworkConfig(conn, msg.GuestIP, msg.GWIP)
+			continue
+		}
+		if msg.Type == "set_env" {
+			handleSetEnv(conn, msg.Env)
+			continue
+		}
+		if msg.Type == "exec" {
+			handleExec(conn, msg.Command, msg.Timeout)
+			continue
+		}
 
-	if msg.Type == "set_env" {
-		handleSetEnv(conn, msg.Env)
-		return
-	}
+		req := ExecutionRequest{
+			Code:     msg.Code,
+			Language: msg.Language,
+			Timeout:  msg.Timeout,
+			Mode:     msg.Mode,
+		}
+		log.Printf("execute language=%s code_len=%d", req.Language, len(req.Code))
+		resp := executeCode(req)
+		log.Printf("done exit_code=%d duration=%.2fs", resp.ExitCode, resp.Duration)
 
-	if msg.Type == "exec" {
-		handleExec(conn, msg.Command, msg.Timeout)
-		return
-	}
-
-	req := ExecutionRequest{
-		Code:     msg.Code,
-		Language: msg.Language,
-		Timeout:  msg.Timeout,
-		Mode:     msg.Mode,
-	}
-	log.Printf("execute language=%s code_len=%d", req.Language, len(req.Code))
-	resp := executeCode(req)
-	log.Printf("done exit_code=%d duration=%.2fs", resp.ExitCode, resp.Duration)
-
-	if err := json.NewEncoder(conn).Encode(resp); err != nil {
-		log.Printf("encode response: %v", err)
-	} else {
+		if err := json.NewEncoder(conn).Encode(resp); err != nil {
+			log.Printf("encode response: %v", err)
+			return
+		}
 		log.Printf("response encoded fd=%d", connFd)
 	}
 }

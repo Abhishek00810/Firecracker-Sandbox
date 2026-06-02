@@ -180,6 +180,81 @@ func (v *VsockClient) Exec(command string, timeoutSec int) (*ExecuteResponse, er
 	return &resp, nil
 }
 
+// Connect opens a persistent vsock connection to the guest agent.
+// The caller is responsible for closing the connection when done (e.g. on session destroy).
+func (v *VsockClient) Connect() (net.Conn, error) {
+	return v.dial()
+}
+
+// SetEnvOnConn sends a set_env message on an existing persistent connection.
+func (v *VsockClient) SetEnvOnConn(conn net.Conn, env map[string]string) error {
+	req := struct {
+		Type string            `json:"type"`
+		Env  map[string]string `json:"env"`
+	}{Type: "set_env", Env: env}
+
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		return fmt.Errorf("send set_env: %w", err)
+	}
+
+	var resp struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error,omitempty"`
+	}
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		return fmt.Errorf("read set_env response: %w", err)
+	}
+	conn.SetDeadline(time.Time{})
+	if !resp.Success {
+		return fmt.Errorf("set_env failed: %s", resp.Error)
+	}
+	return nil
+}
+
+// ExecOnConn runs a shell command on an existing persistent connection.
+func (v *VsockClient) ExecOnConn(conn net.Conn, command string, timeoutSec int) (*ExecuteResponse, error) {
+	req := struct {
+		Type    string `json:"type"`
+		Command string `json:"command"`
+		Timeout int    `json:"timeout"`
+	}{Type: "exec", Command: command, Timeout: timeoutSec}
+
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		return nil, fmt.Errorf("send exec request: %w", err)
+	}
+
+	var resp ExecuteResponse
+	conn.SetDeadline(time.Now().Add(time.Duration(timeoutSec+10) * time.Second))
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		return nil, fmt.Errorf("read exec response: %w", err)
+	}
+	conn.SetDeadline(time.Time{})
+	return &resp, nil
+}
+
+// ExecuteOnConn runs code on an existing persistent connection.
+func (v *VsockClient) ExecuteOnConn(conn net.Conn, code, language, mode string, timeoutSec int) (*ExecuteResponse, error) {
+	req := ExecuteRequest{
+		Code:     code,
+		Language: language,
+		Timeout:  timeoutSec,
+		Mode:     mode,
+	}
+
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		return nil, fmt.Errorf("send execute request: %w", err)
+	}
+
+	var resp ExecuteResponse
+	conn.SetDeadline(time.Now().Add(time.Duration(timeoutSec+10) * time.Second))
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		return nil, fmt.Errorf("read execute response: %w", err)
+	}
+	conn.SetDeadline(time.Time{})
+	return &resp, nil
+}
+
 // dial performs the vsock handshake and returns a ready connection.
 func (v *VsockClient) dial() (net.Conn, error) {
 	var (

@@ -4,6 +4,7 @@ import (
 	"backend/internal/cgroup"
 	"backend/internal/executor/firecracker"
 	"fmt"
+	"net"
 	"sync"
 	"time"
 )
@@ -21,6 +22,7 @@ type Session struct {
 	mu               sync.Mutex            // serializes concurrent runs on same session
 	PooledVM         *firecracker.PooledVM // non-nil when VM came from a pool
 	Pool             *firecracker.VMPool   // which pool to release back to (matches PooledVM)
+	VsockConn        net.Conn              // persistent vsock connection, reused across all calls
 }
 
 type Store struct {
