@@ -38,7 +38,7 @@ var Tiers = map[string]TierConfig{
 		RateLimit:          1000.0,
 		RateBurst:          100,
 		MaxExecTimeout:     60 * time.Second,
-		MinPoolSize:        2,
+		MinPoolSize:        0,
 		MaxPoolSize:        50,
 		MaxSessions:        50,
 		SessionIdleTimeout: 15 * time.Minute,
