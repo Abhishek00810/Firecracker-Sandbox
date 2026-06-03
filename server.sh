@@ -35,7 +35,7 @@ sudo rm -f /tmp/fc-sockets/*.sock 2>/dev/null || true
 # Each slot gets an isolated netns with a TAP (same IP as template host so
 # the guest's baked-in gateway works on restore without any reconfiguration)
 # and a veth pair for outbound internet access from user code.
-SLOT_COUNT=64
+SLOT_COUNT=50
 TEMPLATE_HOST_IP="172.16.0.1"   # must match allocateNetwork() index-0 host IP
 
 echo "[server] Setting up $SLOT_COUNT network slots..."
@@ -44,11 +44,12 @@ echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward > /dev/null
 MAIN_IF=$(ip route show default 2>/dev/null | awk '/^default/{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1); exit}')
 echo "[server]   outbound interface: ${MAIN_IF:-<none>}"
 
-# Clean up any slots left over from a previous run
+# Clean up any slots left over from a previous run (parallel)
 for i in $(seq 0 $((SLOT_COUNT-1))); do
-    sudo ip netns del fc-ns-$i 2>/dev/null || true
-    sudo ip link del veth-fc-$i 2>/dev/null || true
+    ( sudo ip netns del fc-ns-$i 2>/dev/null || true
+      sudo ip link del veth-fc-$i 2>/dev/null || true ) &
 done
+wait
 
 # Recreate custom iptables chains (tear down first for idempotency)
 sudo iptables -t nat -D POSTROUTING -j FC_SNAT 2>/dev/null || true
@@ -62,36 +63,41 @@ sudo iptables -N FC_FWD
 sudo iptables -t nat -A POSTROUTING -j FC_SNAT
 sudo iptables -A FORWARD -j FC_FWD
 
+# Create all slots in parallel — each slot uses unique names/IPs so no conflicts.
+# Per-namespace iptables are also parallelized (each runs in its own netns).
+# Host-level iptables rules are applied sequentially after all slots are ready.
 for i in $(seq 0 $((SLOT_COUNT-1))); do
-    # Isolated network namespace
-    sudo ip netns add fc-ns-$i
-    sudo ip netns exec fc-ns-$i ip link set lo up
+    (
+        H_IP="10.$((66 + i/256)).$((i % 256)).1"
+        N_IP="10.$((66 + i/256)).$((i % 256)).2"
 
-    # TAP with the template's host-side IP so the guest's baked-in gateway
-    # (172.16.0.1) resolves without any post-restore reconfiguration
-    sudo ip netns exec fc-ns-$i ip tuntap add fc-tap-$i mode tap
-    sudo ip netns exec fc-ns-$i ip addr add $TEMPLATE_HOST_IP/30 dev fc-tap-$i
-    sudo ip netns exec fc-ns-$i ip link set fc-tap-$i up
+        sudo ip netns add fc-ns-$i
+        sudo ip netns exec fc-ns-$i ip link set lo up
+        sudo ip netns exec fc-ns-$i ip tuntap add fc-tap-$i mode tap
+        sudo ip netns exec fc-ns-$i ip addr add $TEMPLATE_HOST_IP/30 dev fc-tap-$i
+        sudo ip netns exec fc-ns-$i ip link set fc-tap-$i up
 
-    # veth pair: veth-fc-$i in default ns, veth-ns-$i in fc-ns-$i
-    H_IP="10.$((66 + i/256)).$((i % 256)).1"
-    N_IP="10.$((66 + i/256)).$((i % 256)).2"
-    sudo ip link add veth-fc-$i type veth peer name veth-ns-$i
-    sudo ip link set veth-ns-$i netns fc-ns-$i
-    sudo ip addr add $H_IP/30 dev veth-fc-$i
-    sudo ip link set veth-fc-$i up
-    sudo ip netns exec fc-ns-$i ip addr add $N_IP/30 dev veth-ns-$i
-    sudo ip netns exec fc-ns-$i ip link set veth-ns-$i up
-    sudo ip netns exec fc-ns-$i ip route add default via $H_IP
-    sudo ip netns exec fc-ns-$i iptables -t nat -A POSTROUTING -s 172.16.0.0/30 -o veth-ns-$i -j MASQUERADE
+        sudo ip link add veth-fc-$i type veth peer name veth-ns-$i
+        sudo ip link set veth-ns-$i netns fc-ns-$i
+        sudo ip addr add $H_IP/30 dev veth-fc-$i
+        sudo ip link set veth-fc-$i up
+        sudo ip netns exec fc-ns-$i ip addr add $N_IP/30 dev veth-ns-$i
+        sudo ip netns exec fc-ns-$i ip link set veth-ns-$i up
+        sudo ip netns exec fc-ns-$i ip route add default via $H_IP
+        sudo ip netns exec fc-ns-$i iptables -t nat -A POSTROUTING -s 172.16.0.0/30 -o veth-ns-$i -j MASQUERADE
+    ) &
+done
+wait
 
-    # Outbound NAT for user code making network requests inside the sandbox
-    if [ -n "$MAIN_IF" ]; then
+# Host-level iptables rules — sequential to avoid concurrent table lock conflicts
+if [ -n "$MAIN_IF" ]; then
+    for i in $(seq 0 $((SLOT_COUNT-1))); do
+        N_IP="10.$((66 + i/256)).$((i % 256)).2"
         sudo iptables -t nat -A FC_SNAT -s $N_IP/32 -o $MAIN_IF -j MASQUERADE
         sudo iptables -A FC_FWD -i veth-fc-$i -j ACCEPT
         sudo iptables -A FC_FWD -o veth-fc-$i -m state --state RELATED,ESTABLISHED -j ACCEPT
-    fi
-done
+    done
+fi
 echo "[server]   $SLOT_COUNT network slots ready"
 
 # ── 4. Load env vars ─────────────────────────────────────────────────────────
