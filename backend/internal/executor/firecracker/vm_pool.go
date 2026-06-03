@@ -180,12 +180,13 @@ func (p *VMPool) addVM() error {
 func (p *VMPool) tryScaleUp() {
 	p.mu.Lock()
 	total := len(p.vmMap) + int(p.pendingAdds.Load())
-	p.mu.Unlock()
 	if total >= p.maxSize {
+		p.mu.Unlock()
 		slog.Warn("pool at capacity, cannot scale up", "total", total, "max", p.maxSize)
 		return
 	}
 	p.pendingAdds.Add(1)
+	p.mu.Unlock()
 	go func() {
 		defer p.pendingAdds.Add(-1)
 		if err := p.addVM(); err != nil {

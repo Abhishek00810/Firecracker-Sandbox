@@ -591,6 +591,7 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 		if out, err := exec.Command("ip", "netns", "exec", nsName,
 			"ip", "link", "set", tapSlotName, "name", tmpl.TapName).CombinedOutput(); err != nil {
 			cmd.Process.Kill()
+			cmd.Wait()
 			f.slotPool.Release(slot)
 			return nil, fmt.Errorf("TAP pre-rename failed in %s: %w: %s", nsName, err, out)
 		}
@@ -609,6 +610,7 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 	restoreCleanup := func() {
 		f.restoreMu.Unlock()
 		cmd.Process.Kill()
+		cmd.Wait()
 		// Rename TAP back so the slot is reusable
 		exec.Command("ip", "netns", "exec", nsName, "ip", "link", "set", tmpl.TapName, "name", tapSlotName).Run()
 		f.slotPool.Release(slot)
