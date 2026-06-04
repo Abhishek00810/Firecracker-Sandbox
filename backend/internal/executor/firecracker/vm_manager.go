@@ -38,6 +38,7 @@ type VMConfig struct {
 	RootfsPath string
 	InitrdPath string // initramfs for OverlayFS setup; empty = no initramfs
 	BootArgs   string
+	Pro        bool // tier of the pool that owns this VM; drives provisioning priority
 }
 
 type VsockConfig struct {
@@ -152,6 +153,14 @@ type FireCrackerManager struct {
 	nextNetIdx atomic.Uint32 // for TAP subnet allocation used by cold-boot VMs
 	restoreMu  sync.Mutex    // serializes snapshot restores — prevents vsock path conflicts
 	slotPool   *SlotPool     // pre-created network slots from server.sh
+	// Provisioning admission gate. There is ONE total budget because the 4 pools share
+	// one physical CPU; provisioning (Firecracker spawn + memory page-in + vCPU resume)
+	// is CPU-heavy, and too many in parallel saturate the host and push the API-socket
+	// bring-up past its 5s wait, forcing cold-boot fallbacks. The budget is split so Pro
+	// is never starved by a Free burst: proReserved is Pro-only; sharedProvision is used
+	// by Free and by Pro overflow. Buffered chan = counting semaphore (send=acquire).
+	proReserved     chan struct{}
+	sharedProvision chan struct{}
 }
 
 type VMManager interface {
@@ -163,13 +172,66 @@ type VMManager interface {
 	LoadFromSnapshot(ctx context.Context, cfg VMConfig, tmpl *SnapshotTemplate) (*MicroVM, error)
 }
 
-func NewFirecrackerManager(socketDir, assetsPath, binaryPath string, slotCount int) *FireCrackerManager {
+func NewFirecrackerManager(socketDir, assetsPath, binaryPath string, slotCount, maxConcurrentProvisions, proReserved int) *FireCrackerManager {
+	if maxConcurrentProvisions < 1 {
+		maxConcurrentProvisions = 1
+	}
+	// Clamp the Pro reserve so at least one shared slot always remains for Free.
+	if proReserved < 0 {
+		proReserved = 0
+	}
+	if proReserved > maxConcurrentProvisions-1 {
+		proReserved = maxConcurrentProvisions - 1
+	}
+	shared := maxConcurrentProvisions - proReserved
 	return &FireCrackerManager{
-		SocketDir:  socketDir,
-		AssetsPath: assetsPath,
-		BinaryPath: binaryPath,
-		Vms:        make(map[string]*MicroVM),
-		slotPool:   newSlotPool(slotCount),
+		SocketDir:       socketDir,
+		AssetsPath:      assetsPath,
+		BinaryPath:      binaryPath,
+		Vms:             make(map[string]*MicroVM),
+		slotPool:        newSlotPool(slotCount),
+		proReserved:     make(chan struct{}, proReserved),
+		sharedProvision: make(chan struct{}, shared),
+	}
+}
+
+// acquireProvision is the tier-aware admission gate. One total budget (host CPU is
+// shared) split into a Pro-only reserve plus a shared pool. Pro prefers its reserve
+// and falls back to shared; Free uses only the shared pool. Both wait up to ctx's
+// deadline. Returns whether a reserved slot was taken so it's released to the right
+// pool. Must be paired with a deferred releaseProvision(reserved).
+func (f *FireCrackerManager) acquireProvision(ctx context.Context, pro bool) (reserved bool, err error) {
+	if pro {
+		// Fast path: take a reserved slot if one is free right now.
+		select {
+		case f.proReserved <- struct{}{}:
+			return true, nil
+		default:
+		}
+		// Otherwise wait for either a reserved or a shared slot.
+		select {
+		case f.proReserved <- struct{}{}:
+			return true, nil
+		case f.sharedProvision <- struct{}{}:
+			return false, nil
+		case <-ctx.Done():
+			return false, fmt.Errorf("waiting for provision slot: %w", ctx.Err())
+		}
+	}
+	// Free: shared pool only; waits up to the request deadline.
+	select {
+	case f.sharedProvision <- struct{}{}:
+		return false, nil
+	case <-ctx.Done():
+		return false, fmt.Errorf("waiting for provision slot: %w", ctx.Err())
+	}
+}
+
+func (f *FireCrackerManager) releaseProvision(reserved bool) {
+	if reserved {
+		<-f.proReserved
+	} else {
+		<-f.sharedProvision
 	}
 }
 
@@ -324,6 +386,14 @@ func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
 	if !exists {
 		return fmt.Errorf("VM %s not found", vmID)
 	}
+
+	// Admission gate (tier-aware): cold boot also spawns Firecracker, so it shares the
+	// same provisioning bound. Tier comes from the VM's config.
+	resv, gerr := f.acquireProvision(ctx, vm.Config.Pro)
+	if gerr != nil {
+		return fmt.Errorf("provision gate: %w", gerr)
+	}
+	defer f.releaseProvision(resv)
 
 	// Allocate network config upfront so IPs can be written into the rootfs.
 	tapName, hostIP, guestIP, mac := f.allocateNetwork()
@@ -543,6 +613,15 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 	vmID := uuid.New().String()
 	socketPath := f.getSocketPath(vmID)
 	vsockPath := filepath.Join(f.SocketDir, fmt.Sprintf("vsock-%s.sock", vmID))
+
+	// Admission gate (tier-aware): bound concurrent provisioning so the host isn't
+	// stampeded. Pro prefers its reserve, Free uses the shared pool. Held until the VM
+	// is restored and resumed. Acquired before the slot so we don't hold one while waiting.
+	resv, gerr := f.acquireProvision(ctx, cfg.Pro)
+	if gerr != nil {
+		return nil, fmt.Errorf("provision gate: %w", gerr)
+	}
+	defer f.releaseProvision(resv)
 
 	// Acquire a pre-created network slot. Each slot has its own netns + TAP + veth
 	// + iptables rules set up by server.sh. The guest's baked-in gateway (172.16.0.1)

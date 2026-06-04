@@ -18,6 +18,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -77,7 +79,35 @@ func main() {
 	// Total slots = sum of all pool maxSizes across all four pools + buffer.
 	// Each slot is a pre-created netns+TAP+veth set up by server.sh.
 	slotCount := freeTc.MaxPoolSize*2 + proTc.MaxPoolSize*2 + 16
-	vmManager := firecracker.NewFirecrackerManager(cfg.SocketDir, cfg.AssetsPath, cfg.FirecrackerBinary, slotCount)
+
+	// Admission control: bound concurrent VM provisioning so a burst can't stampede
+	// the host CPU and trip the Firecracker socket-wait timeout. Defaults to the host
+	// CPU count; override with MAX_CONCURRENT_PROVISIONS.
+	maxProvisions := runtime.NumCPU()
+	if v := os.Getenv("MAX_CONCURRENT_PROVISIONS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			maxProvisions = n
+		} else {
+			slog.Warn("invalid MAX_CONCURRENT_PROVISIONS, using default", "value", v, "default", maxProvisions)
+		}
+	}
+	// Of the total budget, reserve a slice for Pro only so a Free burst can never
+	// starve paying users. Default = a quarter of the budget (min 1); override with
+	// PRO_RESERVED_PROVISIONS. Clamped inside the manager so Free always keeps >=1.
+	proReserved := maxProvisions / 4
+	if proReserved < 1 {
+		proReserved = 1
+	}
+	if v := os.Getenv("PRO_RESERVED_PROVISIONS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			proReserved = n
+		} else {
+			slog.Warn("invalid PRO_RESERVED_PROVISIONS, using default", "value", v, "default", proReserved)
+		}
+	}
+	slog.Info("provisioning concurrency limit", "max_concurrent_provisions", maxProvisions, "pro_reserved", proReserved)
+
+	vmManager := firecracker.NewFirecrackerManager(cfg.SocketDir, cfg.AssetsPath, cfg.FirecrackerBinary, slotCount, maxProvisions, proReserved)
 
 	config := firecracker.VMConfig{
 		VCPUCount:  2,
@@ -121,10 +151,14 @@ func main() {
 		slog.Info("snapshot template ready", "snap", tmpl.SnapPath)
 	}
 
+	// Pro pools carry Pro=true so provisioning uses the reserved/priority path.
+	proConfig := config
+	proConfig.Pro = true
+
 	freePool := firecracker.NewVMPoolWithSnapshot(0, freeTc.MaxPoolSize, config, vmManager, freeCgroupCfg, template, false, false)
-	premiumPool := firecracker.NewVMPoolWithSnapshot(0, proTc.MaxPoolSize, config, vmManager, premiumCgroupCfg, template, false, false)
+	premiumPool := firecracker.NewVMPoolWithSnapshot(0, proTc.MaxPoolSize, proConfig, vmManager, premiumCgroupCfg, template, false, false)
 	freeSessionPool := firecracker.NewVMPoolWithSnapshot(0, freeTc.MaxPoolSize, config, vmManager, freeSessionCgroupCfg, template, false, false)
-	proSessionPool := firecracker.NewVMPoolWithSnapshot(0, proTc.MaxPoolSize, config, vmManager, premiumSessionCgroupCfg, template, false, false)
+	proSessionPool := firecracker.NewVMPoolWithSnapshot(0, proTc.MaxPoolSize, proConfig, vmManager, premiumSessionCgroupCfg, template, false, false)
 	slog.Info("VM pools initialized")
 
 	sessionMgr := session.NewManager(
