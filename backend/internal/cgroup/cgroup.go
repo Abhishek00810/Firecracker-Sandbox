@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 )
 
 const cgroupRoot = "/sys/fs/cgroup/sandbox"
@@ -110,8 +111,16 @@ func (c *Cgroup) AddPID(pid int) error {
 }
 
 func (c *Cgroup) Destroy() error {
-	if err := os.Remove(c.path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("cgroup: destroy %s: %w", c.path, err)
+	// A cgroup dir can only be removed once the kernel has drained the killed VM's
+	// threads, so a fresh os.Remove often fails with EBUSY. Retry briefly instead of
+	// leaking the directory. Treat "already gone" as success.
+	var err error
+	for range 5 {
+		err = os.Remove(c.path)
+		if err == nil || os.IsNotExist(err) {
+			return nil
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	return nil
+	return fmt.Errorf("cgroup: destroy %s: %w", c.path, err)
 }

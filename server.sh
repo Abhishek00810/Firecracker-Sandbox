@@ -35,7 +35,7 @@ sudo rm -f /tmp/fc-sockets/*.sock 2>/dev/null || true
 # Each slot gets an isolated netns with a TAP (same IP as template host so
 # the guest's baked-in gateway works on restore without any reconfiguration)
 # and a veth pair for outbound internet access from user code.
-SLOT_COUNT=50
+export SLOT_COUNT=50            # exported so the Go backend's slot pool matches exactly
 TEMPLATE_HOST_IP="172.16.0.1"   # must match allocateNetwork() index-0 host IP
 
 echo "[server] Setting up $SLOT_COUNT network slots..."
@@ -44,12 +44,17 @@ echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward > /dev/null
 MAIN_IF=$(ip route show default 2>/dev/null | awk '/^default/{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1); exit}')
 echo "[server]   outbound interface: ${MAIN_IF:-<none>}"
 
-# Clean up any slots left over from a previous run (parallel)
-for i in $(seq 0 $((SLOT_COUNT-1))); do
-    ( sudo ip netns del fc-ns-$i 2>/dev/null || true
-      sudo ip link del veth-fc-$i 2>/dev/null || true ) &
+# Clean up ALL leftover slots by PATTERN (not just the current SLOT_COUNT range), so
+# orphan netns/veth from a previously-larger SLOT_COUNT can't accumulate across runs.
+# (Deleting a netns also removes its veth peer; the veth loop is a safety net for strays.)
+for ns in $(ip netns list 2>/dev/null | awk '/^fc-ns-/{print $1}'); do
+    sudo ip netns del "$ns" 2>/dev/null || true
 done
-wait
+for veth in $(ip -o link show 2>/dev/null | grep -oE 'veth-fc-[0-9]+' | sort -u); do
+    sudo ip link del "$veth" 2>/dev/null || true
+done
+# Sweep leaked per-VM cgroups (procs were killed above, so the dirs are empty).
+sudo find /sys/fs/cgroup/sandbox -type d -name 'vm-*' -exec rmdir {} + 2>/dev/null || true
 
 # Recreate custom iptables chains (tear down first for idempotency)
 sudo iptables -t nat -D POSTROUTING -j FC_SNAT 2>/dev/null || true

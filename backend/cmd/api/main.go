@@ -76,9 +76,17 @@ func main() {
 	freeTc := tierconfig.Tiers[tierconfig.Free]
 	proTc := tierconfig.Tiers[tierconfig.Pro]
 
-	// Total slots = sum of all pool maxSizes across all four pools + buffer.
-	// Each slot is a pre-created netns+TAP+veth set up by server.sh.
-	slotCount := freeTc.MaxPoolSize*2 + proTc.MaxPoolSize*2 + 16
+	// Network slots are pre-created by server.sh (SLOT_COUNT). The Go slot pool MUST
+	// match that count exactly: handing out a slot with no backing netns makes the
+	// restore fail and fall back to cold boot. server.sh exports SLOT_COUNT; default 50.
+	slotCount := 50
+	if v := os.Getenv("SLOT_COUNT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			slotCount = n
+		} else {
+			slog.Warn("invalid SLOT_COUNT, using default", "value", v, "default", slotCount)
+		}
+	}
 
 	// Admission control: bound concurrent VM provisioning so a burst can't stampede
 	// the host CPU and trip the Firecracker socket-wait timeout. Defaults to the host

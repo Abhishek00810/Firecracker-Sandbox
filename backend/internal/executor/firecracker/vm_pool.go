@@ -23,7 +23,16 @@ type VMPool struct {
 	template           *SnapshotTemplate // nil = cold boot
 	warmPythonStateful bool
 	warmNodeBridge     bool
+	stop               chan struct{} // closed by Shutdown to stop the reaper
 }
+
+// Idle reaper tuning. Pools run minSize=0, so any VM sitting available in the channel
+// is fair game once it's been idle past idleTTL — this reclaims VMs that were provisioned
+// for a request that timed out before claiming them (otherwise they leak procs+slots).
+const (
+	reapInterval = 5 * time.Second
+	idleTTL      = 15 * time.Second
+)
 
 type PooledVM struct {
 	VM           *MicroVM
@@ -50,6 +59,7 @@ func NewVMPoolWithSnapshot(minSize, maxSize int, cfg VMConfig, mgr VMManager, cg
 		template:           tmpl,
 		warmPythonStateful: warmPythonStateful,
 		warmNodeBridge:     warmNodeBridge,
+		stop:               make(chan struct{}),
 	}
 
 	var wg sync.WaitGroup
@@ -63,6 +73,8 @@ func NewVMPoolWithSnapshot(minSize, maxSize int, cfg VMConfig, mgr VMManager, cg
 		}(i)
 	}
 	wg.Wait()
+
+	go pool.reaper()
 
 	return pool
 }
@@ -281,7 +293,66 @@ func (p *VMPool) Release(vm *PooledVM) {
 	}()
 }
 
+// reaper periodically reclaims VMs left sitting idle in the pool — primarily ones
+// that were provisioned for a request whose Acquire timed out before claiming them.
+// Without this they hold a Firecracker proc + network slot + cgroup indefinitely.
+func (p *VMPool) reaper() {
+	ticker := time.NewTicker(reapInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-p.stop:
+			return
+		case <-ticker.C:
+			p.reapIdle()
+		}
+	}
+}
+
+func (p *VMPool) reapIdle() {
+	// Inspect each currently-available VM once. Destroy those idle past idleTTL while
+	// the pool is above minSize; requeue the rest.
+	for range len(p.vms) {
+		select {
+		case vm := <-p.vms:
+			p.mu.Lock()
+			total := len(p.vmMap)
+			p.mu.Unlock()
+			if total > p.minSize && time.Since(vm.LastUsed) > idleTTL {
+				slog.Info("reaper: destroying idle VM", "vm_id", vm.VM.ID, "idle_s", time.Since(vm.LastUsed).Seconds())
+				p.destroyPooled(vm)
+				continue
+			}
+			select {
+			case p.vms <- vm:
+			default:
+				p.destroyPooled(vm) // channel full (shouldn't happen) — don't block
+			}
+		default:
+			return
+		}
+	}
+}
+
+// destroyPooled tears a VM fully down: remove from the map, destroy the VM (releases
+// its network slot), and destroy its cgroup. Used by the reaper and Shutdown.
+func (p *VMPool) destroyPooled(vm *PooledVM) {
+	ctx := context.Background()
+	p.mu.Lock()
+	delete(p.vmMap, vm.VM.ID)
+	p.mu.Unlock()
+	if err := p.manager.Destroy(ctx, vm.VM.ID); err != nil {
+		slog.Error("reaper: failed to destroy idle VM", "vm_id", vm.VM.ID, "err", err)
+	}
+	if vm.Cgroup != nil {
+		if err := vm.Cgroup.Destroy(); err != nil {
+			slog.Error("reaper: failed to destroy cgroup", "vm_id", vm.VM.ID, "err", err)
+		}
+	}
+}
+
 func (p *VMPool) Shutdown() {
+	close(p.stop)
 	ctx := context.Background()
 
 	p.mu.Lock()
