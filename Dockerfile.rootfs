@@ -36,7 +36,21 @@ ENV GIT_TERMINAL_PROMPT=0
 # Bake in DNS so VMs can resolve hostnames without relying on network config flow
 RUN echo "nameserver 8.8.8.8" > /etc/resolv.conf
 
+# Make `pip install` work out of the box for users. Sandbox VMs are ephemeral and
+# single-use, so installing into the system environment is fine — without this, PEP 668
+# ("externally-managed-environment") makes every user `pip install` fail.
+RUN printf '[global]\nbreak-system-packages = true\n' > /etc/pip.conf
+
+# Bake the guest network identity. Every VM uses the same address: the slot design
+# renames each slot's TAP to the template's name and assigns the same host IP
+# (172.16.0.1), and the guest is 172.16.0.2. Baking this here removes the per-VM
+# runtime rootfs mount that used to write it at boot (and the mount leak that caused).
+RUN printf 'GUESTIP=172.16.0.2\nGWIP=172.16.0.1\n' > /etc/vm-network.env
+
 RUN mkdir -p /workspace
 
-# guest-agent binary is injected by server.sh at startup (not baked in here
-# so the binary can be updated without rebuilding the full rootfs)
+# guest-agent baked into the image (previously injected by server.sh at runtime via a
+# loop mount). Baking removes the last runtime rootfs mount. NOTE: updating the agent
+# now requires rebuilding the rootfs (build_rootfs.sh), not just restarting the server.
+COPY guest-agent/guest-agent-amd64 /usr/local/bin/guest-agent
+RUN chmod +x /usr/local/bin/guest-agent

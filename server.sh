@@ -115,19 +115,13 @@ source "$ENV_FILE"
 set +a
 echo "[server] Environment loaded from $ENV_FILE"
 
-# ── 5. Build guest-agent and update rootfs ───────────────────────────────────
-echo "[server] Building guest-agent..."
-cd "$SCRIPT_DIR/guest-agent"
-GOOS=linux GOARCH=amd64 /usr/local/go/bin/go build -o guest-agent-amd64 .
-
-echo "[server] Updating rootfs..."
-ROOTFS="${ASSETS_PATH:-$SCRIPT_DIR/assets}/rootfs/rootfs-alpine.ext4"
-sudo umount /mnt 2>/dev/null || true
-sudo mount -o loop "$ROOTFS" /mnt
-sudo cp guest-agent-amd64 /mnt/usr/local/bin/guest-agent
-sudo chmod +x /mnt/usr/local/bin/guest-agent
-sudo umount /mnt
-echo "[server] Rootfs updated"
+# ── 5. Rootfs is self-contained (no runtime mount) ───────────────────────────
+# The guest-agent, pip config (/etc/pip.conf), DNS, and network identity
+# (/etc/vm-network.env) are baked into the rootfs at build time via Dockerfile.rootfs
+# / build_rootfs.sh. The server no longer mounts the rootfs at runtime — that removes
+# the loop-mount that could leak and break VM networking.
+# To change the guest-agent or rootfs contents, run: bash build_rootfs.sh
+echo "[server] Using prebuilt rootfs (guest-agent + configs baked in)"
 
 # ── 6. Start the server ───────────────────────────────────────────────────────
 echo "[server] Starting backend (logs below)..."

@@ -119,3 +119,7 @@ notes.md
 .notes/
 PRODUCTIONIZATION_CHECKLIST.local.md
 findings_global.md
+
+# secret/backup files — never commit
+.env.bak*
+*.bak

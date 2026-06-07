@@ -11,6 +11,11 @@ IMAGE_NAME="sandbox-rootfs"
 CONTAINER_NAME="tmp-sandbox-rootfs"
 SIZE_MB=2048
 
+# Build the guest-agent first so the Dockerfile can COPY it into the image.
+# (Previously server.sh built + injected this at runtime via a loop mount.)
+echo "[rootfs] Building guest-agent (baked into the image)..."
+( cd "$SCRIPT_DIR/guest-agent" && GOOS=linux GOARCH=amd64 go build -o guest-agent-amd64 . )
+
 echo "[rootfs] Building Docker image..."
 docker build -f "$SCRIPT_DIR/Dockerfile.rootfs" -t "$IMAGE_NAME" "$SCRIPT_DIR"
 
