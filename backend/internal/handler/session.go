@@ -87,7 +87,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				},
 			})
 
-			go usageLogger.InsertUsageLog(r.Context(), platform.UsageLog{
+			insertUsageLogAsync(usageLogger, platform.UsageLog{
 				APIKeyID:      auth.APIKeyID,
 				UserID:        auth.TenantID,
 				ExecutionType: "session_create",
@@ -170,7 +170,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				}
 			}
 
-			go usageLogger.InsertUsageLog(r.Context(), platform.UsageLog{
+			insertUsageLogAsync(usageLogger, platform.UsageLog{
 				APIKeyID:      auth.APIKeyID,
 				UserID:        auth.TenantID,
 				ExecutionType: "session_run",
@@ -252,7 +252,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				}
 			}
 
-			go usageLogger.InsertUsageLog(r.Context(), platform.UsageLog{
+			insertUsageLogAsync(usageLogger, platform.UsageLog{
 				APIKeyID:      auth.APIKeyID,
 				UserID:        auth.TenantID,
 				ExecutionType: "session_exec",

@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -74,6 +75,73 @@ func TestExecuteHandlerSuccess(t *testing.T) {
 	}
 	if rec.Header().Get("X-Request-ID") == "" {
 		t.Fatal("expected X-Request-ID header to be set")
+	}
+}
+
+func TestExecuteHandlerSystemErrorReturnsServiceUnavailable(t *testing.T) {
+	server := newTestServer(t, testDeps{
+		executor: fakeExecutor{
+			err: errors.New("failed to acquire VM"),
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/execute", bytes.NewBufferString(`{"code":"print(1+1)","language":"python"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-key")
+	rec := httptest.NewRecorder()
+
+	server.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 for system error, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp handler.ExecuteResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Status != "error" {
+		t.Fatalf("expected error status, got %q", resp.Status)
+	}
+	if resp.Error == nil || resp.Error.Code != "system_error" {
+		t.Fatalf("expected system_error payload, got %+v", resp.Error)
+	}
+}
+
+func TestExecuteUsageLogDoesNotUseRequestCancellationContext(t *testing.T) {
+	resolver := &fakePlatformService{
+		record: platform.KeyRecord{
+			ID:               "key-1",
+			UserID:           "tenant-1",
+			Tier:             tierconfig.Free,
+			IsActive:         true,
+			FreeUSDRemaining: 10,
+		},
+		logCh:    make(chan error, 1),
+		logDelay: 20 * time.Millisecond,
+	}
+	server := newTestServer(t, testDeps{resolver: resolver})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/execute", bytes.NewBufferString(`{"code":"print(1+1)","language":"python"}`)).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-key")
+	rec := httptest.NewRecorder()
+
+	server.ServeHTTP(rec, req)
+	cancel()
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	select {
+	case err := <-resolver.logCh:
+		if err != nil {
+			t.Fatalf("usage log used cancelled request context: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for usage log")
 	}
 }
 
@@ -212,9 +280,11 @@ func (f fakeExecutor) Execute(ctx context.Context, code string, language string)
 }
 
 type fakePlatformService struct {
-	record platform.KeyRecord
-	mu     sync.Mutex
-	logs   []platform.UsageLog
+	record   platform.KeyRecord
+	mu       sync.Mutex
+	logs     []platform.UsageLog
+	logCh    chan error
+	logDelay time.Duration
 }
 
 func (f *fakePlatformService) ResolveKey(keyHash string) (platform.KeyRecord, error) {
@@ -225,9 +295,15 @@ func (f *fakePlatformService) ResolveKey(keyHash string) (platform.KeyRecord, er
 }
 
 func (f *fakePlatformService) InsertUsageLog(ctx context.Context, log platform.UsageLog) {
+	if f.logDelay > 0 {
+		time.Sleep(f.logDelay)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.logs = append(f.logs, log)
+	if f.logCh != nil {
+		f.logCh <- ctx.Err()
+	}
 }
 
 type fakeSessionService struct {

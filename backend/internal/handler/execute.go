@@ -83,7 +83,7 @@ func ExecuteHandler(freeQueue *queue.JobQueue, premiumQueue *queue.JobQueue, fre
 
 		metrics.RecordExecutionEnd(duration, errType)
 
-		go usageLogger.InsertUsageLog(r.Context(), platform.UsageLog{
+		insertUsageLogAsync(usageLogger, platform.UsageLog{
 			APIKeyID:      auth.APIKeyID,
 			UserID:        auth.TenantID,
 			ExecutionType: "execute",
@@ -132,6 +132,9 @@ func ExecuteHandler(freeQueue *queue.JobQueue, premiumQueue *queue.JobQueue, fre
 		}
 
 		w.Header().Set("Content-Type", "application/json")
+		if result.Err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
 		json.NewEncoder(w).Encode(resp)
 	}
 }
