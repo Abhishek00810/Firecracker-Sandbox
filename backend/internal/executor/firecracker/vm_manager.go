@@ -391,12 +391,12 @@ func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
 	}
 
 	// Wait up to 5 seconds for socket
-	for range 50 {
+	for range 250 {
 		_, err := os.Stat(vm.SocketPath)
 		if err == nil {
 			break
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond) // tight poll: notice readiness fast (250×20ms = 5s max)
 	}
 
 	client := &http.Client{
@@ -622,11 +622,11 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 	}
 
 	// Wait for API socket (up to 5s) — per-VM socket, no lock needed
-	for range 50 {
+	for range 250 {
 		if _, err := os.Stat(socketPath); err == nil {
 			break
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond) // tight poll: notice readiness fast (250×20ms = 5s max)
 	}
 	socketReadyMs := time.Since(lastPhase).Milliseconds()
 	lastPhase = time.Now()

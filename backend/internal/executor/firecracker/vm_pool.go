@@ -136,7 +136,7 @@ func (p *VMPool) addVM() error {
 			"ping_ms", pingElapsed.Milliseconds(),
 			"elapsed_ms", time.Since(lastPhase).Milliseconds(),
 		)
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond) // tight poll: guest-agent is usually ready within ~tens of ms after resume
 	}
 	if !vsockReady {
 		return fmt.Errorf("vsock never became ready for VM %s", vm.ID)
