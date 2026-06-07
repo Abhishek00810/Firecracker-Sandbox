@@ -17,7 +17,8 @@
   ],
   "scripts": {
     "build": "tsup src/index.ts --format cjs,esm --dts",
-    "dev": "tsup src/index.ts --format cjs,esm --dts --watch"
+    "dev": "tsup src/index.ts --format cjs,esm --dts --watch",
+    "bench": "node bench/compute-bench.mjs"
   },
   "dependencies": {
     "@computesdk/provider": "^2.1.3"

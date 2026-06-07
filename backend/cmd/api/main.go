@@ -118,7 +118,7 @@ func main() {
 	vmManager := firecracker.NewFirecrackerManager(cfg.SocketDir, cfg.AssetsPath, cfg.FirecrackerBinary, slotCount, maxProvisions, proReserved)
 
 	config := firecracker.VMConfig{
-		VCPUCount:  2,
+		VCPUCount:  1, // 1 vCPU: halves thread pressure per VM → ~2x concurrency before the starvation cliff (test)
 		MemSizeMiB: 256,
 		Timeout:    30 * time.Second,
 		KernelPath: cfg.KernelPath,
