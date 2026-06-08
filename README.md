@@ -10,7 +10,7 @@ A secure, low-latency code execution engine built on Firecracker microVMs. Runs 
 
 ## Overview
 
-Each execution runs inside a dedicated Firecracker microVM — a separate Linux kernel with no shared state and hard resource limits enforced by cgroup v2. VMs are restored from a memory snapshot (~130ms) rather than cold-booted. Persistent sessions reuse a single VM across many commands, bringing steady-state exec latency to ~6ms.
+Each execution runs inside a dedicated Firecracker microVM — a separate Linux kernel with no shared state and hard resource limits enforced by cgroup v2. VMs are restored from a memory snapshot (~130ms) rather than cold-booted. Persistent sessions reuse a single VM across many commands, bringing steady-state exec latency to ~16ms.
 
 ---
 
@@ -41,7 +41,7 @@ Each execution runs inside a dedicated Firecracker microVM — a separate Linux 
 |-----------|---------|
 | Session create (warm auth cache) | ~300ms |
 | Session exec — first call | ~35ms |
-| Session exec — steady state | ~6ms |
+| Session exec — steady state | ~16ms |
 | Stateless execute — sequential | ~240ms |
 | Stateless execute — 5 concurrent | ~500-775ms |
 | Stateless execute — 35 concurrent | ~580ms–1.66s wall clock |
