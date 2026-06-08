@@ -129,14 +129,18 @@ func (p *VMPool) addVM() error {
 			vsockReady = true
 			break
 		}
-		slog.Warn("vsock ping failed",
-			"vm_id", vm.ID,
-			"attempt", vsockAttempts,
-			"failed_at", stage,
-			"ping_ms", pingElapsed.Milliseconds(),
-			"elapsed_ms", time.Since(lastPhase).Milliseconds(),
-		)
-		time.Sleep(20 * time.Millisecond) // tight poll: guest-agent is usually ready within ~tens of ms after resume
+		// The first handful of misses are expected (virtio-vsock device is still
+		// coming back after resume). Only warn if it's taking abnormally long.
+		if time.Since(lastPhase) > 200*time.Millisecond {
+			slog.Warn("vsock ping still failing",
+				"vm_id", vm.ID,
+				"attempt", vsockAttempts,
+				"failed_at", stage,
+				"ping_ms", pingElapsed.Milliseconds(),
+				"elapsed_ms", time.Since(lastPhase).Milliseconds(),
+			)
+		}
+		time.Sleep(5 * time.Millisecond) // tight poll: catch vsock readiness ~asap after resume (floor is the virtio-vsock device coming back)
 	}
 	if !vsockReady {
 		return fmt.Errorf("vsock never became ready for VM %s", vm.ID)
