@@ -35,17 +35,32 @@ Each execution runs inside a dedicated Firecracker microVM — a separate Linux 
 
 ---
 
-## Performance (measured on Azure Standard D4s v3)
+## Use Cases
+
+The sandbox is a use-case-agnostic execution primitive — what runs inside is up to the caller:
+
+- **Code execution** — run untrusted snippets or whole programs in a throwaway VM (the `/execute` endpoint).
+- **AI coding-agent backend** — give an agent an isolated machine to `git clone`, write code, run it, commit, and open a PR. Pass a `GITHUB_TOKEN` at session create and the full clone → edit → run → commit → push → PR loop runs inside the VM (demonstrated end-to-end).
+- **RL training / agent rollouts** — spawn many isolated environments programmatically for execution-feedback loops; snapshot restore keeps per-rollout startup low.
+- **DevOps / IaC** — run `terraform`, `kubectl`, or cloud CLIs against real APIs with credentials injected as session env, isolated from the host.
+
+Isolation is the point: even if the code is malicious or an agent is prompt-injected, it runs in a separate kernel with a throwaway rootfs and an isolated network namespace — the blast radius is the VM, which is destroyed afterward.
+
+---
+
+## Performance (measured on an Azure 8 vCPU AMD EPYC VM, nested virtualization)
 
 | Operation | Latency |
 |-----------|---------|
-| Session create (warm auth cache) | ~300ms |
+| Session create (warm auth cache) | ~280–300ms |
 | Session exec — first call | ~35ms |
 | Session exec — steady state | ~16ms |
-| Stateless execute — sequential | ~240ms |
-| Stateless execute — 5 concurrent | ~500-775ms |
+| Stateless execute — sequential | ~270–280ms total (~190ms host overhead + guest) |
+| Stateless execute — 5 concurrent | ~500–775ms |
 | Stateless execute — 35 concurrent | ~580ms–1.66s wall clock |
-| VM snapshot restore | ~130ms |
+| VM snapshot restore | ~100–130ms |
+
+> Numbers are from a shared, nested-virtualization cloud VM (8 vCPU = 4 physical cores × SMT). On bare-metal hosts with more physical cores, concurrent throughput scales substantially higher.
 
 ---
 
@@ -89,6 +104,19 @@ Go REST API (port 8080)
 | proSessionPool | pro | `/session` | 50 |
 
 All pools: `minPoolSize=0` (no pre-warming), on-demand snapshot restore. Shared 50 network slots across all pools.
+
+### Per-VM resources
+
+Every VM boots with a **fixed 1 vCPU and 256MB RAM** (`vcpu_count=1`, `mem_size_mib=256`). Host cgroup v2 caps vary by tier and path but are bounded by that single guest vCPU — and guest RAM stays 256MB regardless of the cgroup memory cap (a guest cannot see more memory than it booted with):
+
+| Path / tier | cgroup CPU | cgroup memory |
+|-------------|-----------|---------------|
+| `/execute` free | 0.5 core | 256MB |
+| `/execute` pro | 2 cores | 512MB |
+| `/session` free | 1 core | 512MB |
+| `/session` pro | 4 cores | 1GB |
+
+> This fixed sizing is tuned for fast, ephemeral execution. Heavier workloads (large `npm install`, full builds) aren't supported yet — see [Current Limitations](#current-limitations) and [Roadmap](#roadmap).
 
 ### Network per VM
 
@@ -210,7 +238,7 @@ curl -X DELETE http://localhost:8080/session/abc-123 \
 
 ```
 sandbox_env/
-├── server.sh                          # Server startup — network slots, guest-agent build, backend start
+├── server.sh                          # Server startup — process/port guard, network slots, backend start
 ├── build_rootfs.sh                    # Builds Alpine rootfs with language runtimes
 ├── guest-agent/                       # vsock listener running inside each VM
 │   └── main.go                        # Handles exec, run, set_env, configure_network
@@ -264,10 +292,10 @@ sudo bash server.sh
 ```
 
 `server.sh` does in order:
-1. Kill stale processes and clean up TAP devices
-2. Create 50 network slots in parallel (netns + TAP + veth + NAT rules)
-3. Build guest-agent binary and inject into rootfs
-4. Start the Go backend
+1. Kill stale processes (including the compiled `go run` child) and refuse to start if `:8080` is still held
+2. Clean up stale TAP devices, network namespaces, veth pairs, and leaked cgroups
+3. Create network slots in parallel (netns + TAP + veth + NAT rules; count = `SLOT_COUNT`, default 50)
+4. Start the Go backend (uses the prebuilt rootfs — guest-agent and pip/network configs are baked into the image at build time)
 
 ### Environment variables
 
@@ -308,6 +336,30 @@ Defined in `backend/internal/tierconfig/tierconfig.go`:
 3. **Network namespace** — each VM in its own netns, no cross-VM traffic
 4. **Ephemeral rootfs** — VM destroyed after each stateless execution, fresh VM replenished
 5. **vsock only** — no TCP/IP inside VMs for host-guest communication
+
+---
+
+## Current Limitations
+
+- **Fixed VM size** — every VM is 1 vCPU / 256MB RAM; resources are not yet configurable per request.
+- **RAM-backed writable layer** — the rootfs upper layer is tmpfs (in guest RAM), so all writes count against the 256MB. Heavy `npm install` or full project builds will exhaust memory; the platform is currently sized for fast, ephemeral execution, not long-lived dev environments.
+- **No public preview URLs** — a server running inside a VM is not yet reachable from the public internet.
+- **Single template** — one prebuilt rootfs image; custom per-tenant images are not yet supported.
+
+---
+
+## Roadmap
+
+Planned — not yet implemented:
+
+- **Configurable resources** — choose vCPU / RAM / disk per sandbox at create time.
+- **Disk-backed writable layer** — a real per-VM writable disk (GBs) so `npm install`, build caches, and terraform state land on disk instead of RAM.
+- **Filesystem API** — `read` / `write` / `list` / `patch` files in a session without shell gymnastics.
+- **Process & streaming exec** — long-running processes and streamed stdout/stderr.
+- **Custom templates** — bring-your-own image (Dockerfile) with your own tools and runtimes baked in.
+- **Python SDK** — alongside the existing TypeScript ComputeSDK adapter.
+- **Preview URLs** — wildcard-subdomain reverse proxy mapping `<id>-<port>.<domain>` to a VM's port (HTTP + WebSocket).
+- **BYOC / self-hosted** — deploy the data plane into your own cloud account.
 
 ---
 
