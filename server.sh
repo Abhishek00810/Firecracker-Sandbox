@@ -12,10 +12,27 @@ ENV_FILE="$BACKEND_DIR/.env"
 echo "[server] === Sandbox Backend Startup ==="
 
 # ── 1. Kill any running server or firecracker processes ──────────────────────
+# `go run ./cmd/api` compiles to a temp binary and execs it as a child named
+# `main`; killing only the `go run` wrapper leaves that child holding :8080,
+# so the next start fails with "address already in use" and its template build
+# collides on fctap0. Kill the wrapper, the compiled child, and firecracker.
 echo "[server] Killing stale processes..."
-sudo pkill -f "go run ./cmd/api" 2>/dev/null || true
+sudo pkill -f "go run ./cmd/api"   2>/dev/null || true
+sudo pkill -f "go-build/.*/main"   2>/dev/null || true
 sudo pkill -f firecracker          2>/dev/null || true
 sleep 1
+
+# Hard guard: refuse to start a second backend if :8080 is still held.
+PORT_PIDS=$(sudo ss -ltnp 'sport = :8080' 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u || true)
+if [ -n "$PORT_PIDS" ]; then
+    echo "[server]   :8080 still held by PID(s): $PORT_PIDS — killing"
+    for p in $PORT_PIDS; do sudo kill "$p" 2>/dev/null || true; done
+    sleep 1
+fi
+if sudo ss -ltn 'sport = :8080' 2>/dev/null | grep -q LISTEN; then
+    echo "[server] ERROR: :8080 still in use after cleanup; refusing to start." >&2
+    exit 1
+fi
 
 # ── 2. Clean up ALL stale TAP devices ────────────────────────────────────────
 # Firecracker leaves TAP devices behind on crash/kill. Also handles the
