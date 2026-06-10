@@ -1,13 +1,17 @@
 import time
+import os
 
 from renderops import Sandbox
 
 
 def main() -> None:
-    sb = Sandbox(api_key="ro_live_9654c4d39bc996e7af312276c0bbb5eb")
+    sb = Sandbox(
+        api_key=os.environ["RENDEROPS_API_KEY"],
+        base_url=os.environ.get("RENDEROPS_BASE_URL", "http://localhost:8080"),
+    )
 
     t = time.time()
-    sess = sb.session()
+    sess = sb.session(tier="pro")
     print(f"session created: {time.time() - t:.2f}s id={sess.id}")
 
     t = time.time()

@@ -265,7 +265,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(execResp)
 
-		// DELETE /session/:id — destroy session
+			// DELETE /session/:id — destroy session
 		case r.Method == http.MethodDelete && path != "":
 			sessionID := path
 
@@ -277,7 +277,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 
 			w.WriteHeader(http.StatusNoContent)
 
-		// GET /session/:id — session info
+			// GET /session/:id — session info
 		case r.Method == http.MethodGet && path != "":
 			sessionID := path
 
