@@ -48,6 +48,25 @@ done
 echo "[server] Cleaning up stale vsock sockets..."
 sudo rm -f /tmp/fc-sockets/*.sock 2>/dev/null || true
 
+# ── 3.4 Dedicated non-root user for Firecracker VMMs ─────────────────────────
+# Firecracker child processes drop from root to this unprivileged user (via setpriv
+# in the Go launcher); the backend itself stays root for netns/iptables/cgroup/mounts.
+# This contains an escaped guest — it lands as a no-login nobody, not root. The user
+# must be in the kvm group to open /dev/kvm, own the slot TAPs, and own the socket +
+# snapshot dirs so the VMM can create its API/vsock sockets and snapshot files.
+FC_USER="fcvm"
+if ! id -u "$FC_USER" >/dev/null 2>&1; then
+    echo "[server] Creating non-root Firecracker user '$FC_USER'..."
+    sudo useradd --system --no-create-home --shell /usr/sbin/nologin "$FC_USER"
+fi
+sudo usermod -aG kvm "$FC_USER"
+export FC_RUN_UID="$(id -u "$FC_USER")"
+export FC_RUN_GID="$(id -g "$FC_USER")"
+
+sudo mkdir -p /tmp/fc-sockets /dev/shm/fc-snapshots
+sudo chown -R "$FC_RUN_UID:$FC_RUN_GID" /tmp/fc-sockets /dev/shm/fc-snapshots
+echo "[server]   Firecracker runs as $FC_USER (uid=$FC_RUN_UID gid=$FC_RUN_GID, kvm group)"
+
 # ── 3.5 Pre-create network namespaces and TAP slots ──────────────────────────
 # Each slot gets an isolated netns with a TAP (same IP as template host so
 # the guest's baked-in gateway works on restore without any reconfiguration)
@@ -95,7 +114,7 @@ for i in $(seq 0 $((SLOT_COUNT-1))); do
 
         sudo ip netns add fc-ns-$i
         sudo ip netns exec fc-ns-$i ip link set lo up
-        sudo ip netns exec fc-ns-$i ip tuntap add fc-tap-$i mode tap
+        sudo ip netns exec fc-ns-$i ip tuntap add fc-tap-$i mode tap user "$FC_RUN_UID" group "$FC_RUN_GID"
         sudo ip netns exec fc-ns-$i ip addr add $TEMPLATE_HOST_IP/30 dev fc-tap-$i
         sudo ip netns exec fc-ns-$i ip link set fc-tap-$i up
 

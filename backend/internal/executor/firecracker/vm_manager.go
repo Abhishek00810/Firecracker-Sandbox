@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -161,6 +162,10 @@ type FireCrackerManager struct {
 	// by Free and by Pro overflow. Buffered chan = counting semaphore (send=acquire).
 	proReserved     chan struct{}
 	sharedProvision chan struct{}
+	// Non-root uid/gid that Firecracker VMM children drop to via setpriv. 0 = run as
+	// root (disabled). The backend itself stays root for netns/iptables/cgroup/mounts.
+	FCUid int
+	FCGid int
 }
 
 type VMManager interface {
@@ -172,7 +177,7 @@ type VMManager interface {
 	LoadFromSnapshot(ctx context.Context, cfg VMConfig, tmpl *SnapshotTemplate) (*MicroVM, error)
 }
 
-func NewFirecrackerManager(socketDir, assetsPath, binaryPath string, slotCount, maxConcurrentProvisions, proReserved int) *FireCrackerManager {
+func NewFirecrackerManager(socketDir, assetsPath, binaryPath string, slotCount, maxConcurrentProvisions, proReserved, fcUid, fcGid int) *FireCrackerManager {
 	if maxConcurrentProvisions < 1 {
 		maxConcurrentProvisions = 1
 	}
@@ -192,6 +197,8 @@ func NewFirecrackerManager(socketDir, assetsPath, binaryPath string, slotCount, 
 		slotPool:        newSlotPool(slotCount),
 		proReserved:     make(chan struct{}, proReserved),
 		sharedProvision: make(chan struct{}, shared),
+		FCUid:           fcUid,
+		FCGid:           fcGid,
 	}
 }
 
@@ -265,6 +272,27 @@ func createTAP(tapName, hostIP string) error {
 
 func (f *FireCrackerManager) getSocketPath(vmID string) string {
 	return filepath.Join(f.SocketDir, fmt.Sprintf("%s.sock", vmID))
+}
+
+// firecrackerCmd builds the command that launches Firecracker, optionally entering a
+// network namespace and optionally dropping root to a non-root uid/gid via setpriv
+// (when FCUid > 0). The backend stays root — only the VMM child is unprivileged, so an
+// escaped guest lands as an unprivileged user. --init-groups re-derives the user's
+// supplementary groups so the dropped process keeps kvm-group access to /dev/kvm.
+func (f *FireCrackerManager) firecrackerCmd(netns string, args ...string) *exec.Cmd {
+	var argv []string
+	if netns != "" {
+		argv = append(argv, "ip", "netns", "exec", netns)
+	}
+	if f.FCUid > 0 {
+		argv = append(argv, "setpriv",
+			"--reuid", strconv.Itoa(f.FCUid),
+			"--regid", strconv.Itoa(f.FCGid),
+			"--init-groups")
+	}
+	argv = append(argv, f.BinaryPath)
+	argv = append(argv, args...)
+	return exec.Command(argv[0], argv[1:]...)
 }
 
 func (f *FireCrackerManager) putJSON(client *http.Client, url string, payload interface{}) error {
@@ -381,7 +409,7 @@ func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
 	// longer mount the rootfs here to write it — that runtime mount was the leak source.
 	tapName, hostIP, _, mac := f.allocateNetwork()
 
-	cmd := exec.Command(f.BinaryPath, "--api-sock", vm.SocketPath)
+	cmd := f.firecrackerCmd("", "--api-sock", vm.SocketPath)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -613,7 +641,7 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 	// Run Firecracker inside the slot's network namespace so it sees the slot's TAP.
 	// Unix sockets (API socket, vsock UDS) are filesystem-based and work across netns.
 	var stdout, stderr bytes.Buffer
-	cmd := exec.Command("ip", "netns", "exec", nsName, f.BinaryPath, "--api-sock", socketPath)
+	cmd := f.firecrackerCmd(nsName, "--api-sock", socketPath)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {

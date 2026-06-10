@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
@@ -23,6 +24,8 @@ type Config struct {
 	LogLevel           string
 	LogFormat          string
 	HostValidationMode string
+	FCRunUID           int // uid Firecracker VMMs drop to via setpriv; 0 = run as root (disabled)
+	FCRunGID           int // gid Firecracker VMMs drop to via setpriv; 0 = run as root (disabled)
 	Warnings           []string
 }
 
@@ -109,6 +112,9 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("create snapshot dir %q: %w", cfg.SnapshotDir, err)
 	}
 
+	cfg.FCRunUID = intEnv("FC_RUN_UID", 0)
+	cfg.FCRunGID = intEnv("FC_RUN_GID", 0)
+
 	warnings, err := validateHost(cfg.HostValidationMode)
 	if err != nil {
 		return nil, err
@@ -123,6 +129,16 @@ func defaultString(v, fallback string) string {
 		return fallback
 	}
 	return v
+}
+
+// intEnv reads an integer environment variable, returning fallback if unset or invalid.
+func intEnv(key string, fallback int) int {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return fallback
 }
 
 func resolvePath(explicit string, candidates []string, wantDir bool) (string, error) {

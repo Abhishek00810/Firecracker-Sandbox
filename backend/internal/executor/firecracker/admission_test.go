@@ -7,7 +7,7 @@ import (
 )
 
 func TestAdmissionControlSeparatesSharedAndProReservedCapacity(t *testing.T) {
-	manager := NewFirecrackerManager(t.TempDir(), "./assets", "/bin/true", 8, 3, 1)
+	manager := NewFirecrackerManager(t.TempDir(), "./assets", "/bin/true", 8, 3, 1, 0, 0)
 
 	freeReserved, err := manager.acquireProvision(context.Background(), false)
 	if err != nil {
@@ -44,7 +44,7 @@ func TestAdmissionControlSeparatesSharedAndProReservedCapacity(t *testing.T) {
 }
 
 func TestAdmissionControlClampsProReserve(t *testing.T) {
-	manager := NewFirecrackerManager(t.TempDir(), "./assets", "/bin/true", 8, 2, 99)
+	manager := NewFirecrackerManager(t.TempDir(), "./assets", "/bin/true", 8, 2, 99, 0, 0)
 
 	if got := cap(manager.proReserved); got != 1 {
 		t.Fatalf("expected pro reserve clamped to 1, got %d", got)

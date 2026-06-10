@@ -115,7 +115,10 @@ func main() {
 	}
 	slog.Info("provisioning concurrency limit", "max_concurrent_provisions", maxProvisions, "pro_reserved", proReserved)
 
-	vmManager := firecracker.NewFirecrackerManager(cfg.SocketDir, cfg.AssetsPath, cfg.FirecrackerBinary, slotCount, maxProvisions, proReserved)
+	if cfg.FCRunUID > 0 {
+		slog.Info("firecracker privilege drop enabled", "uid", cfg.FCRunUID, "gid", cfg.FCRunGID)
+	}
+	vmManager := firecracker.NewFirecrackerManager(cfg.SocketDir, cfg.AssetsPath, cfg.FirecrackerBinary, slotCount, maxProvisions, proReserved, cfg.FCRunUID, cfg.FCRunGID)
 
 	config := firecracker.VMConfig{
 		VCPUCount:  1, // 1 vCPU: halves thread pressure per VM → ~2x concurrency before the starvation cliff (test)
