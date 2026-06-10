@@ -93,7 +93,7 @@ print(result.request_id)    # a22d5dad-1670-...
 Sessions give you a **persistent VM** — variables, imports, and state survive between `run()` calls. Available on Pro tier.
 
 ```python
-with sb.session() as sess:
+with sb.session(tier="pro", env={"GITHUB_TOKEN": "ghp_..."}) as sess:
     sess.run("x = 100")
     sess.run("x *= 3")
     result = sess.run("print(x)")
@@ -107,6 +107,20 @@ sess = sb.session()
 sess.run("import pandas as pd")
 result = sess.run("print(pd.__version__)")
 sess.close()  # releases the VM
+```
+
+### Run shell commands in a session
+
+Agents usually need shell commands for workflows such as `git clone`, `pip install`,
+`pytest`, `git commit`, and `git push`. Use `Session.exec()` for that.
+
+```python
+with sb.session(tier="pro", env={"GITHUB_TOKEN": "ghp_..."}) as sess:
+    r = sess.exec("git clone https://github.com/org/repo.git /workspace/repo", timeout=60)
+    print(r.stdout)
+
+    r = sess.exec("cd /workspace/repo && pytest -q", timeout=60)
+    print(r.stdout, r.stderr)
 ```
 
 ---
@@ -166,11 +180,14 @@ All three run simultaneously instead of sequentially — total time ~1x instead 
 async def main():
     sb = AsyncSandbox(api_key="ro_live_...")
 
-    async with await sb.session() as sess:
+    async with await sb.session(tier="pro", env={"GITHUB_TOKEN": "ghp_..."}) as sess:
         await sess.run("x = 100")
         await sess.run("x *= 3")
         result = await sess.run("print(x)")
         print(result.stdout)  # 300
+
+        result = await sess.exec("pwd && python --version", timeout=30)
+        print(result.stdout)
 
 asyncio.run(main())
 ```

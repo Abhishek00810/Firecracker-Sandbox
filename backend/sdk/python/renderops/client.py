@@ -24,6 +24,17 @@ class Session:
         )
         return RunResult._from_session_run(resp)
 
+    def exec(self, command: str, timeout: Optional[int] = None) -> RunResult:
+        """Run a shell command inside this session's persistent workspace."""
+        body: dict = {"command": command}
+        http_timeout: Optional[int] = None
+        if timeout is not None:
+            body["timeout"] = timeout
+            http_timeout = timeout + 15  # keep the HTTP wait above the guest timeout
+
+        resp = self._client._post(f"/session/{self.id}/exec", body, timeout=http_timeout)
+        return RunResult._from_session_run(resp)
+
     def close(self) -> None:
         """Destroy this session and release the VM."""
         self._client._delete(f"/session/{self.id}")
@@ -92,13 +103,15 @@ class Sandbox:
             Execution timeout in seconds. Uses server default if not set.
         """
         body: dict = {"code": code, "language": language}
+        http_timeout: Optional[int] = None
         if timeout is not None:
             body["timeout"] = timeout
+            http_timeout = timeout + 15  # keep the HTTP wait above the guest timeout
 
-        resp = self._post("/execute", body)
+        resp = self._post("/execute", body, timeout=http_timeout)
         return RunResult._from_execute(resp)
 
-    def session(self) -> Session:
+    def session(self, env: Optional[dict[str, str]] = None, tier: Optional[str] = None) -> Session:
         """
         Create a persistent session. Variables survive between run() calls.
         Use as a context manager to auto-close:
@@ -107,8 +120,15 @@ class Sandbox:
                 sess.run("x = 10")
                 result = sess.run("print(x)")
         """
+        body: dict = {}
+        if env is not None:
+            body["env"] = env
+        if tier is not None:
+            body["tier"] = tier
+
         r = requests.post(
             f"{self.base_url}/session",
+            json=body,
             headers=self._headers,
             timeout=self._timeout,
         )
@@ -122,12 +142,12 @@ class Sandbox:
 
     # ── internals ───────────────────────────────────────────────────────────
 
-    def _post(self, path: str, body: dict) -> dict:
+    def _post(self, path: str, body: dict, timeout: Optional[int] = None) -> dict:
         r = requests.post(
             f"{self.base_url}{path}",
             json=body,
             headers=self._headers,
-            timeout=self._timeout,
+            timeout=timeout or self._timeout,
         )
         self._raise(r)
         return r.json()

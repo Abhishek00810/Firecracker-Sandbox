@@ -24,6 +24,17 @@ class AsyncSession:
         )
         return RunResult._from_session_run(resp)
 
+    async def exec(self, command: str, timeout: Optional[int] = None) -> RunResult:
+        """Run a shell command inside this session's persistent workspace."""
+        body: dict = {"command": command}
+        http_timeout: Optional[int] = None
+        if timeout is not None:
+            body["timeout"] = timeout
+            http_timeout = timeout + 15  # keep the HTTP wait above the guest timeout
+
+        resp = await self._client._post(f"/session/{self.id}/exec", body, timeout=http_timeout)
+        return RunResult._from_session_run(resp)
+
     async def close(self) -> None:
         """Destroy this session and release the VM."""
         await self._client._delete(f"/session/{self.id}")
@@ -107,13 +118,15 @@ class AsyncSandbox:
             Execution timeout in seconds. Uses server default if not set.
         """
         body: dict = {"code": code, "language": language}
+        http_timeout: Optional[int] = None
         if timeout is not None:
             body["timeout"] = timeout
+            http_timeout = timeout + 15  # keep the HTTP wait above the guest timeout
 
-        resp = await self._post("/execute", body)
+        resp = await self._post("/execute", body, timeout=http_timeout)
         return RunResult._from_execute(resp)
 
-    async def session(self) -> AsyncSession:
+    async def session(self, env: Optional[dict[str, str]] = None, tier: Optional[str] = None) -> AsyncSession:
         """
         Create a persistent async session. Variables survive between run() calls.
         Use as an async context manager to auto-close:
@@ -122,8 +135,14 @@ class AsyncSandbox:
                 await sess.run("x = 10")
                 result = await sess.run("print(x)")
         """
+        body: dict = {}
+        if env is not None:
+            body["env"] = env
+        if tier is not None:
+            body["tier"] = tier
+
         async with aiohttp.ClientSession(headers=self._headers, timeout=self._timeout) as http:
-            async with http.post(f"{self.base_url}/session") as r:
+            async with http.post(f"{self.base_url}/session", json=body) as r:
                 await self._raise(r)
                 data = await r.json()
                 return AsyncSession(
@@ -134,8 +153,9 @@ class AsyncSandbox:
 
     # ── internals ───────────────────────────────────────────────────────────
 
-    async def _post(self, path: str, body: dict) -> dict:
-        async with aiohttp.ClientSession(headers=self._headers, timeout=self._timeout) as http:
+    async def _post(self, path: str, body: dict, timeout: Optional[int] = None) -> dict:
+        t = aiohttp.ClientTimeout(total=timeout) if timeout is not None else self._timeout
+        async with aiohttp.ClientSession(headers=self._headers, timeout=t) as http:
             async with http.post(f"{self.base_url}{path}", json=body) as r:
                 await self._raise(r)
                 return await r.json()
