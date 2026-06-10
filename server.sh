@@ -65,6 +65,27 @@ export FC_RUN_GID="$(id -g "$FC_USER")"
 
 sudo mkdir -p /tmp/fc-sockets /dev/shm/fc-snapshots
 sudo chown -R "$FC_RUN_UID:$FC_RUN_GID" /tmp/fc-sockets /dev/shm/fc-snapshots
+
+# Let fcvm reach the kernel/rootfs/initrd. Production approach: a POSIX ACL granting
+# ONLY fcvm traverse on the path + read on the assets — least privilege, unlike a plain
+# chmod o+x which would open the home dir to every user. Falls back to chmod if the acl
+# tools aren't installed. (Cleaner long-term: host assets under /opt or /srv instead of a
+# home dir, so no per-user grant is needed at all.)
+ASSET_FILES=(
+    "$SCRIPT_DIR/assets/kernel/vmlinux"
+    "$SCRIPT_DIR/assets/rootfs/rootfs-alpine.ext4"
+    "$SCRIPT_DIR/assets/initramfs.cpio.gz"
+)
+if command -v setfacl >/dev/null 2>&1; then
+    p="$SCRIPT_DIR"
+    while [ "$p" != "/" ]; do sudo setfacl -m u:"$FC_USER":--x "$p" 2>/dev/null || true; p="$(dirname "$p")"; done
+    for f in "${ASSET_FILES[@]}"; do sudo setfacl -m u:"$FC_USER":r-- "$f" 2>/dev/null || true; done
+else
+    echo "[server]   setfacl not found; using chmod fallback (install 'acl' for least-privilege)"
+    p="$SCRIPT_DIR"
+    while [ "$p" != "/" ]; do sudo chmod o+x "$p" 2>/dev/null || true; p="$(dirname "$p")"; done
+    for f in "${ASSET_FILES[@]}"; do sudo chmod o+r "$f" 2>/dev/null || true; done
+fi
 echo "[server]   Firecracker runs as $FC_USER (uid=$FC_RUN_UID gid=$FC_RUN_GID, kvm group)"
 
 # ── 3.5 Pre-create network namespaces and TAP slots ──────────────────────────
