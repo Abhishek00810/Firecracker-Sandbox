@@ -285,6 +285,12 @@ func (f *FireCrackerManager) firecrackerCmd(netns string, args ...string) *exec.
 		argv = append(argv, "ip", "netns", "exec", netns)
 	}
 	if f.FCUid > 0 {
+		// Private mount namespace: the VMM's mounts are isolated from the host and can't
+		// propagate. unshare needs CAP_SYS_ADMIN, so it runs (as root) BEFORE setpriv drops
+		// privileges. The restore path already gets a mount ns from `ip netns exec`; this
+		// also covers the cold-boot path for consistency. Gated on FCUid so FC_RUN_UID
+		// toggles the whole non-root + mount-ns hardening together.
+		argv = append(argv, "unshare", "--mount", "--propagation", "private")
 		argv = append(argv, "setpriv",
 			"--reuid", strconv.Itoa(f.FCUid),
 			"--regid", strconv.Itoa(f.FCGid),
