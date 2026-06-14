@@ -5,7 +5,7 @@ from typing import Optional
 import requests
 
 from .exceptions import APIError, AuthError, RateLimitError, ServerError, SessionNotFoundError
-from .models import RunResult
+from .models import Resources, RunResult
 
 
 class Session:
@@ -111,7 +111,7 @@ class Sandbox:
         resp = self._post("/execute", body, timeout=http_timeout)
         return RunResult._from_execute(resp)
 
-    def session(self, env: Optional[dict[str, str]] = None, tier: Optional[str] = None) -> Session:
+    def session(self, env: Optional[dict[str, str]] = None, tier: Optional[str] = None, resources: Optional[Resources] = None) -> Session:
         """
         Create a persistent session. Variables survive between run() calls.
         Use as a context manager to auto-close:
@@ -125,6 +125,8 @@ class Sandbox:
             body["env"] = env
         if tier is not None:
             body["tier"] = tier
+        if resources is not None:
+            body["resources"] = resources.to_dict()
 
         r = requests.post(
             f"{self.base_url}/session",

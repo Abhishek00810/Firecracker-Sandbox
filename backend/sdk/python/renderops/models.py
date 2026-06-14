@@ -1,4 +1,27 @@
 from dataclasses import dataclass
+from typing import Optional
+
+
+@dataclass
+class Resources:
+    """Compute shape of a sandbox (also the billing basis): vCPU, RAM (MB), disk (GB).
+
+    Omitted/None fields fall back to the default size on the server.
+    """
+
+    vcpus: Optional[int] = None
+    memory_mb: Optional[int] = None
+    disk_gb: Optional[int] = None
+
+    def to_dict(self) -> dict:
+        out: dict = {}
+        if self.vcpus is not None:
+            out["vcpus"] = self.vcpus
+        if self.memory_mb is not None:
+            out["memory_mb"] = self.memory_mb
+        if self.disk_gb is not None:
+            out["disk_gb"] = self.disk_gb
+        return out
 
 
 @dataclass
