@@ -55,7 +55,20 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 			var createReq CreateSessionRequest
 			json.NewDecoder(r.Body).Decode(&createReq)
 
-			sess, err := mgr.Create(r.Context(), auth.Config.Name, createReq.Env)
+			size, err := resolveSize(createReq.Resources)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(APIError{
+					Status:    "error",
+					Code:      "invalid_resources",
+					Message:   err.Error(),
+					RequestID: requestID,
+				})
+				return
+			}
+
+			sess, err := mgr.Create(r.Context(), auth.Config.Name, createReq.Env, size.VCPUs, size.MemoryMB, size.DiskGB)
 			if err != nil {
 				slog.Error("failed to create session", "err", err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)

@@ -14,6 +14,9 @@ type Session struct {
 	VM               *firecracker.MicroVM
 	Cgroup           *cgroup.Cgroup
 	Tier             string
+	VCPUs            int // allocated compute shape — the billing basis
+	MemoryMB         int
+	DiskGB           int
 	CreatedAt        time.Time
 	LastUsed         time.Time
 	RunCount         int

@@ -57,7 +57,7 @@ func NewManager(
 
 // Create boots a VM and binds it to a new session. env vars are injected into
 // the persistent shell so commands like git can access GITHUB_TOKEN etc.
-func (m *Manager) Create(ctx context.Context, tier string, env map[string]string) (*Session, error) {
+func (m *Manager) Create(ctx context.Context, tier string, env map[string]string, vcpus, memoryMB, diskGB int) (*Session, error) {
 	t0 := time.Now()
 
 	pool := m.freePool
@@ -80,6 +80,9 @@ func (m *Manager) Create(ctx context.Context, tier string, env map[string]string
 		PooledVM:  pvm,
 		Pool:      pool,
 		Tier:      tier,
+		VCPUs:     vcpus,
+		MemoryMB:  memoryMB,
+		DiskGB:    diskGB,
 		CreatedAt: time.Now(),
 		LastUsed:  time.Now(),
 	}

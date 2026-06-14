@@ -2,6 +2,12 @@ package handler
 
 // --- Shared ---
 
+type Resources struct {
+	VCPUs    int `json:"vcpus,omitempty"`     //guest vcpus
+	MemoryMB int `json:"memory_mb,omitempty"` // guestRAM, in MB
+	DiskGB   int `json:"disk_gb,omitempty"`
+}
+
 type APIError struct {
 	Status    string `json:"status"`
 	Code      string `json:"code"`
@@ -54,7 +60,8 @@ type ExecuteResponse struct {
 // --- POST /session ---
 
 type CreateSessionRequest struct {
-	Env map[string]string `json:"env,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
+	Resources *Resources        `json:"resources,omitempty"` //nil = default size
 }
 
 // --- POST /session/:id/exec ---

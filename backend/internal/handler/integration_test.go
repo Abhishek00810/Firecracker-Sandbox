@@ -328,7 +328,7 @@ func (f *fakeSessionService) Exec(ctx context.Context, sessionID, command string
 	}, nil
 }
 
-func (f *fakeSessionService) Create(ctx context.Context, tier string, env map[string]string) (*session.Session, error) {
+func (f *fakeSessionService) Create(ctx context.Context, tier string, env map[string]string, vcpus, memoryMB, diskGB int) (*session.Session, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
