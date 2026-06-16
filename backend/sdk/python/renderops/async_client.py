@@ -5,7 +5,7 @@ from typing import Optional
 import aiohttp
 
 from .exceptions import APIError, AuthError, RateLimitError, ServerError, SessionNotFoundError
-from .models import Resources, RunResult
+from .models import NetworkConfig, Resources, RunResult
 
 
 class AsyncSession:
@@ -126,7 +126,7 @@ class AsyncSandbox:
         resp = await self._post("/execute", body, timeout=http_timeout)
         return RunResult._from_execute(resp)
 
-    async def session(self, env: Optional[dict[str, str]] = None, tier: Optional[str] = None, resources: Optional[Resources] = None) -> AsyncSession:
+    async def session(self, env: Optional[dict[str, str]] = None, tier: Optional[str] = None, resources: Optional[Resources] = None, network: Optional[NetworkConfig] = None) -> AsyncSession:
         """
         Create a persistent async session. Variables survive between run() calls.
         Use as an async context manager to auto-close:
@@ -142,6 +142,8 @@ class AsyncSandbox:
             body["tier"] = tier
         if resources is not None:
             body["resources"] = resources.to_dict()
+        if network is not None:
+            body["network"] = network.to_dict()
 
         async with aiohttp.ClientSession(headers=self._headers, timeout=self._timeout) as http:
             async with http.post(f"{self.base_url}/session", json=body) as r:

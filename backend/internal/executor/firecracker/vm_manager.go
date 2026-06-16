@@ -274,6 +274,25 @@ func (f *FireCrackerManager) getSocketPath(vmID string) string {
 	return filepath.Join(f.SocketDir, fmt.Sprintf("%s.sock", vmID))
 }
 
+// SetSlotEgress controls internet egress for a slot's network namespace. allow=false
+// inserts a DROP on the guest subnet's forwarded traffic (vsock host↔guest control is
+// unaffected — it's not IP); allow=true clears it. It deletes any existing rule first
+// so a reused slot is normalized. No-op for cold-boot VMs (slot < 0, no slot netns).
+func (f *FireCrackerManager) SetSlotEgress(slot int, allow bool) error {
+	if slot < 0 {
+		return nil
+	}
+	ns := fmt.Sprintf("fc-ns-%d", slot)
+	// clear any existing DROP (ignore error when the rule isn't present)
+	exec.Command("ip", "netns", "exec", ns, "iptables", "-D", "FORWARD", "-s", "172.16.0.0/30", "-j", "DROP").Run()
+	if !allow {
+		if out, err := exec.Command("ip", "netns", "exec", ns, "iptables", "-I", "FORWARD", "-s", "172.16.0.0/30", "-j", "DROP").CombinedOutput(); err != nil {
+			return fmt.Errorf("block egress in %s: %w: %s", ns, err, out)
+		}
+	}
+	return nil
+}
+
 // firecrackerCmd builds the command that launches Firecracker, optionally entering a
 // network namespace and optionally dropping root to a non-root uid/gid via setpriv
 // (when FCUid > 0). The backend stays root — only the VMM child is unprivileged, so an

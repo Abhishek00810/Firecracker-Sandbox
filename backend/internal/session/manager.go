@@ -57,7 +57,7 @@ func NewManager(
 
 // Create boots a VM and binds it to a new session. env vars are injected into
 // the persistent shell so commands like git can access GITHUB_TOKEN etc.
-func (m *Manager) Create(ctx context.Context, tier string, env map[string]string, vcpus, memoryMB, diskGB int) (*Session, error) {
+func (m *Manager) Create(ctx context.Context, tier string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool) (*Session, error) {
 	t0 := time.Now()
 
 	pool := m.freePool
@@ -73,6 +73,14 @@ func (m *Manager) Create(ctx context.Context, tier string, env map[string]string
 		return nil, fmt.Errorf("failed to acquire VM: %w", err)
 	}
 
+	// Apply network policy on the VM's slot. When internet=false this blocks egress
+	// in the slot's netns; it also normalizes any stale rule on a reused slot. If we
+	// can't enforce a requested isolation, fail rather than hand back a leaky sandbox.
+	if err := m.vmManager.SetSlotEgress(pvm.VM.Slot, internet); err != nil {
+		pool.Release(pvm)
+		return nil, fmt.Errorf("apply network policy: %w", err)
+	}
+
 	sess := &Session{
 		ID:        uuid.New().String(),
 		VM:        pvm.VM,
@@ -83,6 +91,7 @@ func (m *Manager) Create(ctx context.Context, tier string, env map[string]string
 		VCPUs:     vcpus,
 		MemoryMB:  memoryMB,
 		DiskGB:    diskGB,
+		Internet:  internet,
 		CreatedAt: time.Now(),
 		LastUsed:  time.Now(),
 	}

@@ -1,7 +1,7 @@
 from .client import Sandbox, Session
 from .async_client import AsyncSandbox, AsyncSession
 from .exceptions import APIError, AuthError, RateLimitError, SandboxError, ServerError, SessionNotFoundError
-from .models import Resources, RunResult
+from .models import NetworkConfig, Resources, RunResult
 
 __all__ = [
     "Sandbox",
@@ -10,6 +10,7 @@ __all__ = [
     "AsyncSession",
     "RunResult",
     "Resources",
+    "NetworkConfig",
     "SandboxError",
     "APIError",
     "AuthError",

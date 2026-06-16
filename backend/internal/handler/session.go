@@ -68,7 +68,12 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				return
 			}
 
-			sess, err := mgr.Create(r.Context(), auth.Config.Name, createReq.Env, size.VCPUs, size.MemoryMB, size.DiskGB)
+			internet := true // default: egress on
+			if createReq.Network != nil && createReq.Network.Internet != nil {
+				internet = *createReq.Network.Internet
+			}
+
+			sess, err := mgr.Create(r.Context(), auth.Config.Name, createReq.Env, size.VCPUs, size.MemoryMB, size.DiskGB, internet)
 			if err != nil {
 				slog.Error("failed to create session", "err", err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)

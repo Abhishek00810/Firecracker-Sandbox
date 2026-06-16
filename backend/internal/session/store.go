@@ -17,6 +17,7 @@ type Session struct {
 	VCPUs            int // allocated compute shape — the billing basis
 	MemoryMB         int
 	DiskGB           int
+	Internet         bool // egress allowed (false = network-isolated)
 	CreatedAt        time.Time
 	LastUsed         time.Time
 	RunCount         int

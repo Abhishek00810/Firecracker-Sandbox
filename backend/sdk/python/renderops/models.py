@@ -25,6 +25,18 @@ class Resources:
 
 
 @dataclass
+class NetworkConfig:
+    """Network policy for a sandbox. internet=False blocks outbound egress
+    (host<->guest control still works). allowed_domains / expose_ports are not
+    supported yet."""
+
+    internet: bool = True
+
+    def to_dict(self) -> dict:
+        return {"internet": self.internet}
+
+
+@dataclass
 class RunResult:
     stdout: str
     stderr: str

@@ -8,6 +8,14 @@ type Resources struct {
 	DiskGB   int `json:"disk_gb,omitempty"`
 }
 
+// NetworkConfig controls the sandbox's network policy.
+// Internet is a pointer so an omitted field means "default" (on) rather than false.
+// (allowed_domains / expose_ports are intentionally not here yet — they need
+// DNS-filtering and the preview-URL proxy respectively.)
+type NetworkConfig struct {
+	Internet *bool `json:"internet,omitempty"` // nil = default (on); false = egress blocked
+}
+
 type APIError struct {
 	Status    string `json:"status"`
 	Code      string `json:"code"`
@@ -62,6 +70,7 @@ type ExecuteResponse struct {
 type CreateSessionRequest struct {
 	Env       map[string]string `json:"env,omitempty"`
 	Resources *Resources        `json:"resources,omitempty"` //nil = default size
+	Network   *NetworkConfig    `json:"network,omitempty"`   //nil = default (internet on)
 }
 
 // --- POST /session/:id/exec ---
