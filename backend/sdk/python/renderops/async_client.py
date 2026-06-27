@@ -126,7 +126,7 @@ class AsyncSandbox:
         resp = await self._post("/execute", body, timeout=http_timeout)
         return RunResult._from_execute(resp)
 
-    async def session(self, env: Optional[dict[str, str]] = None, tier: Optional[str] = None, resources: Optional[Resources] = None, network: Optional[NetworkConfig] = None) -> AsyncSession:
+    async def session(self, env: Optional[dict[str, str]] = None, tier: Optional[str] = None, resources: Optional[Resources] = None, network: Optional[NetworkConfig] = None, idle_timeout: Optional[int] = None, max_lifetime: Optional[int] = None) -> AsyncSession:
         """
         Create a persistent async session. Variables survive between run() calls.
         Use as an async context manager to auto-close:
@@ -134,6 +134,11 @@ class AsyncSandbox:
             async with await sb.session() as sess:
                 await sess.run("x = 10")
                 result = await sess.run("print(x)")
+
+        idle_timeout : int, optional
+            Seconds of inactivity before the session is reaped (default 5m, capped at max_lifetime).
+        max_lifetime : int, optional
+            Hard ceiling in seconds before the session is killed (default/cap 24h).
         """
         body: dict = {}
         if env is not None:
@@ -144,6 +149,10 @@ class AsyncSandbox:
             body["resources"] = resources.to_dict()
         if network is not None:
             body["network"] = network.to_dict()
+        if idle_timeout is not None:
+            body["idle_timeout_s"] = idle_timeout
+        if max_lifetime is not None:
+            body["max_lifetime_s"] = max_lifetime
 
         async with aiohttp.ClientSession(headers=self._headers, timeout=self._timeout) as http:
             async with http.post(f"{self.base_url}/session", json=body) as r:

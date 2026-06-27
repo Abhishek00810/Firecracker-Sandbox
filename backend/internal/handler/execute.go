@@ -47,7 +47,8 @@ func ExecuteHandler(freeQueue *queue.JobQueue, premiumQueue *queue.JobQueue, fre
 			return
 		}
 
-		execCtx, cancel := context.WithTimeout(r.Context(), auth.Config.MaxExecTimeout)
+		execTimeout := effectiveTimeout(req.Timeout, auth.Config.MaxExecTimeout)
+		execCtx, cancel := context.WithTimeout(r.Context(), execTimeout)
 		defer cancel()
 
 		resultCh, err := jobQueue.Submit(execCtx, req.Code, req.Language)
@@ -111,7 +112,7 @@ func ExecuteHandler(freeQueue *queue.JobQueue, premiumQueue *queue.JobQueue, fre
 			Usage: &UsageInfo{
 				ExecutionTimeMs: duration * 1000,
 				QueueWaitMs:     0, // no separate queue wait tracking yet
-				TimeoutLimitMs:  int(auth.Config.MaxExecTimeout.Milliseconds()),
+				TimeoutLimitMs:  int(execTimeout.Milliseconds()),
 			},
 			Tenant: &TenantContext{
 				TenantID: auth.TenantID,

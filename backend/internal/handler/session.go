@@ -73,7 +73,12 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				internet = *createReq.Network.Internet
 			}
 
-			sess, err := mgr.Create(r.Context(), auth.Config.Name, createReq.Env, size.VCPUs, size.MemoryMB, size.DiskGB, internet)
+			// Resolve per-session idle/lifetime: caller may request values; idle is capped
+			// at the max lifetime, lifetime is capped at the tier ceiling. Unset → tier defaults.
+			idleTimeout := resolveDuration(createReq.IdleTimeoutS, tc.SessionIdleTimeout, tc.SessionMaxLifetime)
+			maxLifetime := resolveDuration(createReq.MaxLifetimeS, tc.SessionMaxLifetime, tc.SessionMaxLifetime)
+
+			sess, err := mgr.Create(r.Context(), auth.Config.Name, createReq.Env, size.VCPUs, size.MemoryMB, size.DiskGB, internet, idleTimeout, maxLifetime)
 			if err != nil {
 				slog.Error("failed to create session", "err", err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)

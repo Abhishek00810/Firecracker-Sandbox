@@ -70,7 +70,7 @@ func TestExecuteHandlerSuccess(t *testing.T) {
 	if resp.Result == nil || resp.Result.Stdout != "2\n" {
 		t.Fatalf("unexpected result payload: %+v", resp.Result)
 	}
-	if resp.Tenant == nil || resp.Tenant.Tier != tierconfig.Free {
+	if resp.Tenant == nil || resp.Tenant.Tier != tierconfig.PAYG {
 		t.Fatalf("unexpected tenant payload: %+v", resp.Tenant)
 	}
 	if rec.Header().Get("X-Request-ID") == "" {
@@ -113,7 +113,7 @@ func TestExecuteUsageLogDoesNotUseRequestCancellationContext(t *testing.T) {
 		record: platform.KeyRecord{
 			ID:               "key-1",
 			UserID:           "tenant-1",
-			Tier:             tierconfig.Free,
+			Tier:             tierconfig.PAYG,
 			IsActive:         true,
 			FreeUSDRemaining: 10,
 		},
@@ -152,7 +152,7 @@ func TestSessionLifecycle(t *testing.T) {
 			record: platform.KeyRecord{
 				ID:               "key-1",
 				UserID:           "tenant-1",
-				Tier:             tierconfig.Pro,
+				Tier:             tierconfig.PAYG,
 				IsActive:         true,
 				FreeUSDRemaining: 10,
 			},
@@ -230,7 +230,7 @@ func newTestServer(t *testing.T, deps testDeps) http.Handler {
 			record: platform.KeyRecord{
 				ID:               "key-1",
 				UserID:           "tenant-1",
-				Tier:             tierconfig.Free,
+				Tier:             tierconfig.PAYG,
 				IsActive:         true,
 				FreeUSDRemaining: 10,
 			},
@@ -328,7 +328,7 @@ func (f *fakeSessionService) Exec(ctx context.Context, sessionID, command string
 	}, nil
 }
 
-func (f *fakeSessionService) Create(ctx context.Context, tier string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool) (*session.Session, error) {
+func (f *fakeSessionService) Create(ctx context.Context, tier string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*session.Session, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 

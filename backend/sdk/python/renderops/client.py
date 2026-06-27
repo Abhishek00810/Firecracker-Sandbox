@@ -111,7 +111,7 @@ class Sandbox:
         resp = self._post("/execute", body, timeout=http_timeout)
         return RunResult._from_execute(resp)
 
-    def session(self, env: Optional[dict[str, str]] = None, tier: Optional[str] = None, resources: Optional[Resources] = None, network: Optional[NetworkConfig] = None) -> Session:
+    def session(self, env: Optional[dict[str, str]] = None, tier: Optional[str] = None, resources: Optional[Resources] = None, network: Optional[NetworkConfig] = None, idle_timeout: Optional[int] = None, max_lifetime: Optional[int] = None) -> Session:
         """
         Create a persistent session. Variables survive between run() calls.
         Use as a context manager to auto-close:
@@ -119,6 +119,13 @@ class Sandbox:
             with sb.session() as sess:
                 sess.run("x = 10")
                 result = sess.run("print(x)")
+
+        idle_timeout : int, optional
+            Seconds of inactivity before the session is reaped. Defaults to the
+            server default (5m); capped at max_lifetime.
+        max_lifetime : int, optional
+            Hard ceiling in seconds before the session is killed regardless of
+            activity. Defaults to / capped at the server ceiling (24h).
         """
         body: dict = {}
         if env is not None:
@@ -129,6 +136,10 @@ class Sandbox:
             body["resources"] = resources.to_dict()
         if network is not None:
             body["network"] = network.to_dict()
+        if idle_timeout is not None:
+            body["idle_timeout_s"] = idle_timeout
+        if max_lifetime is not None:
+            body["max_lifetime_s"] = max_lifetime
 
         r = requests.post(
             f"{self.base_url}/session",

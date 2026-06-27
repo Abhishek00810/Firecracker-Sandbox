@@ -68,9 +68,11 @@ type ExecuteResponse struct {
 // --- POST /session ---
 
 type CreateSessionRequest struct {
-	Env       map[string]string `json:"env,omitempty"`
-	Resources *Resources        `json:"resources,omitempty"` //nil = default size
-	Network   *NetworkConfig    `json:"network,omitempty"`   //nil = default (internet on)
+	Env          map[string]string `json:"env,omitempty"`
+	Resources    *Resources        `json:"resources,omitempty"`      //nil = default size
+	Network      *NetworkConfig    `json:"network,omitempty"`        //nil = default (internet on)
+	IdleTimeoutS *int              `json:"idle_timeout_s,omitempty"` //nil = tier default (5m); capped at max lifetime
+	MaxLifetimeS *int              `json:"max_lifetime_s,omitempty"` //nil = tier default/cap (24h)
 }
 
 // --- POST /session/:id/exec ---

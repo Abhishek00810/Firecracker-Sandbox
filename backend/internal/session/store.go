@@ -18,6 +18,8 @@ type Session struct {
 	MemoryMB         int
 	DiskGB           int
 	Internet         bool // egress allowed (false = network-isolated)
+	IdleTimeout      time.Duration // reaper evicts after this idle time (per-session)
+	MaxLifetime      time.Duration // hard ceiling regardless of activity (0 = no limit)
 	CreatedAt        time.Time
 	LastUsed         time.Time
 	RunCount         int
@@ -79,16 +81,17 @@ func (s *Store) Delete(id string) (*Session, bool) {
 	return sess, ok
 }
 
-// EvictIdle returns sessions idle longer than maxIdle OR alive longer than maxLifetime,
-// and removes them from the store. maxLifetime of 0 disables the lifetime check.
-func (s *Store) EvictIdle(maxIdle time.Duration, maxLifetime time.Duration) []*Session {
+// EvictIdle returns sessions idle longer than their own IdleTimeout OR alive longer than
+// their own MaxLifetime, and removes them from the store. A zero value on a session
+// disables that check for that session.
+func (s *Store) EvictIdle() []*Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	var evicted []*Session
 	for id, sess := range s.sessions {
-		idleExpired := maxIdle > 0 && time.Since(sess.LastUsed) > maxIdle
-		lifetimeExpired := maxLifetime > 0 && time.Since(sess.CreatedAt) > maxLifetime
+		idleExpired := sess.IdleTimeout > 0 && time.Since(sess.LastUsed) > sess.IdleTimeout
+		lifetimeExpired := sess.MaxLifetime > 0 && time.Since(sess.CreatedAt) > sess.MaxLifetime
 		if idleExpired || lifetimeExpired {
 			evicted = append(evicted, sess)
 			delete(s.sessions, id)

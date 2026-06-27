@@ -231,8 +231,23 @@ func main() {
 	// Middleware chain: Logging → Auth → mux
 	chain := middleware.Logging(middleware.Auth(platformClient)(http.DefaultServeMux))
 
+	// Configured server with Slowloris-safe timeouts. ReadHeaderTimeout caps how long a
+	// client may take to send request headers — this is the Slowloris defense and is safe
+	// for any workload length (it limits transmission, not processing). WriteTimeout is
+	// deliberately left unset (0): long executions are bounded per-request via
+	// context.WithTimeout in the handlers, so a blanket response deadline here would kill
+	// legitimate long-running jobs.
+	srv := &http.Server{
+		Addr:              port,
+		Handler:           chain,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20, // 1MB
+	}
+
 	go func() {
-		if err := http.ListenAndServe(port, chain); err != nil {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("error serving API", "err", err)
 			os.Exit(1)
 		}
@@ -240,6 +255,11 @@ func main() {
 
 	<-quit
 	slog.Info("shutting down, cleaning up VMs")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Warn("http server shutdown error", "err", err)
+	}
 	freePool.Shutdown()
 	premiumPool.Shutdown()
 	sessionMgr.Shutdown(context.Background())
