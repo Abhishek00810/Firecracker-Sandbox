@@ -142,7 +142,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				return
 			}
 
-			runTimeoutSec := int(effectiveTimeout(req.Timeout, auth.Config.MaxExecTimeout).Seconds())
+			runTimeoutSec := int(resolveDuration(req.Timeout, auth.Config.DefaultExecTimeout, auth.Config.MaxExecTimeout).Seconds())
 
 			start := time.Now()
 			result, err := mgr.Execute(r.Context(), sessionID, req.Code, req.Language, runTimeoutSec)

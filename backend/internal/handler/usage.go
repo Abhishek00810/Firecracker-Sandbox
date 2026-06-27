@@ -21,21 +21,7 @@ func truncate(s string, maxBytes int) string {
 	return s[:maxBytes]
 }
 
-// effectiveTimeout resolves the per-execution timeout: a caller may request a shorter
-// (or up-to-cap) duration in seconds; nil/<=0 falls back to the tier default, and any
-// request above the tier cap is clamped to it. The cap is the hard tier ceiling.
-func effectiveTimeout(requestedSec *int, cap time.Duration) time.Duration {
-	if requestedSec == nil || *requestedSec <= 0 {
-		return cap
-	}
-	d := time.Duration(*requestedSec) * time.Second
-	if d > cap {
-		return cap
-	}
-	return d
-}
-
-// resolveDuration resolves a per-session timeout (idle or lifetime) from an optional
+// resolveDuration resolves a timeout (per-execution, idle, or lifetime) from an optional
 // caller-supplied value in seconds: nil/<=0 → def; otherwise the request clamped to cap.
 func resolveDuration(requestedSec *int, def, cap time.Duration) time.Duration {
 	if requestedSec == nil || *requestedSec <= 0 {

@@ -12,7 +12,8 @@ type TierConfig struct {
 	Name               string
 	RateLimit          float64       // requests/sec, cast to rate.Limit in main.go
 	RateBurst          int           // burst bucket size
-	MaxExecTimeout     time.Duration // max execution time per request
+	DefaultExecTimeout time.Duration // per-execution default when caller doesn't specify
+	MaxExecTimeout     time.Duration // hard ceiling per request (caller requests clamped to this)
 	MinPoolSize        int           // always-warm VMs kept in pool (0 = fully on-demand)
 	MaxPoolSize        int           // hard cap on concurrent VMs for this tier
 	MaxSessions        int           // 0 = sessions not allowed for this tier
@@ -26,6 +27,7 @@ var Tiers = map[string]TierConfig{
 		Name:               PAYG,
 		RateLimit:          1000.0,
 		RateBurst:          100,
+		DefaultExecTimeout: 60 * time.Second,
 		MaxExecTimeout:     5 * time.Minute,
 		MinPoolSize:        0,
 		MaxPoolSize:        50,

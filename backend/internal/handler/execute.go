@@ -47,7 +47,7 @@ func ExecuteHandler(freeQueue *queue.JobQueue, premiumQueue *queue.JobQueue, fre
 			return
 		}
 
-		execTimeout := effectiveTimeout(req.Timeout, auth.Config.MaxExecTimeout)
+		execTimeout := resolveDuration(req.Timeout, auth.Config.DefaultExecTimeout, auth.Config.MaxExecTimeout)
 		execCtx, cancel := context.WithTimeout(r.Context(), execTimeout)
 		defer cancel()
 
