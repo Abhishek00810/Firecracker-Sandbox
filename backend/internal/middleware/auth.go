@@ -131,12 +131,13 @@ func Auth(pc platform.KeyResolver) func(http.Handler) http.Handler {
 				return
 			}
 
+			tc := tierconfig.Get(record.Tier)
 			info := AuthInfo{
 				TenantID:         record.UserID,
 				APIKeyID:         record.ID,
-				Config:           tierconfig.Get(record.Tier),
+				Config:           tc,
 				FreeUSDRemaining: record.FreeUSDRemaining,
-				RateUSDPerSec:    record.RateUSDPerSec,
+				RateUSDPerSec:    tc.RateUSDPerSec,
 			}
 
 			slog.Debug("auth: resolved", "tenant_id", record.UserID, "tier", record.Tier)

@@ -16,7 +16,6 @@ type KeyRecord struct {
 	IsActive         bool    `json:"is_active"`
 	ExpiresAt        *string `json:"expires_at"`
 	FreeUSDRemaining float64 `json:"free_usd_remaining"`
-	RateUSDPerSec    float64 `json:"rate_usd_per_sec"`
 }
 
 // Client talks to Supabase via the REST API using the service role key.
@@ -47,7 +46,7 @@ func (c *Client) ResolveKey(keyHash string) (KeyRecord, error) {
 
 	q := url.Values{}
 	q.Set("key_hash", "eq."+keyHash)
-	q.Set("select", "id,user_id,is_active,expires_at,profiles(tier,free_usd_remaining,tier_configs(rate_usd_per_sec))")
+	q.Set("select", "id,user_id,is_active,expires_at,profiles(tier,free_usd_remaining)")
 	q.Set("limit", "1")
 	base.RawQuery = q.Encode()
 
@@ -79,9 +78,6 @@ func (c *Client) ResolveKey(keyHash string) (KeyRecord, error) {
 		Profiles  struct {
 			Tier             string  `json:"tier"`
 			FreeUSDRemaining float64 `json:"free_usd_remaining"`
-			TierConfigs      struct {
-				RateUSDPerSec float64 `json:"rate_usd_per_sec"`
-			} `json:"tier_configs"`
 		} `json:"profiles"`
 	}
 
@@ -101,6 +97,5 @@ func (c *Client) ResolveKey(keyHash string) (KeyRecord, error) {
 		IsActive:         row.IsActive,
 		ExpiresAt:        row.ExpiresAt,
 		FreeUSDRemaining: row.Profiles.FreeUSDRemaining,
-		RateUSDPerSec:    row.Profiles.TierConfigs.RateUSDPerSec,
 	}, nil
 }
