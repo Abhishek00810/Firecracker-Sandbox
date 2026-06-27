@@ -111,6 +111,7 @@ type SessionLimits struct {
 type RunInSessionRequest struct {
 	Code     string `json:"code"`
 	Language string `json:"language"`
+	Timeout  *int   `json:"timeout,omitempty"` // per-run timeout seconds; nil = tier default, capped at tier max
 }
 
 type SessionExecuteResponse struct {

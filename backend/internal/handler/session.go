@@ -142,8 +142,10 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				return
 			}
 
+			runTimeoutSec := int(effectiveTimeout(req.Timeout, auth.Config.MaxExecTimeout).Seconds())
+
 			start := time.Now()
-			result, err := mgr.Execute(r.Context(), sessionID, req.Code, req.Language)
+			result, err := mgr.Execute(r.Context(), sessionID, req.Code, req.Language, runTimeoutSec)
 			if err != nil {
 				slog.Error("session execute failed", "session_id", sessionID, "err", err)
 				http.Error(w, err.Error(), http.StatusNotFound)

@@ -343,7 +343,7 @@ func (f *fakeSessionService) Create(ctx context.Context, tier string, env map[st
 	return sess, nil
 }
 
-func (f *fakeSessionService) Execute(ctx context.Context, sessionID, code, language string) (executor.ExecutionResult, error) {
+func (f *fakeSessionService) Execute(ctx context.Context, sessionID, code, language string, timeoutSec int) (executor.ExecutionResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 

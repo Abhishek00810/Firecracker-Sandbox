@@ -160,7 +160,7 @@ func (m *Manager) Exec(ctx context.Context, sessionID, command string, timeoutSe
 }
 
 // Execute runs code inside an existing session's VM
-func (m *Manager) Execute(ctx context.Context, sessionID, code, language string) (executor.ExecutionResult, error) {
+func (m *Manager) Execute(ctx context.Context, sessionID, code, language string, timeoutSec int) (executor.ExecutionResult, error) {
 	sess, ok := m.store.Get(sessionID)
 	if !ok {
 		return executor.ExecutionResult{}, fmt.Errorf("session %s not found", sessionID)
@@ -172,8 +172,12 @@ func (m *Manager) Execute(ctx context.Context, sessionID, code, language string)
 
 	sess.LastUsed = time.Now()
 
+	if timeoutSec <= 0 {
+		timeoutSec = 30
+	}
+
 	vsockClient := firecracker.NewVsockClient(sess.VM.VsockPath)
-	resp, err := vsockClient.ExecuteOnConn(sess.VsockConn, code, language, "stateful", 30)
+	resp, err := vsockClient.ExecuteOnConn(sess.VsockConn, code, language, "stateful", timeoutSec)
 	if err != nil {
 		return executor.ExecutionResult{}, fmt.Errorf("execution failed: %w", err)
 	}

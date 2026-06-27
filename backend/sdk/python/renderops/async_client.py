@@ -16,12 +16,19 @@ class AsyncSession:
         self.tier = tier
         self._client = client
 
-    async def run(self, code: str, language: str = "python") -> RunResult:
-        """Run code inside this session. State is preserved across calls."""
-        resp = await self._client._post(
-            f"/session/{self.id}/run",
-            {"code": code, "language": language},
-        )
+    async def run(self, code: str, language: str = "python", timeout: Optional[int] = None) -> RunResult:
+        """Run code inside this session. State is preserved across calls.
+
+        timeout : int, optional
+            Per-run timeout in seconds. Uses the server default if unset; capped at the tier max.
+        """
+        body: dict = {"code": code, "language": language}
+        http_timeout: Optional[int] = None
+        if timeout is not None:
+            body["timeout"] = timeout
+            http_timeout = timeout + 15  # keep the HTTP wait above the guest timeout
+
+        resp = await self._client._post(f"/session/{self.id}/run", body, timeout=http_timeout)
         return RunResult._from_session_run(resp)
 
     async def exec(self, command: str, timeout: Optional[int] = None) -> RunResult:
