@@ -5,8 +5,7 @@ import "time"
 type TierName = string
 
 const (
-	Free = "free"
-	Pro  = "pro"
+	PAYG = "payg"
 )
 
 type TierConfig struct {
@@ -19,22 +18,12 @@ type TierConfig struct {
 	MaxSessions        int           // 0 = sessions not allowed for this tier
 	SessionIdleTimeout time.Duration // reaper evicts after this idle time
 	SessionMaxLifetime time.Duration // hard ceiling regardless of activity (0 = no limit)
+	RateUSDPerSec      float64       // billing rate — read from tier_configs in DB
 }
 
 var Tiers = map[string]TierConfig{
-	Free: {
-		Name:               Free,
-		RateLimit:          1000.0,
-		RateBurst:          100,
-		MaxExecTimeout:     10 * time.Second,
-		MinPoolSize:        0,
-		MaxPoolSize:        50,
-		MaxSessions:        50,
-		SessionIdleTimeout: 5 * time.Minute,
-		SessionMaxLifetime: 2 * time.Hour,
-	},
-	Pro: {
-		Name:               Pro,
+	PAYG: {
+		Name:               PAYG,
 		RateLimit:          1000.0,
 		RateBurst:          100,
 		MaxExecTimeout:     60 * time.Second,
@@ -43,13 +32,14 @@ var Tiers = map[string]TierConfig{
 		MaxSessions:        50,
 		SessionIdleTimeout: 15 * time.Minute,
 		SessionMaxLifetime: 24 * time.Hour,
+		RateUSDPerSec:      0.000020,
 	},
 }
 
-// Get returns the TierConfig for the given name, falling back to Free if unknown.
+// Get returns the TierConfig for the given name, falling back to PAYG if unknown.
 func Get(name string) TierConfig {
 	if tc, ok := Tiers[name]; ok {
 		return tc
 	}
-	return Tiers[Free]
+	return Tiers[PAYG]
 }

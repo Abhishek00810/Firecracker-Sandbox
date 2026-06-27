@@ -26,7 +26,7 @@ func ExecuteHandler(freeQueue *queue.JobQueue, premiumQueue *queue.JobQueue, fre
 		}
 
 		limiter := freeLimiter
-		if auth.Config.Name == tierconfig.Pro {
+		if auth.Config.Name == tierconfig.PAYG {
 			limiter = premiumLimiter
 		}
 
@@ -36,7 +36,7 @@ func ExecuteHandler(freeQueue *queue.JobQueue, premiumQueue *queue.JobQueue, fre
 		}
 
 		jobQueue := freeQueue
-		if auth.Config.Name == tierconfig.Pro {
+		if auth.Config.Name == tierconfig.PAYG {
 			jobQueue = premiumQueue
 		}
 
@@ -90,7 +90,9 @@ func ExecuteHandler(freeQueue *queue.JobQueue, premiumQueue *queue.JobQueue, fre
 			Language:      req.Language,
 			DurationMs:    int(duration * 1000),
 			ExitCode:      int(result.Result.ExitCode),
-			CostUSD:       0.0,
+			CostUSD:       duration * auth.RateUSDPerSec,
+			Stdout:        truncate(result.Result.Stdout, 64*1024),
+			Stderr:        truncate(result.Result.Stderr, 64*1024),
 		})
 
 		output := &ExecutionOutput{

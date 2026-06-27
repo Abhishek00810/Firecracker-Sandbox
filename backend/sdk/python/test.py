@@ -15,7 +15,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from renderops import Sandbox, Resources, NetworkConfig, APIError  # noqa: E402
 
-API_KEY = os.environ.get("RENDEROPS_API_KEY")
+# hardcoded defaults so it runs with no env setup; env still overrides.
+# ⚠️ contains a live API key — do NOT commit this file with the key.
+API_KEY = os.environ.get("RENDEROPS_API_KEY", "ro_live_9654c4d39bc996e7af312276c0bbb5eb")
 BASE_URL = os.environ.get("RENDEROPS_BASE_URL", "http://localhost:8080")
 if not API_KEY:
     sys.exit("set RENDEROPS_API_KEY")

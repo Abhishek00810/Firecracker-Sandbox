@@ -13,3 +13,10 @@ func insertUsageLogAsync(logger platform.UsageLogger, log platform.UsageLog) {
 		logger.InsertUsageLog(ctx, log)
 	}()
 }
+
+func truncate(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	return s[:maxBytes]
+}

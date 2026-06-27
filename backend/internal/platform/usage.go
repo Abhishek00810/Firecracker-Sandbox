@@ -18,6 +18,8 @@ type UsageLog struct {
 	DurationMs    int     `json:"duration_ms"`
 	ExitCode      int     `json:"exit_code"`
 	CostUSD       float64 `json:"cost_usd"`
+	Stdout        string  `json:"stdout"`
+	Stderr        string  `json:"stderr"`
 }
 
 // InsertUsageLog POSTs a usage event to Supabase. Intended to be called in a goroutine.

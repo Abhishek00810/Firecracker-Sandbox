@@ -61,7 +61,7 @@ func (m *Manager) Create(ctx context.Context, tier string, env map[string]string
 	t0 := time.Now()
 
 	pool := m.freePool
-	if tier == tierconfig.Pro {
+	if tier == tierconfig.PAYG {
 		pool = m.proPool
 	}
 	if pool == nil {

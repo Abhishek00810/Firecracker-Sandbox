@@ -73,8 +73,8 @@ func main() {
 		slog.Warn("cgroup init failed, limits will not be enforced", "err", err)
 	}
 
-	freeTc := tierconfig.Tiers[tierconfig.Free]
-	proTc := tierconfig.Tiers[tierconfig.Pro]
+	freeTc := tierconfig.Tiers[tierconfig.PAYG]
+	proTc := tierconfig.Tiers[tierconfig.PAYG]
 
 	// Network slots are pre-created by server.sh (SLOT_COUNT). The Go slot pool MUST
 	// match that count exactly: handing out a slot with no backing netns makes the

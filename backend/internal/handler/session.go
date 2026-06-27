@@ -195,7 +195,9 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				Language:      req.Language,
 				DurationMs:    int(execDurationMs),
 				ExitCode:      int(result.ExitCode),
-				CostUSD:       0.0,
+				CostUSD:       (execDurationMs / 1000.0) * auth.RateUSDPerSec,
+				Stdout:        truncate(result.Stdout, 64*1024),
+				Stderr:        truncate(result.Stderr, 64*1024),
 			})
 
 			w.Header().Set("Content-Type", "application/json")
@@ -277,7 +279,9 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				Language:      "bash",
 				DurationMs:    int(execDurationMs),
 				ExitCode:      int(result.ExitCode),
-				CostUSD:       0.0,
+				CostUSD:       (execDurationMs / 1000.0) * auth.RateUSDPerSec,
+				Stdout:        truncate(result.Stdout, 64*1024),
+				Stderr:        truncate(result.Stderr, 64*1024),
 			})
 
 			w.Header().Set("Content-Type", "application/json")
