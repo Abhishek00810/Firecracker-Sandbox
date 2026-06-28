@@ -1,0 +1,22 @@
+[Unit]
+Description=RenderOps Sandbox API (Firecracker backend)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# renderops-start.sh does host setup (slots, fcvm user, snapshot prep) then
+# exec's the compiled binary in-process, so exported env + sourced .env carry
+# through. Runs as root: Firecracker needs KVM, netns, iptables, cgroups, mounts.
+ExecStart=/home/renderopsadmin/Firecracker-Sandbox/renderops-start.sh
+Restart=on-failure
+RestartSec=3
+# Setup (slot rebuild) can take a bit before the binary execs.
+TimeoutStartSec=120
+StandardOutput=journal
+StandardError=journal
+# Give the API time to drain on stop before SIGKILL.
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
