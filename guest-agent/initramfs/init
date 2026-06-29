@@ -5,10 +5,11 @@ mount -t proc proc /proc
 mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev
 
-# Wait up to 50s for lower block device to appear
+# Wait up to 50s for the lower (/dev/vda, read-only rootfs) and writable (/dev/vdb,
+# per-VM upper disk) block devices to appear.
 i=0
 while [ $i -lt 50 ]; do
-    if [ -b /dev/vda ]; then
+    if [ -b /dev/vda ] && [ -b /dev/vdb ]; then
         break
     fi
     sleep 1
@@ -21,8 +22,10 @@ mkdir -p /lower /upper /merged
 # Mount lower layer (rootfs-alpine.ext4) read-only
 mount -o ro,norecovery /dev/vda /lower
 
-# Mount upper layer as tmpfs (RAM-backed, captured in snapshot, consistent across restore)
-mount -t tmpfs tmpfs /upper
+# Mount the upper layer from the per-VM writable disk (/dev/vdb). Disk-backed (not
+# tmpfs) so package installs (apt/pip/npm) and user files land on disk instead of RAM,
+# decoupling writable capacity from guest memory. The disk is a pre-formatted ext4.
+mount -o noatime /dev/vdb /upper
 
 # OverlayFS needs these two dirs inside upper
 mkdir -p /upper/upper /upper/work
@@ -36,6 +39,13 @@ mount -t overlay overlay \
 mount -o move /proc /merged/proc
 mount -o move /sys /merged/sys
 mount -o move /dev /merged/dev
+
+# Small, bounded RAM scratch for ephemeral fast paths. Size-capped so a runaway write
+# cannot exhaust guest memory, and kept off the disk overlay for speed. Mounted after
+# the /dev move so /dev/shm's parent exists in the new root.
+mkdir -p /merged/tmp /merged/dev/shm
+mount -t tmpfs -o size=64m,mode=1777 tmpfs /merged/tmp
+mount -t tmpfs -o size=64m,mode=1777 tmpfs /merged/dev/shm
 
 # Switch root into merged overlay and hand off to guest-agent
 exec switch_root /merged /usr/local/bin/guest-agent

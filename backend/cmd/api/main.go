@@ -123,6 +123,7 @@ func main() {
 	config := firecracker.VMConfig{
 		VCPUCount:  1, // 1 vCPU: halves thread pressure per VM → ~2x concurrency before the starvation cliff (test)
 		MemSizeMiB: 256,
+		DiskGB:     10, // per-VM writable disk (/dev/vdb) backing the overlay upper; sized at template build, decouples writable capacity from RAM
 		Timeout:    30 * time.Second,
 		KernelPath: cfg.KernelPath,
 		RootfsPath: cfg.RootfsPath,

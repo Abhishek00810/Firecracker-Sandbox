@@ -31,9 +31,15 @@ const (
 	VMStateDestroyed VMState = "destroyed"
 )
 
+// defaultWritableDiskGB sizes the per-VM writable upper disk when a VMConfig leaves
+// DiskGB unset. The upper layer is disk-backed (not tmpfs) so heavy installs land on
+// disk, not RAM. The size is fixed at template-build time and uniform across restores.
+const defaultWritableDiskGB = 10
+
 type VMConfig struct {
 	VCPUCount  int
 	MemSizeMiB int
+	DiskGB     int // size of the per-VM writable upper disk (/dev/vdb) in GiB; 0 = default
 	Timeout    time.Duration
 	KernelPath string
 	RootfsPath string
@@ -48,17 +54,18 @@ type VsockConfig struct {
 }
 
 type MicroVM struct {
-	ID         string
-	Config     VMConfig
-	State      VMState
-	VsockPath  string
-	SocketPath string
-	TapName    string // host TAP device name, empty if network setup failed
-	Slot       int    // network slot index (>= 0), or -1 for cold-boot VMs
-	CreatedAt  time.Time
-	Process    *exec.Cmd
-	Stdout     *bytes.Buffer
-	Stderr     *bytes.Buffer
+	ID               string
+	Config           VMConfig
+	State            VMState
+	VsockPath        string
+	SocketPath       string
+	WritableDiskPath string // per-VM writable upper disk (/dev/vdb) in OverlayFS mode; "" otherwise
+	TapName          string // host TAP device name, empty if network setup failed
+	Slot             int    // network slot index (>= 0), or -1 for cold-boot VMs
+	CreatedAt        time.Time
+	Process          *exec.Cmd
+	Stdout           *bytes.Buffer
+	Stderr           *bytes.Buffer
 }
 
 type NetworkInterface struct {
@@ -92,11 +99,12 @@ type FirecrackerConfig struct {
 }
 
 type SnapshotTemplate struct {
-	SnapPath   string // VM + device state file
-	MemPath    string // guest RAM file
-	RootfsPath string // kept so restored VMs can clone a fresh copy
-	VsockPath  string // vsock UDS path baked into snapshot — renamed after each restore
-	TapName    string // host TAP name baked into snapshot — recreated before each restore
+	SnapPath         string // VM + device state file
+	MemPath          string // guest RAM file
+	RootfsPath       string // shared read-only lower drive, re-pointed on each restore
+	WritableDiskPath string // golden writable upper disk at snapshot time; reflink-cloned per restore
+	VsockPath        string // vsock UDS path baked into snapshot — renamed after each restore
+	TapName          string // host TAP name baked into snapshot — recreated before each restore
 }
 
 type SnapshotCreateRequest struct {
@@ -366,6 +374,7 @@ func (f *FireCrackerManager) Create(ctx context.Context, cfg VMConfig) (*MicroVM
 	socketPath := f.getSocketPath(vmID)
 	vsockPath := filepath.Join(f.SocketDir, fmt.Sprintf("vsock-%s.sock", vmID))
 
+	var writableDiskPath string
 	if cfg.InitrdPath == "" {
 		// No initramfs: fall back to full rootfs copy (legacy cold boot)
 		rootfsCopy := filepath.Join(f.SocketDir, fmt.Sprintf("rootfs-%s.ext4", vmID))
@@ -373,19 +382,36 @@ func (f *FireCrackerManager) Create(ctx context.Context, cfg VMConfig) (*MicroVM
 			return nil, fmt.Errorf("failed to copy rootfs for VM %s: %w", vmID, err)
 		}
 		cfg.RootfsPath = rootfsCopy
+	} else {
+		// OverlayFS mode: the writable upper layer lives on a per-VM disk (/dev/vdb),
+		// not tmpfs — so installs and user files land on disk, not RAM. Pre-format an
+		// empty ext4 sized by DiskGB; the guest init mounts it as the overlay upperdir.
+		diskGB := cfg.DiskGB
+		if diskGB <= 0 {
+			diskGB = defaultWritableDiskGB
+		}
+		writableDiskPath = filepath.Join(f.SocketDir, fmt.Sprintf("writable-%s.ext4", vmID))
+		if err := makeExt4(writableDiskPath, diskGB); err != nil {
+			return nil, fmt.Errorf("failed to create writable disk for VM %s: %w", vmID, err)
+		}
+		// Firecracker drops to an unprivileged user (FCUid) and must open this disk
+		// read-write; the file was created here as root, so hand it ownership.
+		if err := f.chownForFC(writableDiskPath); err != nil {
+			os.Remove(writableDiskPath)
+			return nil, fmt.Errorf("chown writable disk for VM %s: %w", vmID, err)
+		}
 	}
-	// OverlayFS mode (InitrdPath != ""): no per-VM disk file needed — upper layer is tmpfs
-	// captured in the snapshot's RAM, recreated fresh on first boot.
 
 	vm := &MicroVM{
-		ID:         vmID,
-		Config:     cfg,
-		State:      VMStateCreated,
-		SocketPath: socketPath,
-		VsockPath:  vsockPath,
-		Slot:       -1, // cold-boot VM, not using slot pool
-		CreatedAt:  time.Now(),
-		Process:    nil,
+		ID:               vmID,
+		Config:           cfg,
+		State:            VMStateCreated,
+		SocketPath:       socketPath,
+		VsockPath:        vsockPath,
+		WritableDiskPath: writableDiskPath,
+		Slot:             -1, // cold-boot VM, not using slot pool
+		CreatedAt:        time.Now(),
+		Process:          nil,
 	}
 
 	f.mu.Lock()
@@ -410,6 +436,42 @@ func copyFile(src, dst string) error {
 
 	_, err = io.Copy(out, in)
 	return err
+}
+
+// makeExt4 creates a sparse, pre-formatted ext4 image of sizeGB at path. It backs the
+// per-VM writable upper layer (/dev/vdb) for OverlayFS-mode VMs. Sparse: the file only
+// consumes the blocks actually written, not the full sizeGB up front.
+func makeExt4(path string, sizeGB int) error {
+	if out, err := exec.Command("truncate", "-s", fmt.Sprintf("%dG", sizeGB), path).CombinedOutput(); err != nil {
+		return fmt.Errorf("truncate %s: %w: %s", path, err, out)
+	}
+	// -F: operate on a regular file (not a block device). -m 0: no reserved blocks, so
+	// the full disk is usable by the sandbox.
+	if out, err := exec.Command("mkfs.ext4", "-q", "-F", "-m", "0", path).CombinedOutput(); err != nil {
+		os.Remove(path)
+		return fmt.Errorf("mkfs.ext4 %s: %w: %s", path, err, out)
+	}
+	return nil
+}
+
+// chownForFC hands a backend-created file to the unprivileged user Firecracker drops to,
+// so the VMM can open it. A no-op when privilege drop is disabled (FCUid == 0).
+func (f *FireCrackerManager) chownForFC(path string) error {
+	if f.FCUid <= 0 {
+		return nil
+	}
+	return os.Chown(path, f.FCUid, f.FCGid)
+}
+
+// copyDiskReflink clones a disk image, preferring a copy-on-write reflink when the host
+// filesystem supports it (instant, no extra space until the copies diverge) and falling
+// back to a full sparse byte copy otherwise. Used to clone the golden writable disk for
+// each restored VM so they start from identical state but can diverge independently.
+func copyDiskReflink(src, dst string) error {
+	if out, err := exec.Command("cp", "--reflink=auto", "--sparse=always", src, dst).CombinedOutput(); err != nil {
+		return fmt.Errorf("cp %s -> %s: %w: %s", src, dst, err, out)
+	}
+	return nil
 }
 
 func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
@@ -469,7 +531,9 @@ func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
 	}
 
 	if vm.Config.InitrdPath != "" {
-		// OverlayFS mode: single read-only lower drive; upper layer is tmpfs (in RAM, no block device)
+		// OverlayFS mode: read-only lower drive (/dev/vda) + per-VM writable disk
+		// (/dev/vdb) that backs the overlay upper layer. Order matters: lower is
+		// attached first so the guest enumerates it as /dev/vda and writable as /dev/vdb.
 		if err := f.putJSON(client, "http://localhost/drives/lower", Drive{
 			DriveId:      "lower",
 			PathOnHost:   vm.Config.RootfsPath,
@@ -477,6 +541,14 @@ func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
 			IsReadOnly:   true,
 		}); err != nil {
 			return fmt.Errorf("failed to set lower drive: %w", err)
+		}
+		if err := f.putJSON(client, "http://localhost/drives/writable", Drive{
+			DriveId:      "writable",
+			PathOnHost:   vm.WritableDiskPath,
+			IsRootDevice: false,
+			IsReadOnly:   false,
+		}); err != nil {
+			return fmt.Errorf("failed to set writable drive: %w", err)
 		}
 	} else {
 		// Legacy mode: single writable rootfs copy
@@ -594,7 +666,11 @@ func (f *FireCrackerManager) Destroy(ctx context.Context, vmID string) error {
 	if vm.Config.InitrdPath == "" {
 		os.Remove(vm.Config.RootfsPath) // legacy: delete the VM-specific rootfs copy
 	}
-	// OverlayFS mode: lower is the shared rootfs (not deleted), upper is tmpfs in RAM (no file)
+	// OverlayFS mode: lower is the shared rootfs (not deleted); the per-VM writable
+	// upper disk is this VM's alone, so remove it.
+	if vm.WritableDiskPath != "" {
+		os.Remove(vm.WritableDiskPath)
+	}
 
 	// Slot-based VMs (snapshot restores): return the slot to the pool so the next
 	// restore can reuse the pre-created netns + TAP. Cold-boot VMs (template creation)
@@ -643,6 +719,7 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 	vmID := uuid.New().String()
 	socketPath := f.getSocketPath(vmID)
 	vsockPath := filepath.Join(f.SocketDir, fmt.Sprintf("vsock-%s.sock", vmID))
+	writableDiskPath := filepath.Join(f.SocketDir, fmt.Sprintf("writable-%s.ext4", vmID))
 
 	// Admission gate (tier-aware): bound concurrent provisioning so the host isn't
 	// stampeded. Pro prefers its reserve, Free uses the shared pool. Held until the VM
@@ -723,10 +800,24 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 		// Rename TAP back so the slot is reusable
 		exec.Command("ip", "netns", "exec", nsName, "ip", "link", "set", tmpl.TapName, "name", tapSlotName).Run()
 		f.slotPool.Release(slot)
+		os.Remove(writableDiskPath)
 	}
 
 	// Clean up stale vsock from a previous failed restore
 	os.Remove(tmpl.VsockPath)
+
+	// Clone the golden writable upper disk for this VM. It must be a copy of the disk as
+	// it was at snapshot time (not a fresh empty one): the resumed guest already has this
+	// ext4 mounted as the overlay upper, so its in-memory state must match the on-disk
+	// image. Reflink keeps this near-instant on a CoW host filesystem.
+	if err := copyDiskReflink(tmpl.WritableDiskPath, writableDiskPath); err != nil {
+		restoreCleanup()
+		return nil, fmt.Errorf("clone writable disk failed: %w", err)
+	}
+	if err := f.chownForFC(writableDiskPath); err != nil {
+		restoreCleanup()
+		return nil, fmt.Errorf("chown writable disk failed: %w", err)
+	}
 
 	// Load snapshot paused — Firecracker (in nsName) opens tmpl.TapName inside the netns
 	if err := f.putJSON(client, "http://localhost/snapshot/load", SnapshotLoadRequest{
@@ -741,13 +832,21 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 	snapshotLoadMs := time.Since(lastPhase).Milliseconds()
 	lastPhase = time.Now()
 
-	// Update lower drive — shared template rootfs (read-only); upper is tmpfs in RAM
+	// Update lower drive — shared template rootfs (read-only)
 	if err := f.patchJSON(client, "http://localhost/drives/lower", map[string]string{
 		"drive_id":     "lower",
 		"path_on_host": tmpl.RootfsPath,
 	}); err != nil {
 		restoreCleanup()
 		return nil, fmt.Errorf("lower drive update failed: %w", err)
+	}
+	// Re-point the writable upper drive (/dev/vdb) at this VM's per-VM clone before resume.
+	if err := f.patchJSON(client, "http://localhost/drives/writable", map[string]string{
+		"drive_id":     "writable",
+		"path_on_host": writableDiskPath,
+	}); err != nil {
+		restoreCleanup()
+		return nil, fmt.Errorf("writable drive update failed: %w", err)
 	}
 	drivePatchMs := time.Since(lastPhase).Milliseconds()
 	lastPhase = time.Now()
@@ -782,17 +881,18 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 	// no virtio-vsock teardown interrupt, no ~4s stall.
 
 	vm := &MicroVM{
-		ID:         vmID,
-		Config:     cfg,
-		State:      VMStateRunning,
-		SocketPath: socketPath,
-		VsockPath:  vsockPath,
-		TapName:    tapSlotName,
-		Slot:       slot,
-		CreatedAt:  time.Now(),
-		Process:    cmd,
-		Stdout:     &stdout,
-		Stderr:     &stderr,
+		ID:               vmID,
+		Config:           cfg,
+		State:            VMStateRunning,
+		SocketPath:       socketPath,
+		VsockPath:        vsockPath,
+		WritableDiskPath: writableDiskPath,
+		TapName:          tapSlotName,
+		Slot:             slot,
+		CreatedAt:        time.Now(),
+		Process:          cmd,
+		Stdout:           &stdout,
+		Stderr:           &stderr,
 	}
 
 	f.mu.Lock()
@@ -912,6 +1012,7 @@ func (f *FireCrackerManager) CreateTemplate(ctx context.Context, cfg VMConfig, s
 	// Partial cleanup: kill process and remove sockets but KEEP rootfs copy.
 	// Also delete the TAP so it's free to be recreated for each restore.
 	rootfsPath := vm.Config.RootfsPath
+	writablePath := vm.WritableDiskPath
 	tapName := vm.TapName
 	vsockPath := vm.VsockPath
 	f.mu.Lock()
@@ -927,14 +1028,15 @@ func (f *FireCrackerManager) CreateTemplate(ctx context.Context, cfg VMConfig, s
 	if tapName != "" {
 		exec.Command("ip", "link", "delete", tapName).Run()
 	}
-	// rootfsPath intentionally NOT removed — restored VMs will clone from it
+	// rootfsPath and writablePath intentionally NOT removed — restored VMs clone from them
 
-	slog.Info("snapshot template created", "snap", snapPath, "mem", memPath)
+	slog.Info("snapshot template created", "snap", snapPath, "mem", memPath, "writable_disk", writablePath)
 	return &SnapshotTemplate{
-		SnapPath:   snapPath,
-		MemPath:    memPath,
-		RootfsPath: rootfsPath,
-		VsockPath:  vsockPath,
-		TapName:    tapName,
+		SnapPath:         snapPath,
+		MemPath:          memPath,
+		RootfsPath:       rootfsPath,
+		WritableDiskPath: writablePath,
+		VsockPath:        vsockPath,
+		TapName:          tapName,
 	}, nil
 }
