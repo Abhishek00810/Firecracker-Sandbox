@@ -9,6 +9,14 @@ import (
 	"time"
 )
 
+// SessionState is the lifecycle state of a session.
+type SessionState string
+
+const (
+	StateActive SessionState = "active" // live VM holding a slot + RAM
+	StatePaused SessionState = "paused" // snapshotted to disk; no live VM, slot/RAM freed
+)
+
 type Session struct {
 	ID               string
 	VM               *firecracker.MicroVM
@@ -17,18 +25,29 @@ type Session struct {
 	VCPUs            int // allocated compute shape — the billing basis
 	MemoryMB         int
 	DiskGB           int
-	Internet         bool // egress allowed (false = network-isolated)
-	IdleTimeout      time.Duration // reaper evicts after this idle time (per-session)
+	Internet         bool          // egress allowed (false = network-isolated)
+	IdleTimeout      time.Duration // reaper pauses after this idle time (per-session)
 	MaxLifetime      time.Duration // hard ceiling regardless of activity (0 = no limit)
 	CreatedAt        time.Time
 	LastUsed         time.Time
 	RunCount         int
 	TotalExecutionMs float64
 	LastExitCode     *int
-	mu               sync.Mutex            // serializes concurrent runs on same session
-	PooledVM         *firecracker.PooledVM // non-nil when VM came from a pool
-	Pool             *firecracker.VMPool   // which pool to release back to (matches PooledVM)
+	mu               sync.Mutex            // serializes concurrent runs + pause/resume on same session
+	PooledVM         *firecracker.PooledVM // non-nil when VM came from a pool (active only)
+	Pool             *firecracker.VMPool   // which pool the VM came from (active only)
 	VsockConn        net.Conn              // persistent vsock connection, reused across all calls
+
+	// Auto-pause state. When State == StatePaused the VM is gone and these describe how
+	// to resume it: restore from SnapPath/MemPath, reattach WritableDiskPath in place,
+	// re-bake VsockPathAtPause + TapNameAtPause. All persisted to the recovery manifest.
+	State            SessionState
+	PausedAt         time.Time
+	SnapPath         string // per-session VM-state snapshot file (on disk, not /dev/shm)
+	MemPath          string // per-session guest-RAM snapshot file
+	WritableDiskPath string // the session's writable upper disk — survives across pause
+	VsockPathAtPause string // vsock UDS path baked into the session snapshot
+	TapNameAtPause   string // host TAP name baked into the session snapshot
 }
 
 type Store struct {

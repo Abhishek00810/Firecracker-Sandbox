@@ -261,6 +261,14 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Warn("http server shutdown error", "err", err)
 	}
+
+	// Graceful pause: snapshot every active session to disk before teardown so a deploy
+	// or restart preserves user state (recovered from the manifest on next start) instead
+	// of destroying it. Bounded by systemd's TimeoutStopSec — ensure that is generous.
+	pauseCtx, pauseCancel := context.WithTimeout(context.Background(), 50*time.Second)
+	sessionMgr.PauseAllActive(pauseCtx)
+	pauseCancel()
+
 	freePool.Shutdown()
 	premiumPool.Shutdown()
 	sessionMgr.Shutdown(context.Background())

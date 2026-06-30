@@ -646,6 +646,20 @@ func (f *FireCrackerManager) Stop(ctx context.Context, vmID string) error {
 }
 
 func (f *FireCrackerManager) Destroy(ctx context.Context, vmID string) error {
+	return f.teardown(ctx, vmID, false)
+}
+
+// TeardownKeepDisk tears down a VM exactly like Destroy but PRESERVES its writable
+// upper disk. Used by auto-pause: the session's state lives on that disk, so it must
+// survive while the VM itself (process + slot + cgroup) is released to free the host.
+func (f *FireCrackerManager) TeardownKeepDisk(ctx context.Context, vmID string) error {
+	return f.teardown(ctx, vmID, true)
+}
+
+// teardown stops a VM and releases its host resources. When keepDisk is true the
+// per-VM writable upper disk is left on disk (the caller still owns it — e.g. a paused
+// session); otherwise it is removed.
+func (f *FireCrackerManager) teardown(ctx context.Context, vmID string, keepDisk bool) error {
 	f.mu.Lock()
 	vm, exists := f.Vms[vmID]
 	if !exists {
@@ -667,8 +681,9 @@ func (f *FireCrackerManager) Destroy(ctx context.Context, vmID string) error {
 		os.Remove(vm.Config.RootfsPath) // legacy: delete the VM-specific rootfs copy
 	}
 	// OverlayFS mode: lower is the shared rootfs (not deleted); the per-VM writable
-	// upper disk is this VM's alone, so remove it.
-	if vm.WritableDiskPath != "" {
+	// upper disk is this VM's alone, so remove it — unless the caller is keeping it
+	// (a paused session whose state lives on that disk).
+	if !keepDisk && vm.WritableDiskPath != "" {
 		os.Remove(vm.WritableDiskPath)
 	}
 
@@ -713,13 +728,33 @@ func (f *FireCrackerManager) Snapshot(ctx context.Context, vmID, snapPath, memPa
 	})
 }
 
+// LoadFromSnapshot restores a fresh pool VM from the golden template, cloning the
+// golden writable disk so every VM starts identical but can diverge.
 func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig, tmpl *SnapshotTemplate) (*MicroVM, error) {
+	return f.loadSnapshot(ctx, cfg, tmpl, true)
+}
+
+// ResumeFromSnapshot restores a paused session from ITS OWN snapshot, reattaching the
+// session's existing writable disk in place (no clone) so its state is preserved.
+func (f *FireCrackerManager) ResumeFromSnapshot(ctx context.Context, cfg VMConfig, tmpl *SnapshotTemplate) (*MicroVM, error) {
+	return f.loadSnapshot(ctx, cfg, tmpl, false)
+}
+
+// loadSnapshot is the shared restore path. cloneDisk=true clones tmpl.WritableDiskPath
+// into a fresh per-VM disk (pool boot); cloneDisk=false attaches tmpl.WritableDiskPath
+// directly and never deletes it on cleanup (paused-session resume).
+func (f *FireCrackerManager) loadSnapshot(ctx context.Context, cfg VMConfig, tmpl *SnapshotTemplate, cloneDisk bool) (*MicroVM, error) {
 	t0 := time.Now()
 	lastPhase := t0
 	vmID := uuid.New().String()
 	socketPath := f.getSocketPath(vmID)
 	vsockPath := filepath.Join(f.SocketDir, fmt.Sprintf("vsock-%s.sock", vmID))
-	writableDiskPath := filepath.Join(f.SocketDir, fmt.Sprintf("writable-%s.ext4", vmID))
+	// cloneDisk: give this VM its own copy of the golden disk. Otherwise reuse the
+	// session's existing disk in place (and don't remove it on cleanup).
+	writableDiskPath := tmpl.WritableDiskPath
+	if cloneDisk {
+		writableDiskPath = filepath.Join(f.SocketDir, fmt.Sprintf("writable-%s.ext4", vmID))
+	}
 
 	// Admission gate (tier-aware): bound concurrent provisioning so the host isn't
 	// stampeded. Pro prefers its reserve, Free uses the shared pool. Held until the VM
@@ -800,23 +835,30 @@ func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig,
 		// Rename TAP back so the slot is reusable
 		exec.Command("ip", "netns", "exec", nsName, "ip", "link", "set", tmpl.TapName, "name", tapSlotName).Run()
 		f.slotPool.Release(slot)
-		os.Remove(writableDiskPath)
+		// Only remove a disk we created for this VM (clone path). A resumed session's
+		// disk is the caller's state — never delete it on a failed resume.
+		if cloneDisk {
+			os.Remove(writableDiskPath)
+		}
 	}
 
 	// Clean up stale vsock from a previous failed restore
 	os.Remove(tmpl.VsockPath)
 
-	// Clone the golden writable upper disk for this VM. It must be a copy of the disk as
-	// it was at snapshot time (not a fresh empty one): the resumed guest already has this
-	// ext4 mounted as the overlay upper, so its in-memory state must match the on-disk
-	// image. Reflink keeps this near-instant on a CoW host filesystem.
-	if err := copyDiskReflink(tmpl.WritableDiskPath, writableDiskPath); err != nil {
-		restoreCleanup()
-		return nil, fmt.Errorf("clone writable disk failed: %w", err)
-	}
-	if err := f.chownForFC(writableDiskPath); err != nil {
-		restoreCleanup()
-		return nil, fmt.Errorf("chown writable disk failed: %w", err)
+	// Clone the golden writable upper disk for this VM (pool boot only). It must be a copy
+	// of the disk as it was at snapshot time (not a fresh empty one): the resumed guest
+	// already has this ext4 mounted as the overlay upper, so its in-memory state must match
+	// the on-disk image. Reflink keeps this near-instant on a CoW host filesystem. On a
+	// session resume (cloneDisk=false) the session's existing disk is attached in place.
+	if cloneDisk {
+		if err := copyDiskReflink(tmpl.WritableDiskPath, writableDiskPath); err != nil {
+			restoreCleanup()
+			return nil, fmt.Errorf("clone writable disk failed: %w", err)
+		}
+		if err := f.chownForFC(writableDiskPath); err != nil {
+			restoreCleanup()
+			return nil, fmt.Errorf("chown writable disk failed: %w", err)
+		}
 	}
 
 	// Load snapshot paused — Firecracker (in nsName) opens tmpl.TapName inside the netns

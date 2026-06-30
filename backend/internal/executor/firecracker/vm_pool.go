@@ -297,6 +297,15 @@ func (p *VMPool) Release(vm *PooledVM) {
 	}()
 }
 
+// Forget removes a VM from the pool's accounting WITHOUT destroying it. Used by
+// auto-pause: the session takes ownership of teardown (snapshot + keep-disk), so the
+// pool must stop tracking the VM and free the capacity slot it occupied under maxSize.
+func (p *VMPool) Forget(vmID string) {
+	p.mu.Lock()
+	delete(p.vmMap, vmID)
+	p.mu.Unlock()
+}
+
 // reaper periodically reclaims VMs left sitting idle in the pool — primarily ones
 // that were provisioned for a request whose Acquire timed out before claiming them.
 // Without this they hold a Firecracker proc + network slot + cgroup indefinitely.

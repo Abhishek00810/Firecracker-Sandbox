@@ -323,7 +323,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				RequestID: requestID,
 				Session: &SessionDetail{
 					SessionID: sess.ID,
-					State:     "active",
+					State:     string(sess.State),
 					Tier:      sess.Tier,
 					CreatedAt: sess.CreatedAt.Format(time.RFC3339),
 					LastUsed:  sess.LastUsed.Format(time.RFC3339),
