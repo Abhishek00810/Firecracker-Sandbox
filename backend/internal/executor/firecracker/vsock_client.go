@@ -186,6 +186,30 @@ func (v *VsockClient) Connect() (net.Conn, error) {
 	return v.dial()
 }
 
+// ResetRuntimesOnConn tells the guest agent to tear down all stateful language runtimes
+// (Python kernels, Node bridge, bash shell) so the next execution starts fresh. Used on
+// resume for a consistent cross-language contract (in-memory interpreter state resets;
+// filesystem/env persist) and to avoid ZMQ kernels left degraded by a snapshot restore.
+func (v *VsockClient) ResetRuntimesOnConn(conn net.Conn) error {
+	req := struct {
+		Type string `json:"type"`
+	}{Type: "reset_runtimes"}
+
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		return fmt.Errorf("send reset_runtimes: %w", err)
+	}
+
+	var resp struct {
+		Success bool `json:"success"`
+	}
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		return fmt.Errorf("read reset_runtimes response: %w", err)
+	}
+	conn.SetDeadline(time.Time{})
+	return nil
+}
+
 // SetEnvOnConn sends a set_env message on an existing persistent connection.
 func (v *VsockClient) SetEnvOnConn(conn net.Conn, env map[string]string) error {
 	req := struct {

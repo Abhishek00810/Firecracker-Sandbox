@@ -145,6 +145,7 @@ func (m *Manager) Create(ctx context.Context, tier string, env map[string]string
 		VCPUs:       vcpus,
 		MemoryMB:    memoryMB,
 		DiskGB:      diskGB,
+		Env:         env,
 		Internet:    internet,
 		IdleTimeout: idleTimeout,
 		MaxLifetime: maxLifetime,
@@ -157,7 +158,10 @@ func (m *Manager) Create(ctx context.Context, tier string, env map[string]string
 		return nil, err
 	}
 
-	// Open a persistent vsock connection for this session — reused for all exec/run calls
+	// Hold ONE persistent vsock connection for the whole session, reused for every exec/run.
+	// A snapshot-restored VM accepts exactly one vsock connection, so per-connection execs
+	// don't work — the persistent connection is the correct (and only) model. Pause closes
+	// it (agent returns to accept, snapshot captures that state); resume opens a fresh one.
 	vsockClient := firecracker.NewVsockClient(pvm.VM.VsockPath)
 	conn, err := vsockClient.Connect()
 	if err != nil {
@@ -339,18 +343,18 @@ func (m *Manager) Pause(ctx context.Context, sessionID string) error {
 	sess.TapNameAtPause = m.template.TapName
 	sess.WritableDiskPath = sess.VM.WritableDiskPath
 
-	// Close the persistent connection FIRST and let the guest agent fall back into its
-	// accept() loop before we freeze the VM. The agent only re-initializes its vsock
-	// listener when a blocked accept() breaks on restore — so it must be waiting in
-	// accept() at snapshot time (the same state the template is captured in). If we
-	// snapshot while it's blocked reading the persistent connection, it never re-accepts
-	// on resume and the first post-resume exec hangs.
+	// Close the persistent connection and let the guest agent fall back into accept()
+	// BEFORE we freeze the VM. On a live (not-yet-frozen) VM the close propagates normally,
+	// so the agent's blocked read returns and it loops back to accept() — the state a
+	// snapshot restores cleanly from. (We must snapshot with the agent in accept(): a VM
+	// captured mid-read can't be talked to after resume.)
 	if sess.VsockConn != nil {
 		sess.VsockConn.Close()
+		sess.VsockConn = nil
 	}
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(400 * time.Millisecond)
 
-	// Snapshot pauses the vCPUs and writes VM + RAM state to disk (NOT /dev/shm).
+	// Snapshot: pauses the vCPUs and writes VM + RAM state to disk (NOT /dev/shm).
 	if err := m.vmManager.Snapshot(ctx, vmID, snapPath, memPath); err != nil {
 		return fmt.Errorf("snapshot for pause: %w", err)
 	}
@@ -435,46 +439,32 @@ func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 			cg = nil
 		}
 	}
+	// Let the guest agent re-initialize its vsock listener after the restore (accept()
+	// breaks on restore → the agent rebuilds its listener) before we open the connection.
+	time.Sleep(500 * time.Millisecond)
 
-	// Wait for the guest agent's vsock listener to come back after restore — virtio-vsock
-	// resets on snapshot restore, so the agent must reinitialize before it can serve. This
-	// mirrors the pool's post-restore readiness wait; without it the first exec races the
-	// guest and times out.
-	vsockReady := false
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		if ok, _, _ := firecracker.NewVsockClient(vm.VsockPath).Ping(); ok {
-			vsockReady = true
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	if !vsockReady {
-		console := ""
-		if vm.Stdout != nil {
-			console = vm.Stdout.String()
-		}
-		serr := ""
-		if vm.Stderr != nil {
-			serr = vm.Stderr.String()
-		}
-		slog.Error("vsock not ready after resume", "session_id", sessionID, "vm_id", vm.ID,
-			"vsock_path", vm.VsockPath, "console", console, "stderr", serr)
-		if cg != nil {
-			cg.Destroy()
-		}
-		m.vmManager.Destroy(ctx, vm.ID)
-		return fmt.Errorf("vsock not ready after resume for session %s", sessionID)
-	}
-
-	// Re-open the persistent vsock connection for this session.
-	conn, err := firecracker.NewVsockClient(vm.VsockPath).Connect()
+	// Open a fresh persistent connection — this is the ONE vsock connection the restored VM
+	// allows, reused for every subsequent exec/run (its CONNECT waits for the agent to accept).
+	vsockClient := firecracker.NewVsockClient(vm.VsockPath)
+	conn, err := vsockClient.Connect()
 	if err != nil {
 		if cg != nil {
 			cg.Destroy()
 		}
 		m.vmManager.Destroy(ctx, vm.ID)
 		return fmt.Errorf("vsock connect on resume: %w", err)
+	}
+
+	// Reset all stateful runtimes so in-memory interpreter state is consistently cleared on
+	// pause across every language (a snapshot restore can also leave ZMQ Python kernels
+	// degraded). Then re-inject the session's env so config still persists across the pause.
+	if err := vsockClient.ResetRuntimesOnConn(conn); err != nil {
+		slog.Warn("reset_runtimes on resume failed", "session_id", sessionID, "err", err)
+	}
+	if len(sess.Env) > 0 {
+		if err := vsockClient.SetEnvOnConn(conn, sess.Env); err != nil {
+			slog.Warn("re-inject env on resume failed", "session_id", sessionID, "err", err)
+		}
 	}
 
 	sess.VM = vm

@@ -25,7 +25,8 @@ type Session struct {
 	VCPUs            int // allocated compute shape — the billing basis
 	MemoryMB         int
 	DiskGB           int
-	Internet         bool          // egress allowed (false = network-isolated)
+	Env              map[string]string // env vars, re-injected into the fresh shell on resume
+	Internet         bool              // egress allowed (false = network-isolated)
 	IdleTimeout      time.Duration // reaper pauses after this idle time (per-session)
 	MaxLifetime      time.Duration // hard ceiling regardless of activity (0 = no limit)
 	CreatedAt        time.Time

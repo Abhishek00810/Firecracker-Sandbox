@@ -19,10 +19,11 @@ import (
 type pausedRecord struct {
 	ID               string    `json:"id"`
 	Tier             string    `json:"tier"`
-	VCPUs            int       `json:"vcpus"`
-	MemoryMB         int       `json:"memory_mb"`
-	DiskGB           int       `json:"disk_gb"`
-	Internet         bool      `json:"internet"`
+	VCPUs            int               `json:"vcpus"`
+	MemoryMB         int               `json:"memory_mb"`
+	DiskGB           int               `json:"disk_gb"`
+	Env              map[string]string `json:"env,omitempty"`
+	Internet         bool              `json:"internet"`
 	IdleTimeoutNs    int64     `json:"idle_timeout_ns"`
 	MaxLifetimeNs    int64     `json:"max_lifetime_ns"`
 	CreatedAt        time.Time `json:"created_at"`
@@ -41,6 +42,7 @@ func recordFromSession(s *Session) pausedRecord {
 		VCPUs:            s.VCPUs,
 		MemoryMB:         s.MemoryMB,
 		DiskGB:           s.DiskGB,
+		Env:              s.Env,
 		Internet:         s.Internet,
 		IdleTimeoutNs:    int64(s.IdleTimeout),
 		MaxLifetimeNs:    int64(s.MaxLifetime),
@@ -61,6 +63,7 @@ func (r pausedRecord) toSession() *Session {
 		VCPUs:            r.VCPUs,
 		MemoryMB:         r.MemoryMB,
 		DiskGB:           r.DiskGB,
+		Env:              r.Env,
 		Internet:         r.Internet,
 		IdleTimeout:      time.Duration(r.IdleTimeoutNs),
 		MaxLifetime:      time.Duration(r.MaxLifetimeNs),

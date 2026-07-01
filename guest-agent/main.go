@@ -178,6 +178,31 @@ func evictKernel(language string) {
 	kernelsMu.Unlock()
 }
 
+// resetRuntimes tears down every stateful language runtime (all Python kernels, the Node
+// bridge, and the bash shell), killing the processes so the next execution starts fresh.
+// Called on resume: a snapshot restore can leave ZMQ-based kernels degraded, and for a
+// consistent cross-language contract we reset in-memory interpreter state on every pause
+// (the filesystem, installed packages, and re-injected env vars still persist).
+func resetRuntimes() {
+	kernelsMu.Lock()
+	for lang, kb := range kernels {
+		if kb != nil && kb.cmd != nil && kb.cmd.Process != nil {
+			kb.cmd.Process.Kill()
+		}
+		delete(kernels, lang)
+	}
+	kernelsMu.Unlock()
+
+	nodeBridgeMu.Lock()
+	if nodeBridge != nil && nodeBridge.cmd != nil && nodeBridge.cmd.Process != nil {
+		nodeBridge.cmd.Process.Kill()
+	}
+	nodeBridge = nil
+	nodeBridgeMu.Unlock()
+
+	evictShell()
+}
+
 // ─── Node Bridge ──────────────────────────────────────────────────────────────
 
 // NodeBridge wraps a long-lived node_bridge.js process.
@@ -953,6 +978,13 @@ func handleConnection(connFd int) {
 		}
 		if msg.Type == "set_env" {
 			handleSetEnv(conn, msg.Env)
+			continue
+		}
+		if msg.Type == "reset_runtimes" {
+			resetRuntimes()
+			json.NewEncoder(conn).Encode(struct {
+				Success bool `json:"success"`
+			}{true})
 			continue
 		}
 		if msg.Type == "exec" {
