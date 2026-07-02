@@ -267,7 +267,7 @@ func newTestServer(t *testing.T, deps testDeps) http.Handler {
 	mux.HandleFunc("/session", handler.SessionHandler(sessionSvc, resolver))
 	mux.HandleFunc("/session/", handler.SessionHandler(sessionSvc, resolver))
 
-	return middleware.Logging(middleware.Auth(resolver)(mux))
+	return middleware.Logging(middleware.Auth(resolver, "http://supabase.test")(mux))
 }
 
 type fakeExecutor struct {
@@ -309,6 +309,10 @@ func (f *fakePlatformService) InsertUsageLog(ctx context.Context, log platform.U
 func (f *fakePlatformService) UpsertSandbox(ctx context.Context, sb platform.Sandbox)      {}
 func (f *fakePlatformService) UpdateSandboxState(ctx context.Context, id, state string)    {}
 func (f *fakePlatformService) InsertSandboxLog(ctx context.Context, l platform.SandboxLog) {}
+
+func (f *fakePlatformService) GetProfile(userID string) (platform.Profile, error) {
+	return platform.Profile{Tier: f.record.Tier, FreeUSDRemaining: f.record.FreeUSDRemaining}, nil
+}
 
 type fakeSessionService struct {
 	mu       sync.Mutex

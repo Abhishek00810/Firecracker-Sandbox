@@ -78,8 +78,15 @@ func (c *keyCache) set(hash string, record platform.KeyRecord) {
 // Auth returns middleware that validates Bearer tokens against Supabase.
 // Keys are cached for 60 seconds to avoid a DB round-trip on every request.
 // A revoked key can still be used for up to 60 seconds after revocation.
-func Auth(pc platform.KeyResolver) func(http.Handler) http.Handler {
+// AuthResolver resolves an SDK API key or a dashboard user (via Supabase JWT) to identity.
+type AuthResolver interface {
+	ResolveKey(keyHash string) (platform.KeyRecord, error)
+	GetProfile(userID string) (platform.Profile, error)
+}
+
+func Auth(pc AuthResolver, supabaseURL string) func(http.Handler) http.Handler {
 	var cache AuthCache = newKeyCache(60 * time.Second)
+	jwtv := newJWTVerifier(supabaseURL)
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -96,6 +103,38 @@ func Auth(pc platform.KeyResolver) func(http.Handler) http.Handler {
 				return
 			}
 			key := strings.TrimPrefix(raw, "Bearer ")
+
+			// Dashboard path: a Supabase user JWT (verified against the project's public
+			// JWKS) authenticates as that user — no API key needed. API keys have no dots.
+			if looksLikeJWT(key) {
+				sub, err := jwtv.verify(key)
+				if err != nil {
+					slog.Warn("auth: jwt verification failed", "err", err)
+					writeAuthError(w, http.StatusUnauthorized, "invalid session token")
+					return
+				}
+				prof, err := pc.GetProfile(sub)
+				if err != nil {
+					slog.Warn("auth: profile lookup failed", "user_id", sub, "err", err)
+					writeAuthError(w, http.StatusUnauthorized, "user profile not found")
+					return
+				}
+				if prof.FreeUSDRemaining <= 0 {
+					writeAuthError(w, http.StatusPaymentRequired, "insufficient balance — add credits to continue")
+					return
+				}
+				tc := tierconfig.Get(prof.Tier)
+				info := AuthInfo{
+					TenantID:         sub,
+					APIKeyID:         "",
+					Config:           tc,
+					FreeUSDRemaining: prof.FreeUSDRemaining,
+					RateUSDPerSec:    tc.RateUSDPerSec,
+				}
+				ctx := context.WithValue(r.Context(), authInfoKey{}, info)
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
 
 			hash := sha256Hex(key)
 
