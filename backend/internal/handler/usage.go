@@ -14,6 +14,37 @@ func insertUsageLogAsync(logger platform.UsageLogger, log platform.UsageLog) {
 	}()
 }
 
+func upsertSandboxAsync(w platform.UsageLogger, sb platform.Sandbox) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		w.UpsertSandbox(ctx, sb)
+	}()
+}
+
+func updateSandboxStateAsync(w platform.UsageLogger, id, state string) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		w.UpdateSandboxState(ctx, id, state)
+	}()
+}
+
+// writeSandboxLogsAsync appends a sandbox's execution output (stdout/stderr) to
+// sandbox_logs so the dashboard's log viewer has data. Best-effort, off the request path.
+func writeSandboxLogsAsync(w platform.UsageLogger, sandboxID, userID, language, stdout, stderr string) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if stdout != "" {
+			w.InsertSandboxLog(ctx, platform.SandboxLog{SandboxID: sandboxID, UserID: userID, Stream: "stdout", Language: language, Content: truncate(stdout, 64*1024)})
+		}
+		if stderr != "" {
+			w.InsertSandboxLog(ctx, platform.SandboxLog{SandboxID: sandboxID, UserID: userID, Stream: "stderr", Language: language, Content: truncate(stderr, 64*1024)})
+		}
+	}()
+}
+
 func truncate(s string, maxBytes int) string {
 	if len(s) <= maxBytes {
 		return s

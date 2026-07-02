@@ -120,6 +120,28 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				CostUSD:       0.0,
 			})
 
+			// Register the sandbox in the DB (the dashboard's source of truth for listing).
+			name := createReq.Name
+			if name == "" {
+				name = "sandbox"
+			}
+			diskGB := size.DiskGB
+			if diskGB == 0 {
+				diskGB = 10 // actual provisioned per-VM disk until per-size templates exist
+			}
+			upsertSandboxAsync(usageLogger, platform.Sandbox{
+				ID:       sess.ID,
+				UserID:   auth.TenantID,
+				APIKeyID: auth.APIKeyID,
+				Name:     name,
+				State:    "active",
+				Tier:     auth.Config.Name,
+				VCPUs:    size.VCPUs,
+				MemoryMB: size.MemoryMB,
+				DiskGB:   diskGB,
+				Internet: internet,
+			})
+
 		// POST /session/:id/run — execute code in session
 		case r.Method == http.MethodPost && strings.HasSuffix(path, "/run"):
 			sessionID := strings.TrimSuffix(path, "/run")
@@ -206,6 +228,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				Stdout:        truncate(result.Stdout, 64*1024),
 				Stderr:        truncate(result.Stderr, 64*1024),
 			})
+			writeSandboxLogsAsync(usageLogger, sessionID, auth.TenantID, req.Language, result.Stdout, result.Stderr)
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(runResp)
@@ -290,9 +313,42 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				Stdout:        truncate(result.Stdout, 64*1024),
 				Stderr:        truncate(result.Stderr, 64*1024),
 			})
+			writeSandboxLogsAsync(usageLogger, sessionID, auth.TenantID, "bash", result.Stdout, result.Stderr)
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(execResp)
+
+			// POST /session/:id/pause — pause session (snapshot to disk, free RAM/slot)
+		case r.Method == http.MethodPost && strings.HasSuffix(path, "/pause"):
+			sessionID := strings.TrimSuffix(path, "/pause")
+			if sessionID == "" {
+				http.Error(w, "missing session id", http.StatusBadRequest)
+				return
+			}
+			if err := mgr.Pause(r.Context(), sessionID); err != nil {
+				slog.Error("session pause failed", "session_id", sessionID, "err", err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			updateSandboxStateAsync(usageLogger, sessionID, "paused")
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"status": "success", "session_id": sessionID, "state": "paused"})
+
+			// POST /session/:id/resume — resume a paused session
+		case r.Method == http.MethodPost && strings.HasSuffix(path, "/resume"):
+			sessionID := strings.TrimSuffix(path, "/resume")
+			if sessionID == "" {
+				http.Error(w, "missing session id", http.StatusBadRequest)
+				return
+			}
+			if err := mgr.Resume(r.Context(), sessionID); err != nil {
+				slog.Error("session resume failed", "session_id", sessionID, "err", err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			updateSandboxStateAsync(usageLogger, sessionID, "active")
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"status": "success", "session_id": sessionID, "state": "active"})
 
 			// DELETE /session/:id — destroy session
 		case r.Method == http.MethodDelete && path != "":
@@ -303,6 +359,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				http.Error(w, err.Error(), http.StatusNotFound)
 				return
 			}
+			updateSandboxStateAsync(usageLogger, sessionID, "destroyed")
 
 			w.WriteHeader(http.StatusNoContent)
 

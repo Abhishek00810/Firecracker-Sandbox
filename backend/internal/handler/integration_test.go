@@ -306,6 +306,10 @@ func (f *fakePlatformService) InsertUsageLog(ctx context.Context, log platform.U
 	}
 }
 
+func (f *fakePlatformService) UpsertSandbox(ctx context.Context, sb platform.Sandbox)      {}
+func (f *fakePlatformService) UpdateSandboxState(ctx context.Context, id, state string)    {}
+func (f *fakePlatformService) InsertSandboxLog(ctx context.Context, l platform.SandboxLog) {}
+
 type fakeSessionService struct {
 	mu       sync.Mutex
 	sessions map[string]*session.Session
@@ -363,6 +367,9 @@ func (f *fakeSessionService) Execute(ctx context.Context, sessionID, code, langu
 		GuestDuration:     0.007,
 	}, nil
 }
+
+func (f *fakeSessionService) Pause(ctx context.Context, sessionID string) error  { return nil }
+func (f *fakeSessionService) Resume(ctx context.Context, sessionID string) error { return nil }
 
 func (f *fakeSessionService) Destroy(ctx context.Context, sessionID string) error {
 	f.mu.Lock()
