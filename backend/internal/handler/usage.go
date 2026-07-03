@@ -39,11 +39,16 @@ func recordRunAsync(w platform.UsageLogger, run platform.SandboxRun, stdout, std
 		defer cancel()
 		run.Command = truncate(run.Command, 8*1024)
 		w.InsertSandboxRun(ctx, run)
+		// stderr is warn by default, but error when the run itself failed/timed out.
+		stderrLevel := "warn"
+		if run.Status == "error" || run.Status == "timeout" {
+			stderrLevel = "error"
+		}
 		if stdout != "" {
-			w.InsertSandboxLog(ctx, platform.SandboxLog{SandboxID: run.SandboxID, RunID: run.ID, UserID: run.UserID, Stream: "stdout", Language: run.Language, Content: truncate(stdout, 64*1024)})
+			w.InsertSandboxLog(ctx, platform.SandboxLog{SandboxID: run.SandboxID, RunID: run.ID, UserID: run.UserID, Stream: "stdout", Level: "info", Language: run.Language, Content: truncate(stdout, 64*1024)})
 		}
 		if stderr != "" {
-			w.InsertSandboxLog(ctx, platform.SandboxLog{SandboxID: run.SandboxID, RunID: run.ID, UserID: run.UserID, Stream: "stderr", Language: run.Language, Content: truncate(stderr, 64*1024)})
+			w.InsertSandboxLog(ctx, platform.SandboxLog{SandboxID: run.SandboxID, RunID: run.ID, UserID: run.UserID, Stream: "stderr", Level: stderrLevel, Language: run.Language, Content: truncate(stderr, 64*1024)})
 		}
 	}()
 }
@@ -54,7 +59,7 @@ func writeSystemEventAsync(w platform.UsageLogger, sandboxID, userID, message st
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 		defer cancel()
-		w.InsertSandboxLog(ctx, platform.SandboxLog{SandboxID: sandboxID, UserID: userID, Stream: "system", Content: message})
+		w.InsertSandboxLog(ctx, platform.SandboxLog{SandboxID: sandboxID, UserID: userID, Stream: "system", Level: "info", Content: message})
 	}()
 }
 

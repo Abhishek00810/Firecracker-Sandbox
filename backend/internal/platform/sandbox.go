@@ -119,7 +119,8 @@ type SandboxLog struct {
 	SandboxID string `json:"sandbox_id"`
 	RunID     string `json:"run_id,omitempty"`
 	UserID    string `json:"user_id"`
-	Stream    string `json:"stream"` // stdout | stderr | system
+	Stream    string `json:"stream"`          // stdout | stderr | system
+	Level     string `json:"level,omitempty"` // info | warn | error (reliable, from stream+exit)
 	Language  string `json:"language,omitempty"`
 	Content   string `json:"content"`
 }
