@@ -80,7 +80,12 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 			idleTimeout := resolveDuration(createReq.IdleTimeoutS, tc.SessionIdleTimeout, tc.SessionMaxLifetime)
 			maxLifetime := resolveDuration(createReq.MaxLifetimeS, tc.SessionMaxLifetime, tc.SessionMaxLifetime)
 
-			sess, err := mgr.Create(r.Context(), auth.TenantID, auth.Config.Name, createReq.Env, size.VCPUs, size.MemoryMB, size.DiskGB, internet, idleTimeout, maxLifetime)
+			diskGB := size.DiskGB
+			if diskGB == 0 {
+				diskGB = 10 // actual provisioned per-VM disk until per-size templates exist
+			}
+
+			sess, err := mgr.Create(r.Context(), auth.TenantID, auth.Config.Name, createReq.Env, size.VCPUs, size.MemoryMB, diskGB, internet, idleTimeout, maxLifetime)
 			if err != nil {
 				slog.Error("failed to create session", "err", err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -126,10 +131,6 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 			name := createReq.Name
 			if name == "" {
 				name = "sandbox"
-			}
-			diskGB := size.DiskGB
-			if diskGB == 0 {
-				diskGB = 10 // actual provisioned per-VM disk until per-size templates exist
 			}
 			upsertSandboxAsync(usageLogger, platform.Sandbox{
 				ID:       sess.ID,

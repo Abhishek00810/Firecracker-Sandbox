@@ -24,9 +24,23 @@ const pauseTTL = 7 * 24 * time.Hour
 // (the sandboxes DB) can stay in sync. state is "active" | "paused" | "destroyed".
 type StateHook func(sessionID, userID, state string)
 
+// MeterSample is one accrual interval's RAW resource-time for a sandbox (no cost).
+type MeterSample struct {
+	UserID        string
+	SandboxID     string
+	Tier          string
+	VCPUSeconds   float64
+	RAMGBSeconds  float64
+	DiskGBSeconds float64
+}
+
+// MeterHook receives raw usage deltas from the accrual ticker to persist (usage_meters).
+type MeterHook func(MeterSample)
+
 type Manager struct {
 	store            *Store
 	onState          StateHook
+	onMeter          MeterHook
 	vmManager        *firecracker.FireCrackerManager
 	template         *firecracker.SnapshotTemplate
 	freeCgroupCfg    cgroup.Config
@@ -52,10 +66,12 @@ func NewManager(
 	freePool *firecracker.VMPool,
 	proPool *firecracker.VMPool,
 	onState StateHook,
+	onMeter MeterHook,
 ) *Manager {
 	m := &Manager{
 		store:            NewStore(maxSessions),
 		onState:          onState,
+		onMeter:          onMeter,
 		vmManager:        vmManager,
 		template:         template,
 		vmConfig:         vmConfig,
@@ -78,7 +94,45 @@ func NewManager(
 	}
 	m.recoverPaused()
 	go m.reaper()
+	if onMeter != nil {
+		go m.meterTicker()
+	}
 	return m
+}
+
+// meterTicker accrues RAW resource-time for every live session once a minute and hands each
+// delta to onMeter (which persists it to usage_meters). Compute (vCPU-s + RAM GB-s) accrues
+// while ACTIVE; disk (GB-s) accrues while the sandbox exists (active OR paused). No cost is
+// computed here — pricing is applied later at read time via tier_rates.
+func (m *Manager) meterTicker() {
+	const interval = time.Minute
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	last := time.Now()
+	for range ticker.C {
+		now := time.Now()
+		elapsed := now.Sub(last).Seconds()
+		last = now
+		if elapsed <= 0 {
+			continue
+		}
+		for _, sess := range m.store.All() {
+			if sess.UserID == "" {
+				continue // can't attribute — skip (avoids orphaned meter rows)
+			}
+			sample := MeterSample{
+				UserID:        sess.UserID,
+				SandboxID:     sess.ID,
+				Tier:          sess.Tier,
+				DiskGBSeconds: float64(sess.DiskGB) * elapsed, // disk billed while alive (active + paused)
+			}
+			if sess.State == StateActive {
+				sample.VCPUSeconds = float64(sess.VCPUs) * elapsed
+				sample.RAMGBSeconds = (float64(sess.MemoryMB) / 1024.0) * elapsed
+			}
+			m.onMeter(sample)
+		}
+	}
 }
 
 // notifyState fires the state hook (if set) so the DB reflects a transition. Best-effort:

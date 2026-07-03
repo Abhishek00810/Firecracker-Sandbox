@@ -17,27 +17,29 @@ import (
 // (S3/Blob), a later phase. Records pointing at missing files are dropped on recovery.
 
 type pausedRecord struct {
-	ID               string    `json:"id"`
-	Tier             string    `json:"tier"`
+	ID               string            `json:"id"`
+	UserID           string            `json:"user_id"`
+	Tier             string            `json:"tier"`
 	VCPUs            int               `json:"vcpus"`
 	MemoryMB         int               `json:"memory_mb"`
 	DiskGB           int               `json:"disk_gb"`
 	Env              map[string]string `json:"env,omitempty"`
 	Internet         bool              `json:"internet"`
-	IdleTimeoutNs    int64     `json:"idle_timeout_ns"`
-	MaxLifetimeNs    int64     `json:"max_lifetime_ns"`
-	CreatedAt        time.Time `json:"created_at"`
-	PausedAt         time.Time `json:"paused_at"`
-	SnapPath         string    `json:"snap_path"`
-	MemPath          string    `json:"mem_path"`
-	WritableDiskPath string    `json:"writable_disk_path"`
-	VsockPathAtPause string    `json:"vsock_path_at_pause"`
-	TapNameAtPause   string    `json:"tap_name_at_pause"`
+	IdleTimeoutNs    int64             `json:"idle_timeout_ns"`
+	MaxLifetimeNs    int64             `json:"max_lifetime_ns"`
+	CreatedAt        time.Time         `json:"created_at"`
+	PausedAt         time.Time         `json:"paused_at"`
+	SnapPath         string            `json:"snap_path"`
+	MemPath          string            `json:"mem_path"`
+	WritableDiskPath string            `json:"writable_disk_path"`
+	VsockPathAtPause string            `json:"vsock_path_at_pause"`
+	TapNameAtPause   string            `json:"tap_name_at_pause"`
 }
 
 func recordFromSession(s *Session) pausedRecord {
 	return pausedRecord{
 		ID:               s.ID,
+		UserID:           s.UserID,
 		Tier:             s.Tier,
 		VCPUs:            s.VCPUs,
 		MemoryMB:         s.MemoryMB,
@@ -59,6 +61,7 @@ func recordFromSession(s *Session) pausedRecord {
 func (r pausedRecord) toSession() *Session {
 	return &Session{
 		ID:               r.ID,
+		UserID:           r.UserID,
 		Tier:             r.Tier,
 		VCPUs:            r.VCPUs,
 		MemoryMB:         r.MemoryMB,

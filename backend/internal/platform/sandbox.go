@@ -144,6 +144,37 @@ func (c *Client) InsertSandboxLog(ctx context.Context, l SandboxLog) {
 	c.doSandbox(req, "log")
 }
 
+// UsageMeter is one minute's raw resource-time delta for a sandbox (public.usage_meters).
+// RAW UNITS ONLY — no cost. Pricing (× tier_rates) is applied at read/billing time.
+type UsageMeter struct {
+	UserID        string  `json:"user_id"`
+	SandboxID     string  `json:"sandbox_id"`
+	Tier          string  `json:"tier"`
+	Bucket        string  `json:"bucket"` // RFC3339, the minute this delta covers
+	VCPUSeconds   float64 `json:"vcpu_seconds"`
+	RAMGBSeconds  float64 `json:"ram_gb_seconds"`
+	DiskGBSeconds float64 `json:"disk_gb_seconds"`
+}
+
+// InsertUsageMeter appends a raw resource-time delta row. Best-effort.
+func (c *Client) InsertUsageMeter(ctx context.Context, m UsageMeter) {
+	body, err := json.Marshal(m)
+	if err != nil {
+		slog.Warn("usage meter marshal failed", "err", err)
+		return
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/rest/v1/usage_meters", bytes.NewReader(body))
+	if err != nil {
+		slog.Warn("usage meter request build failed", "err", err)
+		return
+	}
+	req.Header.Set("apikey", c.serviceRoleKey)
+	req.Header.Set("Authorization", "Bearer "+c.serviceRoleKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Prefer", "return=minimal")
+	c.doSandbox(req, "meter")
+}
+
 func (c *Client) doSandbox(req *http.Request, op string) {
 	resp, err := c.http.Do(req)
 	if err != nil {

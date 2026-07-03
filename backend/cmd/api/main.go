@@ -187,6 +187,24 @@ func main() {
 		}()
 	}
 
+	// Raw resource-time metering: the manager's ticker hands us per-minute deltas; we write
+	// them as raw units to usage_meters (no cost — pricing is applied later via tier_rates).
+	sessionMeterHook := func(s session.MeterSample) {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+			defer cancel()
+			platformClient.InsertUsageMeter(ctx, platform.UsageMeter{
+				UserID:        s.UserID,
+				SandboxID:     s.SandboxID,
+				Tier:          s.Tier,
+				Bucket:        time.Now().UTC().Format(time.RFC3339),
+				VCPUSeconds:   s.VCPUSeconds,
+				RAMGBSeconds:  s.RAMGBSeconds,
+				DiskGBSeconds: s.DiskGBSeconds,
+			})
+		}()
+	}
+
 	sessionMgr := session.NewManager(
 		vmManager,
 		template,
@@ -199,6 +217,7 @@ func main() {
 		freeSessionPool,
 		proSessionPool,
 		sessionStateHook,
+		sessionMeterHook,
 	)
 
 	freeExec := firecracker.NewFirecrackerExecutor(vmManager)
