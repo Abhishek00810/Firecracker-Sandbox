@@ -281,40 +281,49 @@ func (v *VsockClient) ExecuteOnConn(conn net.Conn, code, language, mode string, 
 
 // dial performs the vsock handshake and returns a ready connection.
 func (v *VsockClient) dial() (net.Conn, error) {
-	var (
-		conn net.Conn
-		err  error
-		buf  = make([]byte, 32)
-		n    int
-	)
-	for attempt := 0; attempt < 3; attempt++ {
+	buf := make([]byte, 32)
+	// v.timeout is the overall ceiling. We poll with a SHORT per-attempt read deadline so a
+	// not-yet-ready guest listener (e.g. still rebuilding after a snapshot restore) fails fast
+	// and we retry — instead of blocking on one long read (which caused ~60s resume stalls).
+	// Safety: we only ever return a connection that got "OK" (the guest accepted it); attempts
+	// that time out without OK were never accepted, so closing+retrying them does not consume
+	// the one-vsock-connection-per-restore budget.
+	const perAttemptRead = 3 * time.Second
+	deadline := time.Now().Add(v.timeout)
+	var lastErr error
+	for attempt := 0; time.Now().Before(deadline); attempt++ {
 		if attempt > 0 {
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(150 * time.Millisecond)
 		}
-		conn, err = net.DialTimeout("unix", v.socketPath, v.timeout)
+		conn, err := net.DialTimeout("unix", v.socketPath, 5*time.Second)
 		if err != nil {
+			lastErr = err
 			continue
 		}
-		conn.SetDeadline(time.Now().Add(v.timeout))
+		conn.SetDeadline(time.Now().Add(perAttemptRead))
 		if _, err = conn.Write([]byte("CONNECT 52\n")); err != nil {
 			conn.Close()
+			lastErr = err
 			continue
 		}
-		n, err = conn.Read(buf)
+		n, err := conn.Read(buf)
 		if err != nil {
 			conn.Close()
+			lastErr = err
 			continue
 		}
-		break
+		if n < 2 || string(buf[:2]) != "OK" {
+			conn.Close()
+			lastErr = fmt.Errorf("vsock handshake rejected: %s", string(buf[:n]))
+			continue
+		}
+		conn.SetDeadline(time.Time{}) // clear; callers set their own per-op deadlines
+		return conn, nil
 	}
-	if err != nil {
-		return nil, fmt.Errorf("vsock handshake failed: %w", err)
+	if lastErr == nil {
+		lastErr = fmt.Errorf("timed out waiting for guest agent")
 	}
-	if n < 2 || string(buf[:2]) != "OK" {
-		conn.Close()
-		return nil, fmt.Errorf("vsock handshake rejected: %s", string(buf[:n]))
-	}
-	return conn, nil
+	return nil, fmt.Errorf("vsock handshake failed: %w", lastErr)
 }
 
 func (v *VsockClient) Execute(code, language, mode string, timeoutSec int) (*ExecuteResponse, error) {

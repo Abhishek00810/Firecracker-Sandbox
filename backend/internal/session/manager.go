@@ -417,6 +417,7 @@ func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 	if err != nil {
 		return fmt.Errorf("resume from snapshot: %w", err)
 	}
+	msRestore := time.Since(t0).Milliseconds()
 
 	if err := m.vmManager.SetSlotEgress(vm.Slot, sess.Internet); err != nil {
 		m.vmManager.Destroy(ctx, vm.ID)
@@ -442,11 +443,13 @@ func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 	// Let the guest agent re-initialize its vsock listener after the restore (accept()
 	// breaks on restore → the agent rebuilds its listener) before we open the connection.
 	time.Sleep(500 * time.Millisecond)
+	msPreConnect := time.Since(t0).Milliseconds()
 
 	// Open a fresh persistent connection — this is the ONE vsock connection the restored VM
 	// allows, reused for every subsequent exec/run (its CONNECT waits for the agent to accept).
 	vsockClient := firecracker.NewVsockClient(vm.VsockPath)
 	conn, err := vsockClient.Connect()
+	msConnect := time.Since(t0).Milliseconds()
 	if err != nil {
 		if cg != nil {
 			cg.Destroy()
@@ -461,11 +464,13 @@ func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 	if err := vsockClient.ResetRuntimesOnConn(conn); err != nil {
 		slog.Warn("reset_runtimes on resume failed", "session_id", sessionID, "err", err)
 	}
+	msReset := time.Since(t0).Milliseconds()
 	if len(sess.Env) > 0 {
 		if err := vsockClient.SetEnvOnConn(conn, sess.Env); err != nil {
 			slog.Warn("re-inject env on resume failed", "session_id", sessionID, "err", err)
 		}
 	}
+	msSetEnv := time.Since(t0).Milliseconds()
 
 	sess.VM = vm
 	sess.Cgroup = cg
@@ -482,7 +487,12 @@ func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 	sess.MemPath = ""
 
 	m.persistManifest()
-	slog.Info("session resumed", "session_id", sessionID, "vm_id", vm.ID, "ms", time.Since(t0).Milliseconds())
+	// Per-phase timing (cumulative ms from t0) to locate slow resumes, esp. cold restore
+	// after a process restart. connect_ms - preconnect_ms is the vsock CONNECT wait.
+	slog.Info("session resumed", "session_id", sessionID, "vm_id", vm.ID,
+		"ms", time.Since(t0).Milliseconds(),
+		"restore_ms", msRestore, "preconnect_ms", msPreConnect,
+		"connect_ms", msConnect, "reset_ms", msReset, "setenv_ms", msSetEnv)
 	return nil
 }
 
