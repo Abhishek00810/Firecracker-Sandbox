@@ -19,8 +19,14 @@ import (
 // pauseTTL is how long a paused session's snapshot is retained before it's hard-deleted.
 const pauseTTL = 7 * 24 * time.Hour
 
+// StateHook is called on every session lifecycle transition — manual (endpoint) AND
+// automatic (reaper idle-pause, on-demand resume, TTL destroy) — so an external store
+// (the sandboxes DB) can stay in sync. state is "active" | "paused" | "destroyed".
+type StateHook func(sessionID, userID, state string)
+
 type Manager struct {
 	store            *Store
+	onState          StateHook
 	vmManager        *firecracker.FireCrackerManager
 	template         *firecracker.SnapshotTemplate
 	freeCgroupCfg    cgroup.Config
@@ -45,9 +51,11 @@ func NewManager(
 	maxLifetime time.Duration,
 	freePool *firecracker.VMPool,
 	proPool *firecracker.VMPool,
+	onState StateHook,
 ) *Manager {
 	m := &Manager{
 		store:            NewStore(maxSessions),
+		onState:          onState,
 		vmManager:        vmManager,
 		template:         template,
 		vmConfig:         vmConfig,
@@ -71,6 +79,14 @@ func NewManager(
 	m.recoverPaused()
 	go m.reaper()
 	return m
+}
+
+// notifyState fires the state hook (if set) so the DB reflects a transition. Best-effort:
+// the hook itself is expected to be async and non-blocking.
+func (m *Manager) notifyState(sess *Session, state string) {
+	if m.onState != nil && sess != nil {
+		m.onState(sess.ID, sess.UserID, state)
+	}
 }
 
 // recoverPaused rebuilds the store's paused sessions from the on-disk manifest after a
@@ -111,7 +127,7 @@ func (m *Manager) persistManifest() {
 
 // Create boots a VM and binds it to a new session. env vars are injected into
 // the persistent shell so commands like git can access GITHUB_TOKEN etc.
-func (m *Manager) Create(ctx context.Context, tier string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*Session, error) {
+func (m *Manager) Create(ctx context.Context, userID, tier string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*Session, error) {
 	t0 := time.Now()
 
 	pool := m.freePool
@@ -137,6 +153,7 @@ func (m *Manager) Create(ctx context.Context, tier string, env map[string]string
 
 	sess := &Session{
 		ID:          uuid.New().String(),
+		UserID:      userID,
 		VM:          pvm.VM,
 		Cgroup:      pvm.Cgroup,
 		PooledVM:    pvm,
@@ -277,6 +294,7 @@ func (m *Manager) Destroy(ctx context.Context, sessionID string) error {
 	if sess.State == StatePaused {
 		m.cleanupPausedFiles(sess)
 		m.persistManifest()
+		m.notifyState(sess, "destroyed")
 		slog.Info("paused session destroyed", "session_id", sessionID)
 		return nil
 	}
@@ -299,6 +317,7 @@ func (m *Manager) Destroy(ctx context.Context, sessionID string) error {
 		}
 	}
 
+	m.notifyState(sess, "destroyed")
 	slog.Info("session destroyed", "session_id", sessionID)
 	return nil
 }
@@ -382,6 +401,7 @@ func (m *Manager) Pause(ctx context.Context, sessionID string) error {
 	sess.Cgroup = nil
 
 	m.persistManifest()
+	m.notifyState(sess, "paused")
 	slog.Info("session paused", "session_id", sessionID, "ms", time.Since(t0).Milliseconds())
 	return nil
 }
@@ -487,6 +507,7 @@ func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 	sess.MemPath = ""
 
 	m.persistManifest()
+	m.notifyState(sess, "active")
 	// Per-phase timing (cumulative ms from t0) to locate slow resumes, esp. cold restore
 	// after a process restart. connect_ms - preconnect_ms is the vsock CONNECT wait.
 	slog.Info("session resumed", "session_id", sessionID, "vm_id", vm.ID,

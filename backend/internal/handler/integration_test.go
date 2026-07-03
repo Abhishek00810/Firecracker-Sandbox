@@ -337,13 +337,14 @@ func (f *fakeSessionService) Exec(ctx context.Context, sessionID, command string
 	}, nil
 }
 
-func (f *fakeSessionService) Create(ctx context.Context, tier string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*session.Session, error) {
+func (f *fakeSessionService) Create(ctx context.Context, userID, tier string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*session.Session, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	id := fmt.Sprintf("sess-%d", len(f.sessions)+1)
 	sess := &session.Session{
 		ID:        id,
+		UserID:    userID,
 		Tier:      tier,
 		CreatedAt: time.Now().UTC(),
 		LastUsed:  time.Now().UTC(),

@@ -80,7 +80,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 			idleTimeout := resolveDuration(createReq.IdleTimeoutS, tc.SessionIdleTimeout, tc.SessionMaxLifetime)
 			maxLifetime := resolveDuration(createReq.MaxLifetimeS, tc.SessionMaxLifetime, tc.SessionMaxLifetime)
 
-			sess, err := mgr.Create(r.Context(), auth.Config.Name, createReq.Env, size.VCPUs, size.MemoryMB, size.DiskGB, internet, idleTimeout, maxLifetime)
+			sess, err := mgr.Create(r.Context(), auth.TenantID, auth.Config.Name, createReq.Env, size.VCPUs, size.MemoryMB, size.DiskGB, internet, idleTimeout, maxLifetime)
 			if err != nil {
 				slog.Error("failed to create session", "err", err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -354,8 +354,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			updateSandboxStateAsync(usageLogger, sessionID, "paused")
-			writeSystemEventAsync(usageLogger, sessionID, auth.TenantID, "sandbox paused")
+			// state + timeline sync to the DB is handled by the manager's state hook
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{"status": "success", "session_id": sessionID, "state": "paused"})
 
@@ -371,8 +370,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			updateSandboxStateAsync(usageLogger, sessionID, "active")
-			writeSystemEventAsync(usageLogger, sessionID, auth.TenantID, "sandbox resumed")
+			// state + timeline sync to the DB is handled by the manager's state hook
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{"status": "success", "session_id": sessionID, "state": "active"})
 
@@ -385,8 +383,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				http.Error(w, err.Error(), http.StatusNotFound)
 				return
 			}
-			updateSandboxStateAsync(usageLogger, sessionID, "destroyed")
-			writeSystemEventAsync(usageLogger, sessionID, auth.TenantID, "sandbox destroyed")
+			// state + timeline sync to the DB is handled by the manager's state hook
 
 			w.WriteHeader(http.StatusNoContent)
 

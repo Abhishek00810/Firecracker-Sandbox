@@ -19,6 +19,7 @@ const (
 
 type Session struct {
 	ID               string
+	UserID           string // owning tenant — used to sync state + timeline events to the DB
 	VM               *firecracker.MicroVM
 	Cgroup           *cgroup.Cgroup
 	Tier             string
@@ -27,8 +28,8 @@ type Session struct {
 	DiskGB           int
 	Env              map[string]string // env vars, re-injected into the fresh shell on resume
 	Internet         bool              // egress allowed (false = network-isolated)
-	IdleTimeout      time.Duration // reaper pauses after this idle time (per-session)
-	MaxLifetime      time.Duration // hard ceiling regardless of activity (0 = no limit)
+	IdleTimeout      time.Duration     // reaper pauses after this idle time (per-session)
+	MaxLifetime      time.Duration     // hard ceiling regardless of activity (0 = no limit)
 	CreatedAt        time.Time
 	LastUsed         time.Time
 	RunCount         int

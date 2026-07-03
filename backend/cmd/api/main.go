@@ -173,6 +173,20 @@ func main() {
 	proSessionPool := firecracker.NewVMPoolWithSnapshot(0, proTc.MaxPoolSize, proConfig, vmManager, premiumSessionCgroupCfg, template, false, false)
 	slog.Info("VM pools initialized")
 
+	// Sync every session transition — manual AND automatic (idle-pause, on-demand resume,
+	// TTL destroy) — to the sandboxes DB so the dashboard state is always truthful.
+	sessionStateHook := func(sessionID, userID, state string) {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+			defer cancel()
+			platformClient.UpdateSandboxState(ctx, sessionID, state)
+			msg := map[string]string{"paused": "sandbox paused", "active": "sandbox resumed", "destroyed": "sandbox destroyed"}[state]
+			if msg != "" && userID != "" {
+				platformClient.InsertSandboxLog(ctx, platform.SandboxLog{SandboxID: sessionID, UserID: userID, Stream: "system", Level: "info", Content: msg})
+			}
+		}()
+	}
+
 	sessionMgr := session.NewManager(
 		vmManager,
 		template,
@@ -184,6 +198,7 @@ func main() {
 		proTc.SessionMaxLifetime,
 		freeSessionPool,
 		proSessionPool,
+		sessionStateHook,
 	)
 
 	freeExec := firecracker.NewFirecrackerExecutor(vmManager)
