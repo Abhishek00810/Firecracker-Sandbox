@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -173,6 +175,37 @@ func (c *Client) InsertUsageMeter(ctx context.Context, m UsageMeter) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Prefer", "return=minimal")
 	c.doSandbox(req, "meter")
+}
+
+// SandboxRef is a minimal sandbox identity + state for startup reconciliation.
+type SandboxRef struct {
+	ID    string `json:"id"`
+	State string `json:"state"`
+}
+
+// ListSandboxesByState returns the id+state of sandboxes currently in the given states, used
+// on startup to reconcile against the live store (destroy ghosts, sync stale states).
+func (c *Client) ListSandboxesByState(ctx context.Context, states []string) ([]SandboxRef, error) {
+	url := c.baseURL + "/rest/v1/sandboxes?select=id,state&state=in.(" + strings.Join(states, ",") + ")"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("apikey", c.serviceRoleKey)
+	req.Header.Set("Authorization", "Bearer "+c.serviceRoleKey)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("list sandboxes status %d", resp.StatusCode)
+	}
+	var refs []SandboxRef
+	if err := json.NewDecoder(resp.Body).Decode(&refs); err != nil {
+		return nil, err
+	}
+	return refs, nil
 }
 
 func (c *Client) doSandbox(req *http.Request, op string) {

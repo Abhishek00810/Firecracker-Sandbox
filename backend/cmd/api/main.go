@@ -220,6 +220,38 @@ func main() {
 		sessionMeterHook,
 	)
 
+	// Startup reconciliation: on restart, active sessions are lost (only paused ones are
+	// recovered from the manifest). Any sandbox the DB still marks active/paused that isn't
+	// in the live store is a ghost — mark it destroyed so the DB, dashboard, and meter match
+	// reality. NOTE: single-host assumption; multi-host must scope this by host_id.
+	func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		refs, err := platformClient.ListSandboxesByState(ctx, []string{"active", "paused"})
+		if err != nil {
+			slog.Warn("startup reconcile: list sandboxes failed", "err", err)
+			return
+		}
+		ghosts, synced := 0, 0
+		for _, ref := range refs {
+			sess, ok := sessionMgr.GetSession(ref.ID)
+			if !ok {
+				// Not in the live store → the VM is gone (active session lost on restart, or
+				// paused snapshot missing). Mark destroyed.
+				platformClient.UpdateSandboxState(ctx, ref.ID, "destroyed")
+				ghosts++
+				continue
+			}
+			// In the store but the DB state disagrees (e.g. shutdown pause's async write was
+			// lost) → make the DB match the store's actual state.
+			if actual := string(sess.State); actual != ref.State {
+				platformClient.UpdateSandboxState(ctx, ref.ID, actual)
+				synced++
+			}
+		}
+		slog.Info("startup reconcile complete", "db_active_paused", len(refs), "ghosts_destroyed", ghosts, "state_synced", synced)
+	}()
+
 	freeExec := firecracker.NewFirecrackerExecutor(vmManager)
 	freeExec.Pool = freePool
 	freeQueue := queue.NewJobQueue(freeExec, freeTc.MaxPoolSize)
