@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // SessionHandler routes all /session and /session/:id/* requests
@@ -228,7 +230,18 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				Stdout:        truncate(result.Stdout, 64*1024),
 				Stderr:        truncate(result.Stderr, 64*1024),
 			})
-			writeSandboxLogsAsync(usageLogger, sessionID, auth.TenantID, req.Language, result.Stdout, result.Stderr)
+			recordRunAsync(usageLogger, platform.SandboxRun{
+				ID:         uuid.NewString(),
+				SandboxID:  sessionID,
+				UserID:     auth.TenantID,
+				Kind:       "run",
+				Language:   req.Language,
+				Command:    req.Code,
+				ExitCode:   int(result.ExitCode),
+				Status:     runStatus(int(result.ExitCode), result.TerminationReason),
+				DurationMs: int(execDurationMs),
+				StartedAt:  start.UTC().Format(time.RFC3339Nano),
+			}, result.Stdout, result.Stderr)
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(runResp)
@@ -313,7 +326,18 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				Stdout:        truncate(result.Stdout, 64*1024),
 				Stderr:        truncate(result.Stderr, 64*1024),
 			})
-			writeSandboxLogsAsync(usageLogger, sessionID, auth.TenantID, "bash", result.Stdout, result.Stderr)
+			recordRunAsync(usageLogger, platform.SandboxRun{
+				ID:         uuid.NewString(),
+				SandboxID:  sessionID,
+				UserID:     auth.TenantID,
+				Kind:       "exec",
+				Language:   "bash",
+				Command:    req.Command,
+				ExitCode:   int(result.ExitCode),
+				Status:     runStatus(int(result.ExitCode), result.TerminationReason),
+				DurationMs: int(execDurationMs),
+				StartedAt:  start.UTC().Format(time.RFC3339Nano),
+			}, result.Stdout, result.Stderr)
 
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(execResp)
@@ -331,6 +355,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				return
 			}
 			updateSandboxStateAsync(usageLogger, sessionID, "paused")
+			writeSystemEventAsync(usageLogger, sessionID, auth.TenantID, "sandbox paused")
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{"status": "success", "session_id": sessionID, "state": "paused"})
 
@@ -347,6 +372,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				return
 			}
 			updateSandboxStateAsync(usageLogger, sessionID, "active")
+			writeSystemEventAsync(usageLogger, sessionID, auth.TenantID, "sandbox resumed")
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{"status": "success", "session_id": sessionID, "state": "active"})
 
@@ -360,6 +386,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				return
 			}
 			updateSandboxStateAsync(usageLogger, sessionID, "destroyed")
+			writeSystemEventAsync(usageLogger, sessionID, auth.TenantID, "sandbox destroyed")
 
 			w.WriteHeader(http.StatusNoContent)
 

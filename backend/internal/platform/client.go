@@ -30,7 +30,7 @@ func NewClient(supabaseURL, serviceRoleKey string) *Client {
 	return &Client{
 		baseURL:        supabaseURL,
 		serviceRoleKey: serviceRoleKey,
-		http:           &http.Client{Timeout: 5 * time.Second},
+		http:           &http.Client{Timeout: 10 * time.Second},
 	}
 }
 

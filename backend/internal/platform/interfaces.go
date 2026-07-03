@@ -11,6 +11,7 @@ type UsageLogger interface {
 	UpsertSandbox(ctx context.Context, sb Sandbox)
 	UpdateSandboxState(ctx context.Context, id, state string)
 	InsertSandboxLog(ctx context.Context, l SandboxLog)
+	InsertSandboxRun(ctx context.Context, run SandboxRun)
 }
 
 type Service interface {

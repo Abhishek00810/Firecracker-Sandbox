@@ -79,9 +79,45 @@ func (c *Client) UpdateSandboxState(ctx context.Context, id, state string) {
 	c.doSandbox(req, "state")
 }
 
+// SandboxRun is one execution (an /exec or /run) — the run-history summary the dashboard
+// lists per sandbox (public.sandbox_runs). Its ID links the output lines in sandbox_logs.
+type SandboxRun struct {
+	ID         string `json:"id"` // run_id (backend-generated)
+	SandboxID  string `json:"sandbox_id"`
+	UserID     string `json:"user_id"`
+	Kind       string `json:"kind"`     // exec | run
+	Language   string `json:"language"` // bash | python | ...
+	Command    string `json:"command"`  // command or code (truncated)
+	ExitCode   int    `json:"exit_code"`
+	Status     string `json:"status"` // ok | error | timeout
+	DurationMs int    `json:"duration_ms"`
+	StartedAt  string `json:"started_at"` // RFC3339, stamped at execution time (not DB insert time)
+}
+
+// InsertSandboxRun records one execution's summary. Best-effort.
+func (c *Client) InsertSandboxRun(ctx context.Context, run SandboxRun) {
+	body, err := json.Marshal(run)
+	if err != nil {
+		slog.Warn("sandbox run marshal failed", "err", err)
+		return
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/rest/v1/sandbox_runs", bytes.NewReader(body))
+	if err != nil {
+		slog.Warn("sandbox run request build failed", "err", err)
+		return
+	}
+	req.Header.Set("apikey", c.serviceRoleKey)
+	req.Header.Set("Authorization", "Bearer "+c.serviceRoleKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Prefer", "return=minimal")
+	c.doSandbox(req, "run")
+}
+
 // SandboxLog is one line of execution output for a sandbox (public.sandbox_logs).
+// RunID ties the line to its SandboxRun so the dashboard can filter logs per run.
 type SandboxLog struct {
 	SandboxID string `json:"sandbox_id"`
+	RunID     string `json:"run_id,omitempty"`
 	UserID    string `json:"user_id"`
 	Stream    string `json:"stream"` // stdout | stderr | system
 	Language  string `json:"language,omitempty"`
