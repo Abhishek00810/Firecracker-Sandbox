@@ -130,3 +130,9 @@ findings_global.md
 # secret/backup files — never commit
 .env.bak*
 *.bak
+
+# Confidential business docs (AWS credits requirement/storage sheets) — never commit
+*.xlsx
+*.xls
+Requirement Gathering_sheet_.xlsx
+Storage and Backup Questions.xlsx
