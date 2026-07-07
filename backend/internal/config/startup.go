@@ -13,6 +13,7 @@ import (
 type Config struct {
 	SupabaseURL        string
 	ServiceRoleKey     string
+	SupabaseJWTSecret  string // legacy HS256 JWT secret (optional; ES256 uses JWKS)
 	AssetsPath         string
 	KernelPath         string
 	RootfsPath         string
@@ -33,6 +34,7 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		SupabaseURL:        strings.TrimSpace(os.Getenv("SUPABASE_URL")),
 		ServiceRoleKey:     strings.TrimSpace(os.Getenv("SUPABASE_SERVICE_ROLE_KEY")),
+		SupabaseJWTSecret:  defaultString(strings.TrimSpace(os.Getenv("SUPABASE_JWT_SECRET")), strings.TrimSpace(os.Getenv("SUPABASE_JWT_KEY"))),
 		Port:               defaultString(strings.TrimSpace(os.Getenv("PORT")), "8080"),
 		LogLevel:           defaultString(strings.TrimSpace(os.Getenv("LOG_LEVEL")), "info"),
 		LogFormat:          defaultString(strings.TrimSpace(os.Getenv("LOG_FORMAT")), "json"),

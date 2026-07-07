@@ -3,6 +3,7 @@ package middleware
 import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -18,22 +19,24 @@ import (
 // JWKS. No shared secret is held — only the public key is fetched and cached. Used so the
 // dashboard can authenticate as the logged-in user without an API key.
 type jwtVerifier struct {
-	jwksURL string
-	iss     string // expected issuer: <supabaseURL>/auth/v1
-	client  *http.Client
+	jwksURL  string
+	iss      string // expected issuer: <supabaseURL>/auth/v1
+	hsSecret string // legacy HS256 shared secret (empty = HS256 disabled)
+	client   *http.Client
 
 	mu      sync.RWMutex
 	keys    map[string]*ecdsa.PublicKey // kid -> public key
 	fetched time.Time
 }
 
-func newJWTVerifier(supabaseURL string) *jwtVerifier {
+func newJWTVerifier(supabaseURL, hsSecret string) *jwtVerifier {
 	base := strings.TrimRight(supabaseURL, "/")
 	return &jwtVerifier{
-		jwksURL: base + "/auth/v1/.well-known/jwks.json",
-		iss:     base + "/auth/v1",
-		client:  &http.Client{Timeout: 5 * time.Second},
-		keys:    map[string]*ecdsa.PublicKey{},
+		jwksURL:  base + "/auth/v1/.well-known/jwks.json",
+		iss:      base + "/auth/v1",
+		hsSecret: hsSecret,
+		client:   &http.Client{Timeout: 5 * time.Second},
+		keys:     map[string]*ecdsa.PublicKey{},
 	}
 }
 
@@ -115,22 +118,39 @@ func (v *jwtVerifier) verify(token string) (string, error) {
 	if err := json.Unmarshal(hb, &hdr); err != nil {
 		return "", err
 	}
-	if hdr.Alg != "ES256" { // pin the algorithm — reject alg-confusion / "none"
-		return "", fmt.Errorf("unexpected alg %q", hdr.Alg)
-	}
-	pub, err := v.publicKey(hdr.Kid)
-	if err != nil {
-		return "", err
-	}
 	sig, err := b64u(parts[2])
-	if err != nil || len(sig) != 64 { // P-256: r||s, 32 bytes each
+	if err != nil {
 		return "", fmt.Errorf("bad signature")
 	}
-	digest := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
-	r := new(big.Int).SetBytes(sig[:32])
-	s := new(big.Int).SetBytes(sig[32:])
-	if !ecdsa.Verify(pub, digest[:], r, s) {
-		return "", fmt.Errorf("signature verification failed")
+	signingInput := parts[0] + "." + parts[1]
+	// Supabase is mid-migration between HS256 (legacy shared secret) and ES256 (JWKS).
+	// Accept either; still reject "none" / anything else (alg-confusion protection).
+	switch hdr.Alg {
+	case "HS256":
+		if v.hsSecret == "" {
+			return "", fmt.Errorf("HS256 token but no JWT secret configured")
+		}
+		mac := hmac.New(sha256.New, []byte(v.hsSecret))
+		mac.Write([]byte(signingInput))
+		if !hmac.Equal(sig, mac.Sum(nil)) {
+			return "", fmt.Errorf("signature verification failed")
+		}
+	case "ES256":
+		if len(sig) != 64 { // P-256: r||s, 32 bytes each
+			return "", fmt.Errorf("bad signature")
+		}
+		pub, err := v.publicKey(hdr.Kid)
+		if err != nil {
+			return "", err
+		}
+		digest := sha256.Sum256([]byte(signingInput))
+		r := new(big.Int).SetBytes(sig[:32])
+		s := new(big.Int).SetBytes(sig[32:])
+		if !ecdsa.Verify(pub, digest[:], r, s) {
+			return "", fmt.Errorf("signature verification failed")
+		}
+	default:
+		return "", fmt.Errorf("unexpected alg %q", hdr.Alg)
 	}
 	pb, err := b64u(parts[1])
 	if err != nil {

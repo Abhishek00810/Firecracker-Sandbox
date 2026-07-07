@@ -296,7 +296,7 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
 	// Middleware chain: Logging → Auth → mux
-	chain := middleware.Logging(middleware.Auth(platformClient, cfg.SupabaseURL)(http.DefaultServeMux))
+	chain := middleware.Logging(middleware.Auth(platformClient, cfg.SupabaseURL, cfg.SupabaseJWTSecret)(http.DefaultServeMux))
 
 	// Configured server with Slowloris-safe timeouts. ReadHeaderTimeout caps how long a
 	// client may take to send request headers — this is the Slowloris defense and is safe

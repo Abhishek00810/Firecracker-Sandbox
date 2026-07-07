@@ -267,7 +267,7 @@ func newTestServer(t *testing.T, deps testDeps) http.Handler {
 	mux.HandleFunc("/session", handler.SessionHandler(sessionSvc, resolver))
 	mux.HandleFunc("/session/", handler.SessionHandler(sessionSvc, resolver))
 
-	return middleware.Logging(middleware.Auth(resolver, "http://supabase.test")(mux))
+	return middleware.Logging(middleware.Auth(resolver, "http://supabase.test", "test-jwt-secret")(mux))
 }
 
 type fakeExecutor struct {

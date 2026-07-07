@@ -84,9 +84,9 @@ type AuthResolver interface {
 	GetProfile(userID string) (platform.Profile, error)
 }
 
-func Auth(pc AuthResolver, supabaseURL string) func(http.Handler) http.Handler {
+func Auth(pc AuthResolver, supabaseURL, jwtSecret string) func(http.Handler) http.Handler {
 	var cache AuthCache = newKeyCache(60 * time.Second)
-	jwtv := newJWTVerifier(supabaseURL)
+	jwtv := newJWTVerifier(supabaseURL, jwtSecret)
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
