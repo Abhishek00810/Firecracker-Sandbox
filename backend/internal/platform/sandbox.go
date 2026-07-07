@@ -146,26 +146,38 @@ func (c *Client) InsertSandboxLog(ctx context.Context, l SandboxLog) {
 	c.doSandbox(req, "log")
 }
 
-// UsageMeter is one minute's raw resource-time delta for a sandbox (public.usage_meters).
-// RAW UNITS ONLY — no cost. Pricing (× tier_rates) is applied at read/billing time.
+// UsageMeter is one accrual interval's raw resource-time delta for a sandbox. RAW UNITS
+// ONLY — no cost. Bucket is the HOUR the delta belongs to; the delta is added into the
+// single (sandbox_id, hour) row via meter_accrue so one row accumulates the whole hour.
 type UsageMeter struct {
-	UserID        string  `json:"user_id"`
-	SandboxID     string  `json:"sandbox_id"`
-	Tier          string  `json:"tier"`
-	Bucket        string  `json:"bucket"` // RFC3339, the minute this delta covers
-	VCPUSeconds   float64 `json:"vcpu_seconds"`
-	RAMGBSeconds  float64 `json:"ram_gb_seconds"`
-	DiskGBSeconds float64 `json:"disk_gb_seconds"`
+	UserID        string
+	SandboxID     string
+	Tier          string
+	Bucket        string // RFC3339, truncated to the hour
+	VCPUSeconds   float64
+	RAMGBSeconds  float64
+	DiskGBSeconds float64
 }
 
-// InsertUsageMeter appends a raw resource-time delta row. Best-effort.
-func (c *Client) InsertUsageMeter(ctx context.Context, m UsageMeter) {
-	body, err := json.Marshal(m)
+// AccrueUsageMeter adds a delta into the sandbox's current hour row (INSERT ... ON CONFLICT
+// DO UPDATE, via the meter_accrue RPC). One accumulating row per sandbox per hour, not a new
+// row each minute. Best-effort.
+func (c *Client) AccrueUsageMeter(ctx context.Context, m UsageMeter) {
+	args := map[string]any{
+		"p_user_id":    m.UserID,
+		"p_sandbox_id": m.SandboxID,
+		"p_tier":       m.Tier,
+		"p_bucket":     m.Bucket,
+		"p_vcpu":       m.VCPUSeconds,
+		"p_ram":        m.RAMGBSeconds,
+		"p_disk":       m.DiskGBSeconds,
+	}
+	body, err := json.Marshal(args)
 	if err != nil {
 		slog.Warn("usage meter marshal failed", "err", err)
 		return
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/rest/v1/usage_meters", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/rest/v1/rpc/meter_accrue", bytes.NewReader(body))
 	if err != nil {
 		slog.Warn("usage meter request build failed", "err", err)
 		return
@@ -173,7 +185,6 @@ func (c *Client) InsertUsageMeter(ctx context.Context, m UsageMeter) {
 	req.Header.Set("apikey", c.serviceRoleKey)
 	req.Header.Set("Authorization", "Bearer "+c.serviceRoleKey)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Prefer", "return=minimal")
 	c.doSandbox(req, "meter")
 }
 

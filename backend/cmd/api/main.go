@@ -193,11 +193,11 @@ func main() {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 			defer cancel()
-			platformClient.InsertUsageMeter(ctx, platform.UsageMeter{
+			platformClient.AccrueUsageMeter(ctx, platform.UsageMeter{
 				UserID:        s.UserID,
 				SandboxID:     s.SandboxID,
 				Tier:          s.Tier,
-				Bucket:        time.Now().UTC().Format(time.RFC3339),
+				Bucket:        time.Now().UTC().Truncate(time.Hour).Format(time.RFC3339), // one row per sandbox per hour
 				VCPUSeconds:   s.VCPUSeconds,
 				RAMGBSeconds:  s.RAMGBSeconds,
 				DiskGBSeconds: s.DiskGBSeconds,
