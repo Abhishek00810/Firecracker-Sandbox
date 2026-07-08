@@ -68,7 +68,8 @@ type ExecuteResponse struct {
 // --- POST /session ---
 
 type CreateSessionRequest struct {
-	Name         string            `json:"name,omitempty"` //dashboard-facing label; default "sandbox"
+	Name         string            `json:"name,omitempty"`     //dashboard-facing label; default "sandbox"
+	Metadata     map[string]any    `json:"metadata,omitempty"` //user labels (purpose/owner/etc.) for list + filter
 	Env          map[string]string `json:"env,omitempty"`
 	Resources    *Resources        `json:"resources,omitempty"`      //nil = default size
 	Network      *NetworkConfig    `json:"network,omitempty"`        //nil = default (internet on)

@@ -143,6 +143,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				MemoryMB: size.MemoryMB,
 				DiskGB:   diskGB,
 				Internet: internet,
+				Metadata: createReq.Metadata,
 			})
 
 		// POST /session/:id/run — execute code in session
@@ -387,6 +388,20 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 			// state + timeline sync to the DB is handled by the manager's state hook
 
 			w.WriteHeader(http.StatusNoContent)
+
+			// GET /session — list the caller's sandboxes (SDK ro.list())
+		case r.Method == http.MethodGet && path == "":
+			items, err := usageLogger.ListSandboxes(r.Context(), auth.TenantID)
+			if err != nil {
+				slog.Error("list sandboxes failed", "err", err)
+				http.Error(w, "failed to list sandboxes", http.StatusInternalServerError)
+				return
+			}
+			if items == nil {
+				items = []platform.SandboxListItem{}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"sandboxes": items})
 
 			// GET /session/:id — session info
 		case r.Method == http.MethodGet && path != "":

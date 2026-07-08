@@ -310,6 +310,9 @@ func (f *fakePlatformService) UpsertSandbox(ctx context.Context, sb platform.San
 func (f *fakePlatformService) UpdateSandboxState(ctx context.Context, id, state string)      {}
 func (f *fakePlatformService) InsertSandboxLog(ctx context.Context, l platform.SandboxLog)   {}
 func (f *fakePlatformService) InsertSandboxRun(ctx context.Context, run platform.SandboxRun) {}
+func (f *fakePlatformService) ListSandboxes(ctx context.Context, userID string) ([]platform.SandboxListItem, error) {
+	return nil, nil
+}
 
 func (f *fakePlatformService) GetProfile(userID string) (platform.Profile, error) {
 	return platform.Profile{Tier: f.record.Tier, FreeUSDRemaining: f.record.FreeUSDRemaining}, nil

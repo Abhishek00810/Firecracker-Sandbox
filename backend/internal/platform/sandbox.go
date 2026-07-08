@@ -15,16 +15,55 @@ import (
 // truth for listing sandboxes and their state. The backend is the only writer (service
 // role, bypasses RLS), same as usage_logs.
 type Sandbox struct {
-	ID       string `json:"id"`
-	UserID   string `json:"user_id"`
-	APIKeyID string `json:"api_key_id,omitempty"`
-	Name     string `json:"name"`
-	State    string `json:"state"`
-	Tier     string `json:"tier"`
-	VCPUs    int    `json:"vcpus"`
-	MemoryMB int    `json:"memory_mb"`
-	DiskGB   int    `json:"disk_gb"`
-	Internet bool   `json:"internet"`
+	ID       string         `json:"id"`
+	UserID   string         `json:"user_id"`
+	APIKeyID string         `json:"api_key_id,omitempty"`
+	Name     string         `json:"name"`
+	State    string         `json:"state"`
+	Tier     string         `json:"tier"`
+	VCPUs    int            `json:"vcpus"`
+	MemoryMB int            `json:"memory_mb"`
+	DiskGB   int            `json:"disk_gb"`
+	Internet bool           `json:"internet"`
+	Metadata map[string]any `json:"metadata,omitempty"`
+}
+
+// SandboxListItem is a sandbox summary returned to the SDK's list() call.
+type SandboxListItem struct {
+	ID       string         `json:"id"`
+	Name     string         `json:"name"`
+	State    string         `json:"state"`
+	Tier     string         `json:"tier"`
+	VCPUs    int            `json:"vcpus"`
+	MemoryMB int            `json:"memory_mb"`
+	DiskGB   int            `json:"disk_gb"`
+	Metadata map[string]any `json:"metadata,omitempty"`
+	Created  string         `json:"created_at,omitempty"`
+}
+
+// ListSandboxes returns a user's non-destroyed sandboxes (the SDK's ro.list()).
+func (c *Client) ListSandboxes(ctx context.Context, userID string) ([]SandboxListItem, error) {
+	url := c.baseURL + "/rest/v1/sandboxes?user_id=eq." + userID +
+		"&state=neq.destroyed&select=id,name,state,tier,vcpus,memory_mb,disk_gb,metadata,created_at&order=created_at.desc"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("apikey", c.serviceRoleKey)
+	req.Header.Set("Authorization", "Bearer "+c.serviceRoleKey)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("list sandboxes status %d", resp.StatusCode)
+	}
+	var items []SandboxListItem
+	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 // UpsertSandbox inserts (or upserts on id) a sandbox row when a session is created.
