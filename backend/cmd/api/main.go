@@ -142,11 +142,6 @@ func main() {
 		MemMaxBytes: 512 * 1024 * 1024, // 512MB
 	}
 
-	freeSessionCgroupCfg := cgroup.Config{
-		CPUQuotaUS:  100_000, // 1 core
-		CPUPeriodUS: 100_000,
-		MemMaxBytes: 512 * 1024 * 1024, // 512MB
-	}
 	premiumSessionCgroupCfg := cgroup.Config{
 		CPUQuotaUS:  400_000, // 4 cores
 		CPUPeriodUS: 100_000,
@@ -169,8 +164,8 @@ func main() {
 
 	freePool := firecracker.NewVMPoolWithSnapshot(0, freeTc.MaxPoolSize, config, vmManager, freeCgroupCfg, template, false, false)
 	premiumPool := firecracker.NewVMPoolWithSnapshot(0, proTc.MaxPoolSize, proConfig, vmManager, premiumCgroupCfg, template, false, false)
-	freeSessionPool := firecracker.NewVMPoolWithSnapshot(0, freeTc.MaxPoolSize, config, vmManager, freeSessionCgroupCfg, template, false, false)
-	proSessionPool := firecracker.NewVMPoolWithSnapshot(0, proTc.MaxPoolSize, proConfig, vmManager, premiumSessionCgroupCfg, template, false, false)
+	// Sessions use a single pool (all sessions run at the same tier priority).
+	sessionPool := firecracker.NewVMPoolWithSnapshot(0, proTc.MaxPoolSize, proConfig, vmManager, premiumSessionCgroupCfg, template, false, false)
 	slog.Info("VM pools initialized")
 
 	// Sync every session transition — manual AND automatic (idle-pause, on-demand resume,
@@ -209,13 +204,11 @@ func main() {
 		vmManager,
 		template,
 		config,
-		freeSessionCgroupCfg,
 		premiumSessionCgroupCfg,
 		proTc.MaxSessions,
 		proTc.SessionIdleTimeout,
 		proTc.SessionMaxLifetime,
-		freeSessionPool,
-		proSessionPool,
+		sessionPool,
 		sessionStateHook,
 		sessionMeterHook,
 	)

@@ -38,51 +38,45 @@ type MeterSample struct {
 type MeterHook func(MeterSample)
 
 type Manager struct {
-	store            *Store
-	onState          StateHook
-	onMeter          MeterHook
-	vmManager        *firecracker.FireCrackerManager
-	template         *firecracker.SnapshotTemplate
-	freeCgroupCfg    cgroup.Config
-	premiumCgroupCfg cgroup.Config
-	idleTimeout      time.Duration
-	maxLifetime      time.Duration
-	vmConfig         firecracker.VMConfig
-	freePool         *firecracker.VMPool
-	proPool          *firecracker.VMPool
-	pauseDir         string // disk-backed dir for per-session pause snapshots (NOT /dev/shm)
-	manifestPath     string // recovery manifest of paused sessions
+	store        *Store
+	onState      StateHook
+	onMeter      MeterHook
+	vmManager    *firecracker.FireCrackerManager
+	template     *firecracker.SnapshotTemplate
+	cgroupCfg    cgroup.Config
+	idleTimeout  time.Duration
+	maxLifetime  time.Duration
+	vmConfig     firecracker.VMConfig
+	pool         *firecracker.VMPool
+	pauseDir     string // disk-backed dir for per-session pause snapshots (NOT /dev/shm)
+	manifestPath string // recovery manifest of paused sessions
 }
 
 func NewManager(
 	vmManager *firecracker.FireCrackerManager,
 	template *firecracker.SnapshotTemplate,
 	vmConfig firecracker.VMConfig,
-	freeCgroupCfg cgroup.Config,
-	premiumCgroupCfg cgroup.Config,
+	cgroupCfg cgroup.Config,
 	maxSessions int,
 	idleTimeout time.Duration,
 	maxLifetime time.Duration,
-	freePool *firecracker.VMPool,
-	proPool *firecracker.VMPool,
+	pool *firecracker.VMPool,
 	onState StateHook,
 	onMeter MeterHook,
 ) *Manager {
 	m := &Manager{
-		store:            NewStore(maxSessions),
-		onState:          onState,
-		onMeter:          onMeter,
-		vmManager:        vmManager,
-		template:         template,
-		vmConfig:         vmConfig,
-		freeCgroupCfg:    freeCgroupCfg,
-		premiumCgroupCfg: premiumCgroupCfg,
-		idleTimeout:      idleTimeout,
-		maxLifetime:      maxLifetime,
-		freePool:         freePool,
-		proPool:          proPool,
-		pauseDir:         filepath.Join(vmManager.SocketDir, "pause"),
-		manifestPath:     filepath.Join(vmManager.SocketDir, "paused-sessions.json"),
+		store:        NewStore(maxSessions),
+		onState:      onState,
+		onMeter:      onMeter,
+		vmManager:    vmManager,
+		template:     template,
+		vmConfig:     vmConfig,
+		cgroupCfg:    cgroupCfg,
+		idleTimeout:  idleTimeout,
+		maxLifetime:  maxLifetime,
+		pool:         pool,
+		pauseDir:     filepath.Join(vmManager.SocketDir, "pause"),
+		manifestPath: filepath.Join(vmManager.SocketDir, "paused-sessions.json"),
 	}
 	if err := os.MkdirAll(m.pauseDir, 0o755); err != nil {
 		slog.Error("failed to create pause snapshot dir", "dir", m.pauseDir, "err", err)
@@ -184,15 +178,11 @@ func (m *Manager) persistManifest() {
 func (m *Manager) Create(ctx context.Context, userID, tier string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*Session, error) {
 	t0 := time.Now()
 
-	pool := m.freePool
-	if tier == tierconfig.PAYG {
-		pool = m.proPool
-	}
-	if pool == nil {
-		return nil, fmt.Errorf("no VM pool configured for tier %s", tier)
+	if m.pool == nil {
+		return nil, fmt.Errorf("no VM pool configured")
 	}
 
-	pvm, warm, err := pool.Acquire(ctx)
+	pvm, warm, err := m.pool.Acquire(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to acquire VM: %w", err)
 	}
@@ -201,7 +191,7 @@ func (m *Manager) Create(ctx context.Context, userID, tier string, env map[strin
 	// in the slot's netns; it also normalizes any stale rule on a reused slot. If we
 	// can't enforce a requested isolation, fail rather than hand back a leaky sandbox.
 	if err := m.vmManager.SetSlotEgress(pvm.VM.Slot, internet); err != nil {
-		pool.Release(pvm)
+		m.pool.Release(pvm)
 		return nil, fmt.Errorf("apply network policy: %w", err)
 	}
 
@@ -211,7 +201,7 @@ func (m *Manager) Create(ctx context.Context, userID, tier string, env map[strin
 		VM:          pvm.VM,
 		Cgroup:      pvm.Cgroup,
 		PooledVM:    pvm,
-		Pool:        pool,
+		Pool:        m.pool,
 		Tier:        tier,
 		VCPUs:       vcpus,
 		MemoryMB:    memoryMB,
@@ -225,7 +215,7 @@ func (m *Manager) Create(ctx context.Context, userID, tier string, env map[strin
 		State:       StateActive,
 	}
 	if err := m.store.Add(sess); err != nil {
-		pool.Release(pvm)
+		m.pool.Release(pvm)
 		return nil, err
 	}
 
@@ -236,7 +226,7 @@ func (m *Manager) Create(ctx context.Context, userID, tier string, env map[strin
 	vsockClient := firecracker.NewVsockClient(pvm.VM.VsockPath)
 	conn, err := vsockClient.Connect()
 	if err != nil {
-		pool.Release(pvm)
+		m.pool.Release(pvm)
 		m.store.Delete(sess.ID)
 		return nil, fmt.Errorf("vsock connect failed: %w", err)
 	}
@@ -499,10 +489,7 @@ func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 	}
 
 	// Recreate the cgroup for the new VM process (matches the pool's session cgroup).
-	cgCfg := m.freeCgroupCfg
-	if sess.Tier == tierconfig.PAYG {
-		cgCfg = m.premiumCgroupCfg
-	}
+	cgCfg := m.cgroupCfg
 	var cg *cgroup.Cgroup
 	if vm.Process != nil && vm.Process.Process != nil {
 		cg, err = cgroup.New("default", vm.ID, cgCfg)
@@ -666,10 +653,7 @@ func (m *Manager) Shutdown(ctx context.Context) {
 			m.vmManager.Destroy(ctx, sess.VM.ID)
 		}
 	}
-	if m.freePool != nil {
-		m.freePool.Shutdown()
-	}
-	if m.proPool != nil {
-		m.proPool.Shutdown()
+	if m.pool != nil {
+		m.pool.Shutdown()
 	}
 }
