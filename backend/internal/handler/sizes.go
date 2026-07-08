@@ -23,4 +23,3 @@ func resolveSize(r *Resources) (Resources, error) {
 	}
 	return Resources{}, fmt.Errorf("unsupported size %+v (allowed: %+v)", *r, allowedSizes)
 }
-

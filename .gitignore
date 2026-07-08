@@ -28,6 +28,7 @@ CLAUDE.md
 
 # Dependency directories
 vendor/
+node_modules/
 
 # Go workspace file
 go.work
@@ -38,11 +39,18 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 .venv/
+venv/
 
 # Build output
 bin/
 dist/
 build/
+backend/sdk/ts/dist/
+backend/renderops-api
+backend/app
+guest-agent/guest-agent
+guest-agent/guest-agent-*
+guest-agent/guest-agent-new
 
 # IDE - VS Code
 .vscode/
