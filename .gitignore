@@ -90,6 +90,11 @@ logs/
 .env.*.local
 vmrenderopsnp01_key.pem
 
+# Local/private planning and integration config
+aws_cost_planning.csv
+testing/_config.py
+testing/.env
+
 # Docker
 docker-compose.override.yml
 
