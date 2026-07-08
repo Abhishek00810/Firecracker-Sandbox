@@ -85,4 +85,4 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e .
-          python -c "import renderops; assert 'Renderops' in renderops.__all__"
+          python -c "from renderops import AsyncSandbox, RunResult, Sandbox, Session"
