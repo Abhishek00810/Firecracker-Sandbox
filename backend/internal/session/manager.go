@@ -12,6 +12,7 @@ import (
 	"backend/internal/executor"
 	"backend/internal/executor/firecracker"
 	"backend/internal/tierconfig"
+	"backend/internal/vmsize"
 
 	"github.com/google/uuid"
 )
@@ -38,45 +39,45 @@ type MeterSample struct {
 type MeterHook func(MeterSample)
 
 type Manager struct {
-	store        *Store
-	onState      StateHook
-	onMeter      MeterHook
-	vmManager    *firecracker.FireCrackerManager
-	template     *firecracker.SnapshotTemplate
-	cgroupCfg    cgroup.Config
-	idleTimeout  time.Duration
-	maxLifetime  time.Duration
-	vmConfig     firecracker.VMConfig
-	pool         *firecracker.VMPool
-	pauseDir     string // disk-backed dir for per-session pause snapshots (NOT /dev/shm)
-	manifestPath string // recovery manifest of paused sessions
+	store         *Store
+	onState       StateHook
+	onMeter       MeterHook
+	vmManager     *firecracker.FireCrackerManager
+	template      *firecracker.SnapshotTemplate
+	idleTimeout   time.Duration
+	maxLifetime   time.Duration
+	vmConfig      firecracker.VMConfig
+	sizePools     map[string]*firecracker.VMPool           // keyed by vmsize.Key — one pool per resource shape
+	sizeTemplates map[string]*firecracker.SnapshotTemplate // keyed by vmsize.Key — per-size baked device names (for pause/resume)
+	pauseDir      string                                   // disk-backed dir for per-session pause snapshots (NOT /dev/shm)
+	manifestPath  string                                   // recovery manifest of paused sessions
 }
 
 func NewManager(
 	vmManager *firecracker.FireCrackerManager,
 	template *firecracker.SnapshotTemplate,
 	vmConfig firecracker.VMConfig,
-	cgroupCfg cgroup.Config,
 	maxSessions int,
 	idleTimeout time.Duration,
 	maxLifetime time.Duration,
-	pool *firecracker.VMPool,
+	sizePools map[string]*firecracker.VMPool,
+	sizeTemplates map[string]*firecracker.SnapshotTemplate,
 	onState StateHook,
 	onMeter MeterHook,
 ) *Manager {
 	m := &Manager{
-		store:        NewStore(maxSessions),
-		onState:      onState,
-		onMeter:      onMeter,
-		vmManager:    vmManager,
-		template:     template,
-		vmConfig:     vmConfig,
-		cgroupCfg:    cgroupCfg,
-		idleTimeout:  idleTimeout,
-		maxLifetime:  maxLifetime,
-		pool:         pool,
-		pauseDir:     filepath.Join(vmManager.SocketDir, "pause"),
-		manifestPath: filepath.Join(vmManager.SocketDir, "paused-sessions.json"),
+		store:         NewStore(maxSessions),
+		onState:       onState,
+		onMeter:       onMeter,
+		vmManager:     vmManager,
+		template:      template,
+		vmConfig:      vmConfig,
+		idleTimeout:   idleTimeout,
+		maxLifetime:   maxLifetime,
+		sizePools:     sizePools,
+		sizeTemplates: sizeTemplates,
+		pauseDir:      filepath.Join(vmManager.SocketDir, "pause"),
+		manifestPath:  filepath.Join(vmManager.SocketDir, "paused-sessions.json"),
 	}
 	if err := os.MkdirAll(m.pauseDir, 0o755); err != nil {
 		slog.Error("failed to create pause snapshot dir", "dir", m.pauseDir, "err", err)
@@ -178,11 +179,12 @@ func (m *Manager) persistManifest() {
 func (m *Manager) Create(ctx context.Context, userID, tier string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*Session, error) {
 	t0 := time.Now()
 
-	if m.pool == nil {
-		return nil, fmt.Errorf("no VM pool configured")
+	pool := m.sizePools[vmsize.Key(vcpus, memoryMB, diskGB)]
+	if pool == nil {
+		return nil, fmt.Errorf("no VM pool for size %dvcpu/%dMB/%dGB", vcpus, memoryMB, diskGB)
 	}
 
-	pvm, warm, err := m.pool.Acquire(ctx)
+	pvm, warm, err := pool.Acquire(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to acquire VM: %w", err)
 	}
@@ -191,7 +193,7 @@ func (m *Manager) Create(ctx context.Context, userID, tier string, env map[strin
 	// in the slot's netns; it also normalizes any stale rule on a reused slot. If we
 	// can't enforce a requested isolation, fail rather than hand back a leaky sandbox.
 	if err := m.vmManager.SetSlotEgress(pvm.VM.Slot, internet); err != nil {
-		m.pool.Release(pvm)
+		pool.Release(pvm)
 		return nil, fmt.Errorf("apply network policy: %w", err)
 	}
 
@@ -201,7 +203,7 @@ func (m *Manager) Create(ctx context.Context, userID, tier string, env map[strin
 		VM:          pvm.VM,
 		Cgroup:      pvm.Cgroup,
 		PooledVM:    pvm,
-		Pool:        m.pool,
+		Pool:        pool,
 		Tier:        tier,
 		VCPUs:       vcpus,
 		MemoryMB:    memoryMB,
@@ -215,7 +217,7 @@ func (m *Manager) Create(ctx context.Context, userID, tier string, env map[strin
 		State:       StateActive,
 	}
 	if err := m.store.Add(sess); err != nil {
-		m.pool.Release(pvm)
+		pool.Release(pvm)
 		return nil, err
 	}
 
@@ -226,7 +228,7 @@ func (m *Manager) Create(ctx context.Context, userID, tier string, env map[strin
 	vsockClient := firecracker.NewVsockClient(pvm.VM.VsockPath)
 	conn, err := vsockClient.Connect()
 	if err != nil {
-		m.pool.Release(pvm)
+		pool.Release(pvm)
 		m.store.Delete(sess.ID)
 		return nil, fmt.Errorf("vsock connect failed: %w", err)
 	}
@@ -400,10 +402,15 @@ func (m *Manager) Pause(ctx context.Context, sessionID string) error {
 	// Capture resume info before tearing the VM down. The session snapshot bakes the
 	// TEMPLATE's device paths (Firecracker carries the vsock UDS path + TAP name forward
 	// across restore — not the per-VM runtime slot names), so resume must restore against
-	// those. Persisted in the manifest so recovery after a restart still has them.
+	// those. Each size has its own template with its own baked device names, so use the
+	// session's OWN size template (not the default). Persisted in the manifest for recovery.
 	vmID := sess.VM.ID
-	sess.VsockPathAtPause = m.template.VsockPath
-	sess.TapNameAtPause = m.template.TapName
+	tmpl := m.sizeTemplates[vmsize.Key(sess.VCPUs, sess.MemoryMB, sess.DiskGB)]
+	if tmpl == nil {
+		tmpl = m.template
+	}
+	sess.VsockPathAtPause = tmpl.VsockPath
+	sess.TapNameAtPause = tmpl.TapName
 	sess.WritableDiskPath = sess.VM.WritableDiskPath
 
 	// Close the persistent connection and let the guest agent fall back into accept()
@@ -488,8 +495,14 @@ func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("re-apply network policy on resume: %w", err)
 	}
 
-	// Recreate the cgroup for the new VM process (matches the pool's session cgroup).
-	cgCfg := m.cgroupCfg
+	// Recreate the cgroup for the new VM process, sized from the session's own resources
+	// (matches the pool's per-size session cgroup on the original create).
+	sz := vmsize.Size{VCPUs: sess.VCPUs, MemoryMB: sess.MemoryMB, DiskGB: sess.DiskGB}
+	cgCfg := cgroup.Config{
+		CPUQuotaUS:  sz.CgroupCPUQuotaUS(),
+		CPUPeriodUS: vmsize.CgroupCPUPeriodUS,
+		MemMaxBytes: sz.CgroupMemMaxBytes(),
+	}
 	var cg *cgroup.Cgroup
 	if vm.Process != nil && vm.Process.Process != nil {
 		cg, err = cgroup.New("default", vm.ID, cgCfg)
@@ -653,7 +666,9 @@ func (m *Manager) Shutdown(ctx context.Context) {
 			m.vmManager.Destroy(ctx, sess.VM.ID)
 		}
 	}
-	if m.pool != nil {
-		m.pool.Shutdown()
+	for _, p := range m.sizePools {
+		if p != nil {
+			p.Shutdown()
+		}
 	}
 }

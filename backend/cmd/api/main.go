@@ -12,12 +12,14 @@ import (
 	"backend/internal/ratelimit"
 	"backend/internal/session"
 	"backend/internal/tierconfig"
+	"backend/internal/vmsize"
 	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"syscall"
@@ -160,14 +162,8 @@ func main() {
 		MemMaxBytes: 512 * 1024 * 1024, // 512MB
 	}
 
-	premiumSessionCgroupCfg := cgroup.Config{
-		CPUQuotaUS:  400_000, // 4 cores
-		CPUPeriodUS: 100_000,
-		MemMaxBytes: 1024 * 1024 * 1024, // 1GB
-	}
-
-	// Create a snapshot template once at startup: boot one VM, warm up kernels,
-	// freeze it. All pool VMs and sessions restore from this snapshot in ~100ms.
+	// Create the default-size snapshot template once at startup: boot one VM, warm up
+	// kernels, freeze it. The default size + the /execute pools restore from this in ~100ms.
 	var template *firecracker.SnapshotTemplate
 	if tmpl, err := vmManager.CreateTemplate(context.Background(), config, cfg.SnapshotDir); err != nil {
 		slog.Warn("snapshot template creation failed, falling back to cold boot", "err", err)
@@ -180,11 +176,52 @@ func main() {
 	proConfig := config
 	proConfig.Pro = true
 
+	// Stateless /execute pools (default size).
 	freePool := firecracker.NewVMPoolWithSnapshot(0, freeTc.MaxPoolSize, config, vmManager, freeCgroupCfg, template, false, false)
 	premiumPool := firecracker.NewVMPoolWithSnapshot(0, proTc.MaxPoolSize, proConfig, vmManager, premiumCgroupCfg, template, false, false)
-	// Sessions use a single pool (all sessions run at the same tier priority).
-	sessionPool := firecracker.NewVMPoolWithSnapshot(0, proTc.MaxPoolSize, proConfig, vmManager, premiumSessionCgroupCfg, template, false, false)
-	slog.Info("VM pools initialized")
+
+	// One session pool per resource size (vmsize.Sizes is the single source of truth). The
+	// default size reuses the template above; each other size gets its own template so all
+	// sizes restore fast (~30ms) rather than cold-booting. cgroup limits are derived from
+	// the size, so a VM's host ceiling matches its allocation.
+	sizePools := make(map[string]*firecracker.VMPool, len(vmsize.Sizes))
+	sizeTemplates := make(map[string]*firecracker.SnapshotTemplate, len(vmsize.Sizes))
+	for _, sz := range vmsize.Sizes {
+		szCfg := config
+		szCfg.VCPUCount = sz.VCPUs
+		szCfg.MemSizeMiB = sz.MemoryMB
+		szCfg.DiskGB = sz.DiskGB
+		szCfg.Pro = true
+		szCgroup := cgroup.Config{
+			CPUQuotaUS:  sz.CgroupCPUQuotaUS(),
+			CPUPeriodUS: vmsize.CgroupCPUPeriodUS,
+			MemMaxBytes: sz.CgroupMemMaxBytes(),
+		}
+		szTemplate := template // default size reuses the template already built
+		if !sz.IsDefault() {
+			// Per-size snapshots live in their own subdir. Firecracker drops to FCRunUID and
+			// writes the snapshot itself, so the subdir must be owned by that user (the backend
+			// runs as root and creates it).
+			snapSubDir := filepath.Join(cfg.SnapshotDir, sz.Name)
+			if err := os.MkdirAll(snapSubDir, 0o755); err != nil {
+				slog.Warn("could not create size snapshot dir", "size", sz.Name, "dir", snapSubDir, "err", err)
+			} else if cfg.FCRunUID > 0 {
+				if err := os.Chown(snapSubDir, cfg.FCRunUID, cfg.FCRunGID); err != nil {
+					slog.Warn("could not chown size snapshot dir", "size", sz.Name, "dir", snapSubDir, "err", err)
+				}
+			}
+			if tmpl, err := vmManager.CreateTemplate(context.Background(), szCfg, snapSubDir); err != nil {
+				slog.Warn("size template creation failed, falling back to cold boot", "size", sz.Name, "err", err)
+				szTemplate = nil
+			} else {
+				szTemplate = tmpl
+				slog.Info("size template ready", "size", sz.Name, "snap", tmpl.SnapPath)
+			}
+		}
+		sizePools[sz.Key()] = firecracker.NewVMPoolWithSnapshot(0, proTc.MaxPoolSize, szCfg, vmManager, szCgroup, szTemplate, false, false)
+		sizeTemplates[sz.Key()] = szTemplate
+	}
+	slog.Info("VM pools initialized", "session_sizes", len(sizePools))
 
 	// Sync every session transition — manual AND automatic (idle-pause, on-demand resume,
 	// TTL destroy) — to the sandboxes DB so the dashboard state is always truthful.
@@ -222,11 +259,11 @@ func main() {
 		vmManager,
 		template,
 		config,
-		premiumSessionCgroupCfg,
 		proTc.MaxSessions,
 		proTc.SessionIdleTimeout,
 		proTc.SessionMaxLifetime,
-		sessionPool,
+		sizePools,
+		sizeTemplates,
 		sessionStateHook,
 		sessionMeterHook,
 	)
