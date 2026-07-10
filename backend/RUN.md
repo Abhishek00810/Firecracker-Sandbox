@@ -13,6 +13,7 @@ This backend should fail fast at startup if required env vars, assets, runtime d
 
 ## Optional env vars
 
+- `SUPABASE_JWT_SECRET` only for legacy Supabase HS256 dashboard tokens; Better Auth sessions do not need it
 - `PORT` default: `8080`
 - `ASSETS_PATH` default: auto-detected from `/app/assets`, `./assets`, or `../assets`
 - `FIRECRACKER_BINARY` default: auto-detected from `/app/firecracker/firecracker-v1.7.0-aarch64` or repo release paths
@@ -36,7 +37,7 @@ go run ./cmd/api/main.go
 
 On success, startup now validates:
 
-- Supabase config
+- Supabase/PostgREST config used for Better Auth sessions, profiles, keys and usage data
 - assets path
 - kernel/rootfs/initramfs files
 - Firecracker binary path and execute bit

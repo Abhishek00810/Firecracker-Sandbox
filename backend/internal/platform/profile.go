@@ -6,8 +6,8 @@ import (
 	"net/http"
 )
 
-// Profile is the tier + balance for a user, looked up when a request authenticates via a
-// Supabase JWT (dashboard) rather than an API key.
+// Profile is the tier + balance for a dashboard user authenticated by a Better
+// Auth session or a legacy Supabase JWT.
 type Profile struct {
 	Tier             string
 	FreeUSDRemaining float64
