@@ -33,8 +33,7 @@ func TestLoadResolvesPathsAndDirs(t *testing.T) {
 	socketDir := filepath.Join(tmp, "sockets")
 	snapshotDir := filepath.Join(tmp, "snapshots")
 
-	t.Setenv("SUPABASE_URL", "https://example.supabase.co")
-	t.Setenv("SUPABASE_SERVICE_ROLE_KEY", "secret")
+	t.Setenv("DATABASE_URL", "postgresql://renderops:secret@postgres:5432/renderops")
 	t.Setenv("ASSETS_PATH", assetsDir)
 	t.Setenv("FIRECRACKER_BINARY", firecrackerBinary)
 	t.Setenv("SOCKET_DIR", socketDir)

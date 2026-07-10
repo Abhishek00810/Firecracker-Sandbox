@@ -67,7 +67,12 @@ func main() {
 		slog.Warn("startup warning", "message", warning)
 	}
 
-	platformClient := platform.NewClient(cfg.SupabaseURL, cfg.ServiceRoleKey)
+	platformClient, err := platform.NewClient(context.Background(), cfg.DatabaseURL)
+	if err != nil {
+		slog.Error("postgres initialization failed", "err", err)
+		os.Exit(1)
+	}
+	defer platformClient.Close()
 
 	if err := cgroup.Init(); err != nil {
 		slog.Warn("cgroup init failed, limits will not be enforced", "err", err)

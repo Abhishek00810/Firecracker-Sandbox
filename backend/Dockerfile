@@ -22,8 +22,11 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o app ./cmd/api/main.go
 # Stage 2: Runtime (minimal image)
 FROM alpine:latest
 
-# Install ca-certificates for HTTPS (if you make external API calls)
-RUN apk --no-cache add ca-certificates
+# ca-certificates: HTTPS; e2fsprogs: mkfs.ext4 for per-VM writable disks;
+# iproute2: full ip with netns/tuntap (busybox ip lacks both); iptables: slot
+# NAT rules; util-linux-misc: unshare/setpriv with the flags the VM launcher
+# uses when FC_RUN_UID > 0.
+RUN apk --no-cache add ca-certificates e2fsprogs iproute2 iptables util-linux-misc
 
 WORKDIR /app
 
@@ -40,8 +43,12 @@ RUN chmod +x /app/firecracker/firecracker-v1.7.0-aarch64
 # Copy assets (kernel and rootfs)
 COPY assets/ /app/assets/
 
+# Network-slot bootstrap (netns/TAP/veth/NAT) that the Go slot pool expects,
+# then execs the API binary.
+COPY backend/docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh
+
 # Expose port
 EXPOSE 8080
 
-# Run the binary
-CMD ["./app"]
+ENTRYPOINT ["/app/docker-entrypoint.sh"]

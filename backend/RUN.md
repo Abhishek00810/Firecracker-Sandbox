@@ -8,8 +8,7 @@ This backend should fail fast at startup if required env vars, assets, runtime d
 - `/dev/kvm` available
 - Firecracker binary present
 - sandbox assets present
-- `SUPABASE_URL`
-- `SUPABASE_SERVICE_ROLE_KEY`
+- `DATABASE_URL`
 
 ## Optional env vars
 
@@ -30,14 +29,13 @@ Set `HOST_VALIDATION_MODE=warn` only when you intentionally want startup to cont
 From the `backend/` directory:
 
 ```bash
-SUPABASE_URL=... \
-SUPABASE_SERVICE_ROLE_KEY=... \
+DATABASE_URL=postgresql://renderops:password@postgres:5432/renderops \
 go run ./cmd/api/main.go
 ```
 
 On success, startup now validates:
 
-- Supabase/PostgREST config used for Better Auth sessions, profiles, keys and usage data
+- PostgreSQL connectivity used for Better Auth sessions, profiles, keys and usage data
 - assets path
 - kernel/rootfs/initramfs files
 - Firecracker binary path and execute bit
