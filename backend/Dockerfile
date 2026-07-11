@@ -25,8 +25,10 @@ FROM alpine:latest
 # ca-certificates: HTTPS; e2fsprogs: mkfs.ext4 for per-VM writable disks;
 # iproute2: full ip with netns/tuntap (busybox ip lacks both); iptables: slot
 # NAT rules; util-linux-misc: unshare/setpriv with the flags the VM launcher
-# uses when FC_RUN_UID > 0.
-RUN apk --no-cache add ca-certificates e2fsprogs iproute2 iptables util-linux-misc
+# uses when FC_RUN_UID > 0; coreutils: GNU cp with --reflink/--sparse for the
+# golden-disk clone in snapshot restores (busybox cp lacks both → cold-boot
+# fallback and broken session resume).
+RUN apk --no-cache add ca-certificates e2fsprogs iproute2 iptables util-linux-misc coreutils
 
 WORKDIR /app
 
