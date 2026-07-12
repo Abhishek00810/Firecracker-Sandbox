@@ -94,29 +94,33 @@ Go REST API (port 8080)
   └── GET  /metrics
 ```
 
-### VM Pools (4 separate pools)
+### VM Pools
 
-| Pool | Tier | Used by | Max concurrent |
-|------|------|---------|----------------|
-| freePool | free | `/execute` | 50 |
-| premiumPool | pro | `/execute` | 50 |
-| freeSessionPool | free | `/session` | 50 |
-| proSessionPool | pro | `/session` | 50 |
+Two stateless `/execute` pools (by tier), plus one `/session` pool per **size** (`vmsize.Sizes` is the single source of truth):
 
-All pools: `minPoolSize=0` (no pre-warming), on-demand snapshot restore. Shared 50 network slots across all pools.
+| Pool | Path | Size | Max concurrent |
+|------|------|------|----------------|
+| freePool | `/execute` | 1 vCPU / 256MB | 50 |
+| premiumPool | `/execute` | 1 vCPU / 256MB | 50 |
+| sessionPool[nano] | `/session` | 1 vCPU / 256MB / 10GB | 50 |
+| sessionPool[small] | `/session` | 2 vCPU / 512MB / 10GB | 50 |
+| sessionPool[medium] | `/session` | 2 vCPU / 1GB / 20GB | 50 |
+
+All pools: `minPoolSize=0` (no pre-warming), on-demand snapshot restore (each size has its own snapshot template). Shared 50 network slots across all pools.
 
 ### Per-VM resources
 
-Every VM boots with a **fixed 1 vCPU and 256MB RAM** (`vcpu_count=1`, `mem_size_mib=256`). Host cgroup v2 caps vary by tier and path but are bounded by that single guest vCPU — and guest RAM stays 256MB regardless of the cgroup memory cap (a guest cannot see more memory than it booted with):
+Sessions come in fixed **sizes** (the `vmsize` menu — the single source of truth). Each size boots the guest at its own `vcpu_count` / `mem_size_mib` (`machine-config`), and the host cgroup v2 cap is **derived from the size**: memory cap = guest RAM + ~768MB overhead, `cpu.max` = vCPUs.
 
-| Path / tier | cgroup CPU | cgroup memory |
-|-------------|-----------|---------------|
-| `/execute` free | 0.5 core | 256MB |
-| `/execute` pro | 2 cores | 512MB |
-| `/session` free | 1 core | 512MB |
-| `/session` pro | 4 cores | 1GB |
+| Size | vCPU | Guest RAM | Disk |
+|------|------|-----------|------|
+| nano (default) | 1 | 256MB | 10GB |
+| small | 2 | 512MB | 10GB |
+| medium | 2 | 1GB | 20GB |
 
-> This fixed sizing is tuned for fast, ephemeral execution. Heavier workloads (large `npm install`, full builds) aren't supported yet — see [Current Limitations](#current-limitations) and [Roadmap](#roadmap).
+A create request routes to the pool matching its size (or nano if unspecified). Stateless `/execute` runs at the default size (1 vCPU / 256MB); its cgroup caps are 0.5 core / 256MB (free) and 2 cores / 512MB (pro). A guest never sees more RAM than it booted with, regardless of the cgroup cap.
+
+> Larger sizes plus the disk-backed writable FS (`/dev/vdb`, sparse) support heavier installs (`npm install`, builds). See [Roadmap](#roadmap).
 
 ### Network per VM
 
@@ -342,10 +346,9 @@ Defined in `backend/internal/tierconfig/tierconfig.go`:
 
 ## Current Limitations
 
-- **Fixed VM size** — every VM is 1 vCPU / 256MB RAM; resources are not yet configurable per request.
-- **RAM-backed writable layer** — the rootfs upper layer is tmpfs (in guest RAM), so all writes count against the 256MB. Heavy `npm install` or full project builds will exhaust memory; the platform is currently sized for fast, ephemeral execution, not long-lived dev environments.
 - **No public preview URLs** — a server running inside a VM is not yet reachable from the public internet.
-- **Single template** — one prebuilt rootfs image; custom per-tenant images are not yet supported.
+- **Single base rootfs image** — one prebuilt rootfs (shared across all sizes); custom per-tenant images are not yet supported.
+- **Single host** — sandboxes are pinned to one host; multi-host orchestration (control plane + worker agents) is not yet built.
 
 ---
 
@@ -353,13 +356,11 @@ Defined in `backend/internal/tierconfig/tierconfig.go`:
 
 Planned — not yet implemented:
 
-- **Configurable resources** — choose vCPU / RAM / disk per sandbox at create time.
-- **Disk-backed writable layer** — a real per-VM writable disk (GBs) so `npm install`, build caches, and terraform state land on disk instead of RAM.
 - **Filesystem API** — `read` / `write` / `list` / `patch` files in a session without shell gymnastics.
 - **Process & streaming exec** — long-running processes and streamed stdout/stderr.
 - **Custom templates** — bring-your-own image (Dockerfile) with your own tools and runtimes baked in.
-- **Python SDK** — alongside the existing TypeScript ComputeSDK adapter.
 - **Preview URLs** — wildcard-subdomain reverse proxy mapping `<id>-<port>.<domain>` to a VM's port (HTTP + WebSocket).
+- **Multi-host orchestration** — control plane + per-host worker agents (`host_id` routing) for a horizontally-scaled fleet.
 - **BYOC / self-hosted** — deploy the data plane into your own cloud account.
 
 ---
