@@ -6,3 +6,6 @@
 *.test
 *.log
 tmp/
+.env
+.env.*
+!.env.example
