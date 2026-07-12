@@ -83,6 +83,8 @@ Create `backend/.env` on the host. Do not commit it.
 ```bash
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=...
+# Optional: only while old Supabase JWT clients still exist
+SUPABASE_JWT_SECRET=...
 PORT=8080
 LOG_LEVEL=info
 LOG_FORMAT=json

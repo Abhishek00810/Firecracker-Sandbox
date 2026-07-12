@@ -11,8 +11,8 @@ import (
 )
 
 type Config struct {
+	DatabaseURL        string
 	SupabaseURL        string
-	ServiceRoleKey     string
 	SupabaseJWTSecret  string // legacy HS256 JWT secret (optional; ES256 uses JWKS)
 	AssetsPath         string
 	KernelPath         string
@@ -32,8 +32,8 @@ type Config struct {
 
 func Load() (*Config, error) {
 	cfg := &Config{
+		DatabaseURL:        strings.TrimSpace(os.Getenv("DATABASE_URL")),
 		SupabaseURL:        strings.TrimSpace(os.Getenv("SUPABASE_URL")),
-		ServiceRoleKey:     strings.TrimSpace(os.Getenv("SUPABASE_SERVICE_ROLE_KEY")),
 		SupabaseJWTSecret:  defaultString(strings.TrimSpace(os.Getenv("SUPABASE_JWT_SECRET")), strings.TrimSpace(os.Getenv("SUPABASE_JWT_KEY"))),
 		Port:               defaultString(strings.TrimSpace(os.Getenv("PORT")), "8080"),
 		LogLevel:           defaultString(strings.TrimSpace(os.Getenv("LOG_LEVEL")), "info"),
@@ -41,11 +41,8 @@ func Load() (*Config, error) {
 		HostValidationMode: defaultString(strings.TrimSpace(os.Getenv("HOST_VALIDATION_MODE")), "strict"),
 	}
 
-	if cfg.SupabaseURL == "" {
-		return nil, errors.New("SUPABASE_URL must be set")
-	}
-	if cfg.ServiceRoleKey == "" {
-		return nil, errors.New("SUPABASE_SERVICE_ROLE_KEY must be set")
+	if cfg.DatabaseURL == "" {
+		return nil, errors.New("DATABASE_URL must be set")
 	}
 
 	cwd, err := os.Getwd()

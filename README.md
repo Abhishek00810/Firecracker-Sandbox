@@ -286,7 +286,7 @@ sandbox_env/
 - Go 1.25+
 - Firecracker v1.7.0 binary
 - Kernel image and rootfs assets
-- Supabase project with `api_keys` and `profiles` tables
+- Supabase project with Better Auth `session`, `api_keys` and `profiles` tables
 
 ### Start (Azure / Linux)
 
@@ -307,6 +307,7 @@ sudo bash server.sh
 |----------|----------|---------|
 | `SUPABASE_URL` | Yes | — |
 | `SUPABASE_SERVICE_ROLE_KEY` | Yes | — |
+| `SUPABASE_JWT_SECRET` | No | legacy Supabase JWT support only |
 | `PORT` | No | `8080` |
 | `ASSETS_PATH` | No | auto-detected |
 | `FIRECRACKER_BINARY` | No | auto-detected |

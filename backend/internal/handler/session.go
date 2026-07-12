@@ -148,6 +148,10 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				http.Error(w, "missing session id", http.StatusBadRequest)
 				return
 			}
+			if !ownsSession(mgr, sessionID, auth.TenantID) {
+				http.Error(w, "session not found", http.StatusNotFound)
+				return
+			}
 
 			var req RunInSessionRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -250,6 +254,10 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				http.Error(w, "missing session id", http.StatusBadRequest)
 				return
 			}
+			if !ownsSession(mgr, sessionID, auth.TenantID) {
+				http.Error(w, "session not found", http.StatusNotFound)
+				return
+			}
 
 			var req ExecInSessionRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -346,6 +354,10 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				http.Error(w, "missing session id", http.StatusBadRequest)
 				return
 			}
+			if !ownsSession(mgr, sessionID, auth.TenantID) {
+				http.Error(w, "session not found", http.StatusNotFound)
+				return
+			}
 			if err := mgr.Pause(r.Context(), sessionID); err != nil {
 				slog.Error("session pause failed", "session_id", sessionID, "err", err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -362,6 +374,10 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				http.Error(w, "missing session id", http.StatusBadRequest)
 				return
 			}
+			if !ownsSession(mgr, sessionID, auth.TenantID) {
+				http.Error(w, "session not found", http.StatusNotFound)
+				return
+			}
 			if err := mgr.Resume(r.Context(), sessionID); err != nil {
 				slog.Error("session resume failed", "session_id", sessionID, "err", err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -374,6 +390,10 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 			// DELETE /session/:id — destroy session
 		case r.Method == http.MethodDelete && path != "":
 			sessionID := path
+			if !ownsSession(mgr, sessionID, auth.TenantID) {
+				http.Error(w, "session not found", http.StatusNotFound)
+				return
+			}
 
 			if err := mgr.Destroy(r.Context(), sessionID); err != nil {
 				slog.Error("session destroy failed", "session_id", sessionID, "err", err)
@@ -403,7 +423,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 			sessionID := path
 
 			sess, ok := mgr.GetSession(sessionID)
-			if !ok {
+			if !ok || sess.UserID != auth.TenantID {
 				http.Error(w, "session not found", http.StatusNotFound)
 				return
 			}
@@ -442,4 +462,11 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 			http.NotFound(w, r)
 		}
 	}
+}
+
+// ownsSession keeps every id-based operation tenant-scoped. Returning the same
+// 404 for missing and foreign sessions avoids leaking another tenant's ids.
+func ownsSession(mgr session.Service, sessionID, userID string) bool {
+	sess, ok := mgr.GetSession(sessionID)
+	return ok && sess.UserID == userID
 }

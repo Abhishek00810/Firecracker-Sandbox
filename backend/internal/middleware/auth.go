@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -36,7 +37,7 @@ func AuthFromContext(ctx context.Context) (AuthInfo, bool) {
 }
 
 // ── TTL cache ────────────────────────────────────────────────────────────────
-// Avoids a Supabase round-trip on every request.
+// Avoids a PostgREST round-trip on every API-key request.
 // Stale entries are lazily replaced on next lookup — no background goroutine needed.
 
 type cacheEntry struct {
@@ -75,12 +76,14 @@ func (c *keyCache) set(hash string, record platform.KeyRecord) {
 
 // ── Middleware ────────────────────────────────────────────────────────────────
 
-// Auth returns middleware that validates Bearer tokens against Supabase.
+// Auth returns middleware that validates Better Auth session tokens, SDK API
+// keys, and legacy Supabase JWTs during the migration period.
 // Keys are cached for 60 seconds to avoid a DB round-trip on every request.
 // A revoked key can still be used for up to 60 seconds after revocation.
-// AuthResolver resolves an SDK API key or a dashboard user (via Supabase JWT) to identity.
+// AuthResolver resolves SDK API keys and dashboard sessions to identities.
 type AuthResolver interface {
 	ResolveKey(keyHash string) (platform.KeyRecord, error)
+	ResolveSession(token string) (platform.SessionRecord, error)
 	GetProfile(userID string) (platform.Profile, error)
 }
 
@@ -104,8 +107,8 @@ func Auth(pc AuthResolver, supabaseURL, jwtSecret string) func(http.Handler) htt
 			}
 			key := strings.TrimPrefix(raw, "Bearer ")
 
-			// Dashboard path: a Supabase user JWT (verified against the project's public
-			// JWKS) authenticates as that user — no API key needed. API keys have no dots.
+			// Legacy dashboard path: keep accepting Supabase JWTs while old clients are
+			// being retired. Better Auth sessions are opaque tokens handled below.
 			if looksLikeJWT(key) {
 				sub, err := jwtv.verify(key)
 				if err != nil {
@@ -113,27 +116,25 @@ func Auth(pc AuthResolver, supabaseURL, jwtSecret string) func(http.Handler) htt
 					writeAuthError(w, http.StatusUnauthorized, "invalid session token")
 					return
 				}
-				prof, err := pc.GetProfile(sub)
-				if err != nil {
-					slog.Warn("auth: profile lookup failed", "user_id", sub, "err", err)
-					writeAuthError(w, http.StatusUnauthorized, "user profile not found")
-					return
-				}
-				if prof.FreeUSDRemaining <= 0 {
-					writeAuthError(w, http.StatusPaymentRequired, "insufficient balance — add credits to continue")
-					return
-				}
-				tc := tierconfig.Get(prof.Tier)
-				info := AuthInfo{
-					TenantID:         sub,
-					APIKeyID:         "",
-					Config:           tc,
-					FreeUSDRemaining: prof.FreeUSDRemaining,
-					RateUSDPerSec:    tc.RateUSDPerSec,
-				}
-				ctx := context.WithValue(r.Context(), authInfoKey{}, info)
-				next.ServeHTTP(w, r.WithContext(ctx))
+				serveUser(next, pc, sub, w, r)
 				return
+			}
+
+			// Current dashboard path: Better Auth stores the opaque token in the
+			// public.session table. SDK keys have a stable prefix, so they skip this
+			// lookup and retain the existing cached API-key path.
+			if !strings.HasPrefix(key, "ro_live_") {
+				session, err := pc.ResolveSession(key)
+				if err == nil {
+					serveUser(next, pc, session.UserID, w, r)
+					return
+				}
+				if !errors.Is(err, platform.ErrSessionNotFound) {
+					slog.Warn("auth: session lookup failed", "err", err)
+					writeAuthError(w, http.StatusServiceUnavailable, "authentication service unavailable")
+					return
+				}
+				// Fall through for any legacy API key without the ro_live_ prefix.
 			}
 
 			hash := sha256Hex(key)
@@ -185,6 +186,31 @@ func Auth(pc AuthResolver, supabaseURL, jwtSecret string) func(http.Handler) htt
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// serveUser resolves the app profile shared by Better Auth sessions and legacy
+// Supabase JWTs, writes an auth error when needed, and calls the next handler on
+// success. Dashboard requests intentionally have no API key id.
+func serveUser(next http.Handler, pc AuthResolver, userID string, w http.ResponseWriter, r *http.Request) {
+	prof, err := pc.GetProfile(userID)
+	if err != nil {
+		slog.Warn("auth: profile lookup failed", "user_id", userID, "err", err)
+		writeAuthError(w, http.StatusUnauthorized, "user profile not found")
+		return
+	}
+	if prof.FreeUSDRemaining <= 0 {
+		writeAuthError(w, http.StatusPaymentRequired, "insufficient balance — add credits to continue")
+		return
+	}
+	tc := tierconfig.Get(prof.Tier)
+	info := AuthInfo{
+		TenantID:         userID,
+		Config:           tc,
+		FreeUSDRemaining: prof.FreeUSDRemaining,
+		RateUSDPerSec:    tc.RateUSDPerSec,
+	}
+	ctx := context.WithValue(r.Context(), authInfoKey{}, info)
+	next.ServeHTTP(w, r.WithContext(ctx))
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────

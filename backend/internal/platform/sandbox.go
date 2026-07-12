@@ -1,19 +1,13 @@
 package platform
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
-	"strings"
 	"time"
 )
 
-// Sandbox is a row in the public.sandboxes registry table — the dashboard's source of
-// truth for listing sandboxes and their state. The backend is the only writer (service
-// role, bypasses RLS), same as usage_logs.
 type Sandbox struct {
 	ID       string         `json:"id"`
 	UserID   string         `json:"user_id"`
@@ -28,7 +22,6 @@ type Sandbox struct {
 	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
-// SandboxListItem is a sandbox summary returned to the SDK's list() call.
 type SandboxListItem struct {
 	ID       string         `json:"id"`
 	Name     string         `json:"name"`
@@ -41,231 +34,138 @@ type SandboxListItem struct {
 	Created  string         `json:"created_at,omitempty"`
 }
 
-// ListSandboxes returns a user's non-destroyed sandboxes (the SDK's ro.list()).
 func (c *Client) ListSandboxes(ctx context.Context, userID string) ([]SandboxListItem, error) {
-	url := c.baseURL + "/rest/v1/sandboxes?user_id=eq." + userID +
-		"&state=neq.destroyed&select=id,name,state,tier,vcpus,memory_mb,disk_gb,metadata,created_at&order=created_at.desc"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	rows, err := c.pool.Query(ctx, `SELECT id::text,name,state,tier,vcpus,memory_mb,disk_gb,COALESCE(metadata,'{}'::jsonb),created_at FROM sandboxes WHERE user_id=$1 AND state<>'destroyed' ORDER BY created_at DESC`, userID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list sandboxes: %w", err)
 	}
-	req.Header.Set("apikey", c.serviceRoleKey)
-	req.Header.Set("Authorization", "Bearer "+c.serviceRoleKey)
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, err
+	defer rows.Close()
+	items := make([]SandboxListItem, 0)
+	for rows.Next() {
+		var item SandboxListItem
+		var metadata []byte
+		var created time.Time
+		if err := rows.Scan(&item.ID, &item.Name, &item.State, &item.Tier, &item.VCPUs, &item.MemoryMB, &item.DiskGB, &metadata, &created); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(metadata, &item.Metadata)
+		item.Created = created.UTC().Format(time.RFC3339)
+		items = append(items, item)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("list sandboxes status %d", resp.StatusCode)
-	}
-	var items []SandboxListItem
-	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
-		return nil, err
-	}
-	return items, nil
+	return items, rows.Err()
 }
 
-// UpsertSandbox inserts (or upserts on id) a sandbox row when a session is created.
-// Best-effort: failures are logged and never block the request.
 func (c *Client) UpsertSandbox(ctx context.Context, sb Sandbox) {
-	body, err := json.Marshal(sb)
-	if err != nil {
-		slog.Warn("sandbox upsert marshal failed", "err", err)
-		return
+	metadata, _ := json.Marshal(sb.Metadata)
+	var apiKeyID any
+	if sb.APIKeyID != "" {
+		apiKeyID = sb.APIKeyID
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/rest/v1/sandboxes", bytes.NewReader(body))
+	_, err := c.pool.Exec(ctx, `INSERT INTO sandboxes (id,user_id,api_key_id,name,state,tier,vcpus,memory_mb,disk_gb,internet,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (id) DO UPDATE SET user_id=EXCLUDED.user_id,api_key_id=EXCLUDED.api_key_id,name=EXCLUDED.name,state=EXCLUDED.state,tier=EXCLUDED.tier,vcpus=EXCLUDED.vcpus,memory_mb=EXCLUDED.memory_mb,disk_gb=EXCLUDED.disk_gb,internet=EXCLUDED.internet,metadata=EXCLUDED.metadata,updated_at=now()`, sb.ID, sb.UserID, apiKeyID, sb.Name, sb.State, sb.Tier, sb.VCPUs, sb.MemoryMB, sb.DiskGB, sb.Internet, metadata)
 	if err != nil {
-		slog.Warn("sandbox upsert request build failed", "err", err)
-		return
+		slog.Warn("sandbox upsert failed", "err", err)
 	}
-	req.Header.Set("apikey", c.serviceRoleKey)
-	req.Header.Set("Authorization", "Bearer "+c.serviceRoleKey)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Prefer", "resolution=merge-duplicates,return=minimal")
-	c.doSandbox(req, "upsert")
 }
 
-// UpdateSandboxState patches a sandbox's state (active/paused/destroyed) and the relevant
-// timestamps so the dashboard reflects reality after pause/resume/destroy — including
-// automatic idle pauses driven by the reaper.
 func (c *Client) UpdateSandboxState(ctx context.Context, id, state string) {
-	now := time.Now().UTC()
-	nowStr := now.Format(time.RFC3339)
-	patch := map[string]any{"state": state, "updated_at": nowStr}
+	var err error
 	switch state {
 	case "paused":
-		patch["paused_at"] = nowStr
-		// 7-day retention TTL (matches the backend reaper's pauseTTL).
-		patch["expires_at"] = now.Add(7 * 24 * time.Hour).Format(time.RFC3339)
+		_, err = c.pool.Exec(ctx, `UPDATE sandboxes SET state=$2,updated_at=now(),paused_at=now(),expires_at=now()+interval '7 days' WHERE id=$1`, id, state)
 	case "active":
-		patch["last_used_at"] = nowStr
-		patch["expires_at"] = nil // running → no TTL
+		_, err = c.pool.Exec(ctx, `UPDATE sandboxes SET state=$2,updated_at=now(),last_used_at=now(),expires_at=NULL WHERE id=$1`, id, state)
+	default:
+		_, err = c.pool.Exec(ctx, `UPDATE sandboxes SET state=$2,updated_at=now() WHERE id=$1`, id, state)
 	}
-	body, err := json.Marshal(patch)
 	if err != nil {
-		slog.Warn("sandbox state marshal failed", "err", err)
-		return
+		slog.Warn("sandbox state update failed", "err", err)
 	}
-	url := c.baseURL + "/rest/v1/sandboxes?id=eq." + id
-	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, url, bytes.NewReader(body))
-	if err != nil {
-		slog.Warn("sandbox state request build failed", "err", err)
-		return
-	}
-	req.Header.Set("apikey", c.serviceRoleKey)
-	req.Header.Set("Authorization", "Bearer "+c.serviceRoleKey)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Prefer", "return=minimal")
-	c.doSandbox(req, "state")
 }
 
-// SandboxRun is one execution (an /exec or /run) — the run-history summary the dashboard
-// lists per sandbox (public.sandbox_runs). Its ID links the output lines in sandbox_logs.
 type SandboxRun struct {
-	ID         string `json:"id"` // run_id (backend-generated)
+	ID         string `json:"id"`
 	SandboxID  string `json:"sandbox_id"`
 	UserID     string `json:"user_id"`
-	Kind       string `json:"kind"`     // exec | run
-	Language   string `json:"language"` // bash | python | ...
-	Command    string `json:"command"`  // command or code (truncated)
+	Kind       string `json:"kind"`
+	Language   string `json:"language"`
+	Command    string `json:"command"`
 	ExitCode   int    `json:"exit_code"`
-	Status     string `json:"status"` // ok | error | timeout
+	Status     string `json:"status"`
 	DurationMs int    `json:"duration_ms"`
-	StartedAt  string `json:"started_at"` // RFC3339, stamped at execution time (not DB insert time)
+	StartedAt  string `json:"started_at"`
 }
 
-// InsertSandboxRun records one execution's summary. Best-effort.
 func (c *Client) InsertSandboxRun(ctx context.Context, run SandboxRun) {
-	body, err := json.Marshal(run)
+	_, err := c.pool.Exec(ctx, `INSERT INTO sandbox_runs (id,sandbox_id,user_id,kind,language,command,exit_code,status,duration_ms,started_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, run.ID, run.SandboxID, run.UserID, run.Kind, run.Language, run.Command, run.ExitCode, run.Status, run.DurationMs, run.StartedAt)
 	if err != nil {
-		slog.Warn("sandbox run marshal failed", "err", err)
-		return
+		slog.Warn("sandbox run insert failed", "err", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/rest/v1/sandbox_runs", bytes.NewReader(body))
-	if err != nil {
-		slog.Warn("sandbox run request build failed", "err", err)
-		return
-	}
-	req.Header.Set("apikey", c.serviceRoleKey)
-	req.Header.Set("Authorization", "Bearer "+c.serviceRoleKey)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Prefer", "return=minimal")
-	c.doSandbox(req, "run")
 }
 
-// SandboxLog is one line of execution output for a sandbox (public.sandbox_logs).
-// RunID ties the line to its SandboxRun so the dashboard can filter logs per run.
 type SandboxLog struct {
 	SandboxID string `json:"sandbox_id"`
 	RunID     string `json:"run_id,omitempty"`
 	UserID    string `json:"user_id"`
-	Stream    string `json:"stream"`          // stdout | stderr | system
-	Level     string `json:"level,omitempty"` // info | warn | error (reliable, from stream+exit)
+	Stream    string `json:"stream"`
+	Level     string `json:"level,omitempty"`
 	Language  string `json:"language,omitempty"`
 	Content   string `json:"content"`
 }
 
-// InsertSandboxLog appends an execution-output line for a sandbox. Best-effort.
-func (c *Client) InsertSandboxLog(ctx context.Context, l SandboxLog) {
-	body, err := json.Marshal(l)
-	if err != nil {
-		slog.Warn("sandbox log marshal failed", "err", err)
-		return
+func (c *Client) InsertSandboxLog(ctx context.Context, entry SandboxLog) {
+	var runID any
+	if entry.RunID != "" {
+		runID = entry.RunID
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/rest/v1/sandbox_logs", bytes.NewReader(body))
+	_, err := c.pool.Exec(ctx, `INSERT INTO sandbox_logs (sandbox_id,run_id,user_id,stream,level,language,content) VALUES ($1,$2,$3,$4,$5,$6,$7)`, entry.SandboxID, runID, entry.UserID, entry.Stream, entry.Level, entry.Language, entry.Content)
 	if err != nil {
-		slog.Warn("sandbox log request build failed", "err", err)
-		return
+		slog.Warn("sandbox log insert failed", "err", err)
 	}
-	req.Header.Set("apikey", c.serviceRoleKey)
-	req.Header.Set("Authorization", "Bearer "+c.serviceRoleKey)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Prefer", "return=minimal")
-	c.doSandbox(req, "log")
 }
 
-// UsageMeter is one accrual interval's raw resource-time delta for a sandbox. RAW UNITS
-// ONLY — no cost. Bucket is the HOUR the delta belongs to; the delta is added into the
-// single (sandbox_id, hour) row via meter_accrue so one row accumulates the whole hour.
 type UsageMeter struct {
 	UserID        string
 	SandboxID     string
 	Tier          string
-	Bucket        string // RFC3339, truncated to the hour
+	Bucket        string
 	VCPUSeconds   float64
 	RAMGBSeconds  float64
 	DiskGBSeconds float64
 }
 
-// AccrueUsageMeter adds a delta into the sandbox's current hour row (INSERT ... ON CONFLICT
-// DO UPDATE, via the meter_accrue RPC). One accumulating row per sandbox per hour, not a new
-// row each minute. Best-effort.
-func (c *Client) AccrueUsageMeter(ctx context.Context, m UsageMeter) {
-	args := map[string]any{
-		"p_user_id":    m.UserID,
-		"p_sandbox_id": m.SandboxID,
-		"p_tier":       m.Tier,
-		"p_bucket":     m.Bucket,
-		"p_vcpu":       m.VCPUSeconds,
-		"p_ram":        m.RAMGBSeconds,
-		"p_disk":       m.DiskGBSeconds,
-	}
-	body, err := json.Marshal(args)
+func (c *Client) AccrueUsageMeter(ctx context.Context, meter UsageMeter) {
+	_, err := c.pool.Exec(ctx, `INSERT INTO usage_meters (user_id,sandbox_id,tier,bucket,vcpu_seconds,ram_gb_seconds,disk_gb_seconds) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (sandbox_id,bucket) DO UPDATE SET vcpu_seconds=usage_meters.vcpu_seconds+EXCLUDED.vcpu_seconds,ram_gb_seconds=usage_meters.ram_gb_seconds+EXCLUDED.ram_gb_seconds,disk_gb_seconds=usage_meters.disk_gb_seconds+EXCLUDED.disk_gb_seconds`, meter.UserID, meter.SandboxID, meter.Tier, meter.Bucket, meter.VCPUSeconds, meter.RAMGBSeconds, meter.DiskGBSeconds)
 	if err != nil {
-		slog.Warn("usage meter marshal failed", "err", err)
-		return
+		slog.Warn("usage meter accrue failed", "err", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/rest/v1/rpc/meter_accrue", bytes.NewReader(body))
-	if err != nil {
-		slog.Warn("usage meter request build failed", "err", err)
-		return
-	}
-	req.Header.Set("apikey", c.serviceRoleKey)
-	req.Header.Set("Authorization", "Bearer "+c.serviceRoleKey)
-	req.Header.Set("Content-Type", "application/json")
-	c.doSandbox(req, "meter")
 }
 
-// SandboxRef is a minimal sandbox identity + state for startup reconciliation.
 type SandboxRef struct {
-	ID    string `json:"id"`
-	State string `json:"state"`
+	ID       string    `json:"id"`
+	State    string    `json:"state"`
+	UserID   string    `json:"user_id"`
+	Tier     string    `json:"tier"`
+	VCPUs    int       `json:"vcpus"`
+	MemoryMB int       `json:"memory_mb"`
+	DiskGB   int       `json:"disk_gb"`
+	Internet bool      `json:"internet"`
+	Created  time.Time `json:"created_at"`
+	LastUsed time.Time `json:"last_used_at"`
 }
 
-// ListSandboxesByState returns the id+state of sandboxes currently in the given states, used
-// on startup to reconcile against the live store (destroy ghosts, sync stale states).
 func (c *Client) ListSandboxesByState(ctx context.Context, states []string) ([]SandboxRef, error) {
-	url := c.baseURL + "/rest/v1/sandboxes?select=id,state&state=in.(" + strings.Join(states, ",") + ")"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	rows, err := c.pool.Query(ctx, `SELECT id::text,state,user_id::text,COALESCE(tier,''),COALESCE(vcpus,0),COALESCE(memory_mb,0),COALESCE(disk_gb,0),COALESCE(internet,true),created_at,COALESCE(last_used_at,created_at) FROM sandboxes WHERE state=ANY($1)`, states)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list sandboxes by state: %w", err)
 	}
-	req.Header.Set("apikey", c.serviceRoleKey)
-	req.Header.Set("Authorization", "Bearer "+c.serviceRoleKey)
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, err
+	defer rows.Close()
+	refs := make([]SandboxRef, 0)
+	for rows.Next() {
+		var ref SandboxRef
+		if err := rows.Scan(&ref.ID, &ref.State, &ref.UserID, &ref.Tier, &ref.VCPUs, &ref.MemoryMB, &ref.DiskGB, &ref.Internet, &ref.Created, &ref.LastUsed); err != nil {
+			return nil, err
+		}
+		refs = append(refs, ref)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("list sandboxes status %d", resp.StatusCode)
-	}
-	var refs []SandboxRef
-	if err := json.NewDecoder(resp.Body).Decode(&refs); err != nil {
-		return nil, err
-	}
-	return refs, nil
-}
-
-func (c *Client) doSandbox(req *http.Request, op string) {
-	resp, err := c.http.Do(req)
-	if err != nil {
-		slog.Warn("sandbox "+op+" failed", "err", err)
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		slog.Warn("sandbox "+op+" unexpected status", "status", resp.StatusCode)
-	}
+	return refs, rows.Err()
 }

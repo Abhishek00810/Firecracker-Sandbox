@@ -7,6 +7,13 @@ import (
 )
 
 func insertUsageLogAsync(logger platform.UsageLogger, log platform.UsageLog) {
+	// usage_logs.api_key_id is required in the existing schema. Dashboard calls
+	// authenticate with a Better Auth session and have no API key, while their
+	// resource usage is still recorded by usage_meters. Do not send an invalid
+	// empty UUID to PostgREST.
+	if log.APIKeyID == "" {
+		return
+	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 		defer cancel()

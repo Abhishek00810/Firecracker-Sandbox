@@ -51,7 +51,7 @@ func TestExecuteHandlerSuccess(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/execute", bytes.NewBufferString(`{"code":"print(1+1)","language":"python"}`))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Authorization", "Bearer ro_live_test-key")
 	rec := httptest.NewRecorder()
 
 	server.ServeHTTP(rec, req)
@@ -78,6 +78,37 @@ func TestExecuteHandlerSuccess(t *testing.T) {
 	}
 }
 
+func TestExecuteHandlerAcceptsBetterAuthSession(t *testing.T) {
+	server := newTestServer(t, testDeps{
+		resolver: &fakePlatformService{
+			record: platform.KeyRecord{
+				ID:               "profile-source",
+				Tier:             tierconfig.PAYG,
+				FreeUSDRemaining: 10,
+			},
+			sessionUserID: "better-auth-user",
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/execute", bytes.NewBufferString(`{"code":"print(1)","language":"python"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer better-auth-session-token")
+	rec := httptest.NewRecorder()
+
+	server.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp handler.ExecuteResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Tenant == nil || resp.Tenant.TenantID != "better-auth-user" {
+		t.Fatalf("unexpected tenant payload: %+v", resp.Tenant)
+	}
+}
+
 func TestExecuteHandlerSystemErrorReturnsServiceUnavailable(t *testing.T) {
 	server := newTestServer(t, testDeps{
 		executor: fakeExecutor{
@@ -87,7 +118,7 @@ func TestExecuteHandlerSystemErrorReturnsServiceUnavailable(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/execute", bytes.NewBufferString(`{"code":"print(1+1)","language":"python"}`))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Authorization", "Bearer ro_live_test-key")
 	rec := httptest.NewRecorder()
 
 	server.ServeHTTP(rec, req)
@@ -125,7 +156,7 @@ func TestExecuteUsageLogDoesNotUseRequestCancellationContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodPost, "/execute", bytes.NewBufferString(`{"code":"print(1+1)","language":"python"}`)).WithContext(ctx)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Authorization", "Bearer ro_live_test-key")
 	rec := httptest.NewRecorder()
 
 	server.ServeHTTP(rec, req)
@@ -161,7 +192,7 @@ func TestSessionLifecycle(t *testing.T) {
 	})
 
 	createReq := httptest.NewRequest(http.MethodPost, "/session", nil)
-	createReq.Header.Set("Authorization", "Bearer pro-key")
+	createReq.Header.Set("Authorization", "Bearer ro_live_pro-key")
 	createRec := httptest.NewRecorder()
 	server.ServeHTTP(createRec, createReq)
 
@@ -180,7 +211,7 @@ func TestSessionLifecycle(t *testing.T) {
 
 	runReq := httptest.NewRequest(http.MethodPost, "/session/"+sessionID+"/run", bytes.NewBufferString(`{"code":"print(x)","language":"python"}`))
 	runReq.Header.Set("Content-Type", "application/json")
-	runReq.Header.Set("Authorization", "Bearer pro-key")
+	runReq.Header.Set("Authorization", "Bearer ro_live_pro-key")
 	runRec := httptest.NewRecorder()
 	server.ServeHTTP(runRec, runReq)
 
@@ -197,7 +228,7 @@ func TestSessionLifecycle(t *testing.T) {
 	}
 
 	getReq := httptest.NewRequest(http.MethodGet, "/session/"+sessionID, nil)
-	getReq.Header.Set("Authorization", "Bearer pro-key")
+	getReq.Header.Set("Authorization", "Bearer ro_live_pro-key")
 	getRec := httptest.NewRecorder()
 	server.ServeHTTP(getRec, getReq)
 
@@ -206,12 +237,45 @@ func TestSessionLifecycle(t *testing.T) {
 	}
 
 	delReq := httptest.NewRequest(http.MethodDelete, "/session/"+sessionID, nil)
-	delReq.Header.Set("Authorization", "Bearer pro-key")
+	delReq.Header.Set("Authorization", "Bearer ro_live_pro-key")
 	delRec := httptest.NewRecorder()
 	server.ServeHTTP(delRec, delReq)
 
 	if delRec.Code != http.StatusNoContent {
 		t.Fatalf("expected 204 from delete, got %d: %s", delRec.Code, delRec.Body.String())
+	}
+}
+
+func TestSessionLifecycleRejectsForeignTenant(t *testing.T) {
+	svc := newFakeSessionService()
+	svc.sessions["foreign-session"] = &session.Session{
+		ID:     "foreign-session",
+		UserID: "tenant-2",
+		Tier:   tierconfig.PAYG,
+	}
+	server := newTestServer(t, testDeps{
+		resolver: &fakePlatformService{
+			record: platform.KeyRecord{
+				ID:               "key-1",
+				UserID:           "tenant-1",
+				Tier:             tierconfig.PAYG,
+				IsActive:         true,
+				FreeUSDRemaining: 10,
+			},
+		},
+		sessionSvc: svc,
+	})
+
+	req := httptest.NewRequest(http.MethodDelete, "/session/foreign-session", nil)
+	req.Header.Set("Authorization", "Bearer ro_live_test-key")
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, ok := svc.GetSession("foreign-session"); !ok {
+		t.Fatal("foreign tenant session was deleted")
 	}
 }
 
@@ -280,11 +344,12 @@ func (f fakeExecutor) Execute(ctx context.Context, code string, language string)
 }
 
 type fakePlatformService struct {
-	record   platform.KeyRecord
-	mu       sync.Mutex
-	logs     []platform.UsageLog
-	logCh    chan error
-	logDelay time.Duration
+	record        platform.KeyRecord
+	sessionUserID string
+	mu            sync.Mutex
+	logs          []platform.UsageLog
+	logCh         chan error
+	logDelay      time.Duration
 }
 
 func (f *fakePlatformService) ResolveKey(keyHash string) (platform.KeyRecord, error) {
@@ -292,6 +357,13 @@ func (f *fakePlatformService) ResolveKey(keyHash string) (platform.KeyRecord, er
 		return platform.KeyRecord{}, fmt.Errorf("not found")
 	}
 	return f.record, nil
+}
+
+func (f *fakePlatformService) ResolveSession(token string) (platform.SessionRecord, error) {
+	if f.sessionUserID == "" {
+		return platform.SessionRecord{}, platform.ErrSessionNotFound
+	}
+	return platform.SessionRecord{UserID: f.sessionUserID}, nil
 }
 
 func (f *fakePlatformService) InsertUsageLog(ctx context.Context, log platform.UsageLog) {

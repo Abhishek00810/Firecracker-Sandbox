@@ -6,6 +6,10 @@ type KeyResolver interface {
 	ResolveKey(keyHash string) (KeyRecord, error)
 }
 
+type SessionResolver interface {
+	ResolveSession(token string) (SessionRecord, error)
+}
+
 type UsageLogger interface {
 	InsertUsageLog(ctx context.Context, log UsageLog)
 	UpsertSandbox(ctx context.Context, sb Sandbox)
@@ -17,5 +21,6 @@ type UsageLogger interface {
 
 type Service interface {
 	KeyResolver
+	SessionResolver
 	UsageLogger
 }
