@@ -141,12 +141,20 @@ func (c *Client) AccrueUsageMeter(ctx context.Context, meter UsageMeter) {
 }
 
 type SandboxRef struct {
-	ID    string `json:"id"`
-	State string `json:"state"`
+	ID       string    `json:"id"`
+	State    string    `json:"state"`
+	UserID   string    `json:"user_id"`
+	Tier     string    `json:"tier"`
+	VCPUs    int       `json:"vcpus"`
+	MemoryMB int       `json:"memory_mb"`
+	DiskGB   int       `json:"disk_gb"`
+	Internet bool      `json:"internet"`
+	Created  time.Time `json:"created_at"`
+	LastUsed time.Time `json:"last_used_at"`
 }
 
 func (c *Client) ListSandboxesByState(ctx context.Context, states []string) ([]SandboxRef, error) {
-	rows, err := c.pool.Query(ctx, `SELECT id::text,state FROM sandboxes WHERE state=ANY($1)`, states)
+	rows, err := c.pool.Query(ctx, `SELECT id::text,state,user_id::text,COALESCE(tier,''),COALESCE(vcpus,0),COALESCE(memory_mb,0),COALESCE(disk_gb,0),COALESCE(internet,true),created_at,COALESCE(last_used_at,created_at) FROM sandboxes WHERE state=ANY($1)`, states)
 	if err != nil {
 		return nil, fmt.Errorf("list sandboxes by state: %w", err)
 	}
@@ -154,7 +162,7 @@ func (c *Client) ListSandboxesByState(ctx context.Context, states []string) ([]S
 	refs := make([]SandboxRef, 0)
 	for rows.Next() {
 		var ref SandboxRef
-		if err := rows.Scan(&ref.ID, &ref.State); err != nil {
+		if err := rows.Scan(&ref.ID, &ref.State, &ref.UserID, &ref.Tier, &ref.VCPUs, &ref.MemoryMB, &ref.DiskGB, &ref.Internet, &ref.Created, &ref.LastUsed); err != nil {
 			return nil, err
 		}
 		refs = append(refs, ref)
