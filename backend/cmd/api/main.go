@@ -78,8 +78,21 @@ func main() {
 		slog.Warn("cgroup init failed, limits will not be enforced", "err", err)
 	}
 
-	freeTc := tierconfig.Tiers[tierconfig.PAYG]
-	proTc := tierconfig.Tiers[tierconfig.PAYG]
+	// Tier values live in the tier_configs table, owned and seeded by the
+	// SvelteKit app; the backend refuses to guess if they're missing.
+	tiers, err := platformClient.LoadTierConfigs(context.Background())
+	if err != nil {
+		slog.Error("tier config load failed", "err", err)
+		os.Exit(1)
+	}
+	tierconfig.Set(tiers)
+	if !tierconfig.Has(tierconfig.PAYG) {
+		slog.Error("tier_configs has no payg row — run pnpm db:push in sk-renderops-platform")
+		os.Exit(1)
+	}
+
+	freeTc := tierconfig.Get(tierconfig.PAYG)
+	proTc := tierconfig.Get(tierconfig.PAYG)
 
 	// Network slots are pre-created by server.sh (SLOT_COUNT). The Go slot pool MUST
 	// match that count exactly: handing out a slot with no backing netns makes the
