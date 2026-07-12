@@ -30,7 +30,15 @@ type Config struct {
 	Warnings           []string
 }
 
-func Load() (*Config, error) {
+// Load builds the full config for the API/monolith — requires DATABASE_URL.
+func Load() (*Config, error) { return load(true) }
+
+// LoadWorker builds the config for a host agent (worker): the same Firecracker
+// assets + host validation as Load, but with no DATABASE_URL requirement — the
+// worker has no DB (the control plane owns Postgres).
+func LoadWorker() (*Config, error) { return load(false) }
+
+func load(requireDB bool) (*Config, error) {
 	cfg := &Config{
 		DatabaseURL:        strings.TrimSpace(os.Getenv("DATABASE_URL")),
 		SupabaseURL:        strings.TrimSpace(os.Getenv("SUPABASE_URL")),
@@ -41,7 +49,7 @@ func Load() (*Config, error) {
 		HostValidationMode: defaultString(strings.TrimSpace(os.Getenv("HOST_VALIDATION_MODE")), "strict"),
 	}
 
-	if cfg.DatabaseURL == "" {
+	if requireDB && cfg.DatabaseURL == "" {
 		return nil, errors.New("DATABASE_URL must be set")
 	}
 
