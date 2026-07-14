@@ -118,17 +118,38 @@ done
 # Sweep leaked per-VM cgroups (procs were killed above, so the dirs are empty).
 sudo find /sys/fs/cgroup/sandbox -type d -name 'vm-*' -exec rmdir {} + 2>/dev/null || true
 
-# Recreate custom iptables chains (tear down first for idempotency)
+# Tear down any legacy FC_SNAT/FC_FWD iptables chains left by a previous (pre-nftables) boot,
+# so they can't linger and double-NAT / interfere with the nftables table below.
 sudo iptables -t nat -D POSTROUTING -j FC_SNAT 2>/dev/null || true
 sudo iptables -D FORWARD -j FC_FWD 2>/dev/null || true
-sudo iptables -t nat -F FC_SNAT 2>/dev/null || true
-sudo iptables -F FC_FWD 2>/dev/null || true
-sudo iptables -t nat -X FC_SNAT 2>/dev/null || true
-sudo iptables -X FC_FWD 2>/dev/null || true
-sudo iptables -t nat -N FC_SNAT
-sudo iptables -N FC_FWD
-sudo iptables -t nat -A POSTROUTING -j FC_SNAT
-sudo iptables -A FORWARD -j FC_FWD
+sudo iptables -t nat -F FC_SNAT 2>/dev/null || true; sudo iptables -t nat -X FC_SNAT 2>/dev/null || true
+sudo iptables -F FC_FWD 2>/dev/null || true; sudo iptables -X FC_FWD 2>/dev/null || true
+
+# Egress firewall: nftables (replaces the per-slot FC_SNAT/FC_FWD iptables — ~150 rules -> ~6).
+# One table, O(1) sets, DEFAULT-DENY forward owned by nftables, conntrack fast-path.
+# Idempotent: destroy+recreate atomically. slot_veths is populated below; blocked_veths is
+# toggled at runtime by SetSlotEgress (Go) for the internet on/off control.
+sudo nft -f - <<NFT
+destroy table inet fc
+table inet fc {
+	set slot_veths    { type ifname; }
+	set blocked_veths { type ifname; }
+	chain forward {
+		type filter hook forward priority filter; policy drop;
+		iifname @blocked_veths drop
+		oifname @blocked_veths drop
+		ct state established,related accept
+		ct state invalid drop
+		iifname @slot_veths accept
+	}
+	chain postrouting {
+		type nat hook postrouting priority srcnat;
+		ip saddr 10.66.0.0/16 oifname "$MAIN_IF" masquerade
+	}
+}
+NFT
+# Neutralize the legacy iptables FORWARD drop so the nftables policy-drop is authoritative.
+sudo iptables -P FORWARD ACCEPT
 
 # Create all slots in parallel — each slot uses unique names/IPs so no conflicts.
 # Per-namespace iptables are also parallelized (each runs in its own netns).
@@ -151,20 +172,16 @@ for i in $(seq 0 $((SLOT_COUNT-1))); do
         sudo ip netns exec fc-ns-$i ip addr add $N_IP/30 dev veth-ns-$i
         sudo ip netns exec fc-ns-$i ip link set veth-ns-$i up
         sudo ip netns exec fc-ns-$i ip route add default via $H_IP
-        sudo ip netns exec fc-ns-$i iptables -t nat -A POSTROUTING -s 172.16.0.0/30 -o veth-ns-$i -j MASQUERADE
+        sudo ip netns exec fc-ns-$i nft "add table ip fc_ns; add chain ip fc_ns postrouting { type nat hook postrouting priority srcnat; }; add rule ip fc_ns postrouting ip saddr 172.16.0.0/30 masquerade"
     ) &
 done
 wait
 
-# Host-level iptables rules — sequential to avoid concurrent table lock conflicts
-if [ -n "$MAIN_IF" ]; then
-    for i in $(seq 0 $((SLOT_COUNT-1))); do
-        N_IP="10.$((66 + i/256)).$((i % 256)).2"
-        sudo iptables -t nat -A FC_SNAT -s $N_IP/32 -o $MAIN_IF -j MASQUERADE
-        sudo iptables -A FC_FWD -i veth-fc-$i -j ACCEPT
-        sudo iptables -A FC_FWD -o veth-fc-$i -m state --state RELATED,ESTABLISHED -j ACCEPT
-    done
-fi
+# Register every slot's veth in the nftables set — one masquerade + forward rule now serve
+# ALL slots via @slot_veths (replaces the per-slot FC_SNAT/FC_FWD host rules). Added as a
+# single element list (atomic).
+ELEMS=$(for i in $(seq 0 $((SLOT_COUNT-1))); do printf '"veth-fc-%d", ' "$i"; done | sed 's/, $//')
+sudo nft add element inet fc slot_veths "{ $ELEMS }"
 echo "[server]   $SLOT_COUNT network slots ready"
 
 # ── 4. Load env vars ─────────────────────────────────────────────────────────

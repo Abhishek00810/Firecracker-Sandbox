@@ -282,21 +282,26 @@ func (f *FireCrackerManager) getSocketPath(vmID string) string {
 	return filepath.Join(f.SocketDir, fmt.Sprintf("%s.sock", vmID))
 }
 
-// SetSlotEgress controls internet egress for a slot's network namespace. allow=false
-// inserts a DROP on the guest subnet's forwarded traffic (vsock host↔guest control is
-// unaffected — it's not IP); allow=true clears it. It deletes any existing rule first
-// so a reused slot is normalized. No-op for cold-boot VMs (slot < 0, no slot netns).
+// SetSlotEgress controls internet egress for a slot by toggling its host veth in the
+// nftables `blocked_veths` set (defined in renderops-start.sh). Present = egress blocked
+// (the forward chain drops it in both directions); absent = allowed. vsock host↔guest
+// control is unaffected (it's not IP). Atomic, O(1). Idempotent: deleting an absent element
+// or adding a present one is fine. No-op for cold-boot VMs (slot < 0, no slot).
 func (f *FireCrackerManager) SetSlotEgress(slot int, allow bool) error {
 	if slot < 0 {
 		return nil
 	}
-	ns := fmt.Sprintf("fc-ns-%d", slot)
-	// clear any existing DROP (ignore error when the rule isn't present)
-	exec.Command("ip", "netns", "exec", ns, "iptables", "-D", "FORWARD", "-s", "172.16.0.0/30", "-j", "DROP").Run()
-	if !allow {
-		if out, err := exec.Command("ip", "netns", "exec", ns, "iptables", "-I", "FORWARD", "-s", "172.16.0.0/30", "-j", "DROP").CombinedOutput(); err != nil {
-			return fmt.Errorf("block egress in %s: %w: %s", ns, err, out)
+	elem := fmt.Sprintf("{ \"veth-fc-%d\" }", slot)
+	if allow {
+		// remove from blocked_veths; tolerate "No such" when it wasn't blocked
+		if out, err := exec.Command("nft", "delete", "element", "inet", "fc", "blocked_veths", elem).CombinedOutput(); err != nil &&
+			!strings.Contains(string(out), "No such") {
+			return fmt.Errorf("unblock egress veth-fc-%d: %w: %s", slot, err, out)
 		}
+		return nil
+	}
+	if out, err := exec.Command("nft", "add", "element", "inet", "fc", "blocked_veths", elem).CombinedOutput(); err != nil {
+		return fmt.Errorf("block egress veth-fc-%d: %w: %s", slot, err, out)
 	}
 	return nil
 }
