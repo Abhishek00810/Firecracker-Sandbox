@@ -1,6 +1,7 @@
 package handler_test
 
 import (
+	"backend/internal/billing"
 	"backend/internal/executor"
 	"backend/internal/handler"
 	"backend/internal/middleware"
@@ -8,7 +9,6 @@ import (
 	"backend/internal/queue"
 	"backend/internal/ratelimit"
 	"backend/internal/session"
-	"backend/internal/tierconfig"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -34,6 +34,26 @@ func TestExecuteHandlerRequiresAuth(t *testing.T) {
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+}
+
+func TestExecuteHandlerRequiresPostAndPayload(t *testing.T) {
+	server := newTestServer(t, testDeps{})
+
+	getReq := httptest.NewRequest(http.MethodGet, "/execute", nil)
+	getReq.Header.Set("Authorization", "Bearer ro_live_test-key")
+	getRec := httptest.NewRecorder()
+	server.ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", getRec.Code)
+	}
+
+	postReq := httptest.NewRequest(http.MethodPost, "/execute", bytes.NewBufferString(`{"code":""}`))
+	postReq.Header.Set("Authorization", "Bearer ro_live_test-key")
+	postRec := httptest.NewRecorder()
+	server.ServeHTTP(postRec, postReq)
+	if postRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", postRec.Code)
 	}
 }
 
@@ -70,7 +90,7 @@ func TestExecuteHandlerSuccess(t *testing.T) {
 	if resp.Result == nil || resp.Result.Stdout != "2\n" {
 		t.Fatalf("unexpected result payload: %+v", resp.Result)
 	}
-	if resp.Tenant == nil || resp.Tenant.Tier != tierconfig.PAYG {
+	if resp.Tenant == nil || resp.Tenant.BillingModel != billing.PAYG {
 		t.Fatalf("unexpected tenant payload: %+v", resp.Tenant)
 	}
 	if rec.Header().Get("X-Request-ID") == "" {
@@ -82,9 +102,8 @@ func TestExecuteHandlerAcceptsBetterAuthSession(t *testing.T) {
 	server := newTestServer(t, testDeps{
 		resolver: &fakePlatformService{
 			record: platform.KeyRecord{
-				ID:               "profile-source",
-				Tier:             tierconfig.PAYG,
-				FreeUSDRemaining: 10,
+				ID:         "profile-source",
+				BalanceUSD: 10,
 			},
 			sessionUserID: "better-auth-user",
 		},
@@ -142,11 +161,10 @@ func TestExecuteHandlerSystemErrorReturnsServiceUnavailable(t *testing.T) {
 func TestExecuteUsageLogDoesNotUseRequestCancellationContext(t *testing.T) {
 	resolver := &fakePlatformService{
 		record: platform.KeyRecord{
-			ID:               "key-1",
-			UserID:           "tenant-1",
-			Tier:             tierconfig.PAYG,
-			IsActive:         true,
-			FreeUSDRemaining: 10,
+			ID:         "key-1",
+			UserID:     "tenant-1",
+			IsActive:   true,
+			BalanceUSD: 10,
 		},
 		logCh:    make(chan error, 1),
 		logDelay: 20 * time.Millisecond,
@@ -181,11 +199,10 @@ func TestSessionLifecycle(t *testing.T) {
 	server := newTestServer(t, testDeps{
 		resolver: &fakePlatformService{
 			record: platform.KeyRecord{
-				ID:               "key-1",
-				UserID:           "tenant-1",
-				Tier:             tierconfig.PAYG,
-				IsActive:         true,
-				FreeUSDRemaining: 10,
+				ID:         "key-1",
+				UserID:     "tenant-1",
+				IsActive:   true,
+				BalanceUSD: 10,
 			},
 		},
 		sessionSvc: svc,
@@ -246,21 +263,34 @@ func TestSessionLifecycle(t *testing.T) {
 	}
 }
 
+func TestSessionCreateRejectsClientSelectedTier(t *testing.T) {
+	server := newTestServer(t, testDeps{})
+	req := httptest.NewRequest(http.MethodPost, "/session", bytes.NewBufferString(`{"tier":"pro"}`))
+	req.Header.Set("Authorization", "Bearer ro_live_test-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	server.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for client-selected tier, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestSessionLifecycleRejectsForeignTenant(t *testing.T) {
 	svc := newFakeSessionService()
 	svc.sessions["foreign-session"] = &session.Session{
-		ID:     "foreign-session",
-		UserID: "tenant-2",
-		Tier:   tierconfig.PAYG,
+		ID:           "foreign-session",
+		UserID:       "tenant-2",
+		BillingModel: billing.PAYG,
 	}
 	server := newTestServer(t, testDeps{
 		resolver: &fakePlatformService{
 			record: platform.KeyRecord{
-				ID:               "key-1",
-				UserID:           "tenant-1",
-				Tier:             tierconfig.PAYG,
-				IsActive:         true,
-				FreeUSDRemaining: 10,
+				ID:         "key-1",
+				UserID:     "tenant-1",
+				IsActive:   true,
+				BalanceUSD: 10,
 			},
 		},
 		sessionSvc: svc,
@@ -292,11 +322,10 @@ func newTestServer(t *testing.T, deps testDeps) http.Handler {
 	if resolver == nil || resolver.record.ID == "" {
 		resolver = &fakePlatformService{
 			record: platform.KeyRecord{
-				ID:               "key-1",
-				UserID:           "tenant-1",
-				Tier:             tierconfig.PAYG,
-				IsActive:         true,
-				FreeUSDRemaining: 10,
+				ID:         "key-1",
+				UserID:     "tenant-1",
+				IsActive:   true,
+				BalanceUSD: 10,
 			},
 		}
 	}
@@ -318,20 +347,17 @@ func newTestServer(t *testing.T, deps testDeps) http.Handler {
 		sessionSvc = newFakeSessionService()
 	}
 
-	freeQueue := queue.NewJobQueue(exec, 1)
-	freeQueue.Start()
-	proQueue := queue.NewJobQueue(exec, 1)
-	proQueue.Start()
+	execQueue := queue.NewJobQueue(exec, 1)
+	execQueue.Start()
 
-	freeLimiter := ratelimit.NewTenantLimiter(rate.Limit(1000), 1000)
-	proLimiter := ratelimit.NewTenantLimiter(rate.Limit(1000), 1000)
+	tenantLimiter := ratelimit.NewTenantLimiter(rate.Limit(1000), 1000)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/execute", handler.ExecuteHandler(freeQueue, proQueue, freeLimiter, proLimiter, resolver))
+	mux.HandleFunc("/execute", handler.ExecuteHandler(execQueue, tenantLimiter, resolver))
 	mux.HandleFunc("/session", handler.SessionHandler(sessionSvc, resolver))
 	mux.HandleFunc("/session/", handler.SessionHandler(sessionSvc, resolver))
 
-	return middleware.Logging(middleware.Auth(resolver, "http://supabase.test", "test-jwt-secret")(mux))
+	return middleware.Logging(middleware.Auth(resolver, "http://supabase.test", "test-jwt-secret", testExecutionPolicy(), testBillingConfig())(mux))
 }
 
 type fakeExecutor struct {
@@ -387,7 +413,7 @@ func (f *fakePlatformService) ListSandboxes(ctx context.Context, userID string) 
 }
 
 func (f *fakePlatformService) GetProfile(userID string) (platform.Profile, error) {
-	return platform.Profile{Tier: f.record.Tier, FreeUSDRemaining: f.record.FreeUSDRemaining}, nil
+	return platform.Profile{BalanceUSD: f.record.BalanceUSD}, nil
 }
 
 type fakeSessionService struct {
@@ -412,17 +438,17 @@ func (f *fakeSessionService) Exec(ctx context.Context, sessionID, command string
 	}, nil
 }
 
-func (f *fakeSessionService) Create(ctx context.Context, userID, tier string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*session.Session, error) {
+func (f *fakeSessionService) Create(ctx context.Context, userID, billingModel string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*session.Session, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	id := fmt.Sprintf("sess-%d", len(f.sessions)+1)
 	sess := &session.Session{
-		ID:        id,
-		UserID:    userID,
-		Tier:      tier,
-		CreatedAt: time.Now().UTC(),
-		LastUsed:  time.Now().UTC(),
+		ID:           id,
+		UserID:       userID,
+		BillingModel: billingModel,
+		CreatedAt:    time.Now().UTC(),
+		LastUsed:     time.Now().UTC(),
 	}
 	f.sessions[id] = sess
 	return sess, nil

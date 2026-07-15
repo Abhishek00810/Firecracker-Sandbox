@@ -90,10 +90,10 @@ print(result.request_id)    # a22d5dad-1670-...
 
 ## Sessions (sync)
 
-Sessions give you a **persistent VM** — variables, imports, and state survive between `run()` calls. Available on Pro tier.
+Sessions give you a **persistent VM** — variables, imports, and state survive between `run()` calls.
 
 ```python
-with sb.session(tier="pro", env={"GITHUB_TOKEN": "ghp_..."}) as sess:
+with sb.session(env={"GITHUB_TOKEN": "ghp_..."}) as sess:
     sess.run("x = 100")
     sess.run("x *= 3")
     result = sess.run("print(x)")
@@ -115,7 +115,7 @@ Agents usually need shell commands for workflows such as `git clone`, `pip insta
 `pytest`, `git commit`, and `git push`. Use `Session.exec()` for that.
 
 ```python
-with sb.session(tier="pro", env={"GITHUB_TOKEN": "ghp_..."}) as sess:
+with sb.session(env={"GITHUB_TOKEN": "ghp_..."}) as sess:
     r = sess.exec("git clone https://github.com/org/repo.git /workspace/repo", timeout=60)
     print(r.stdout)
 
@@ -180,7 +180,7 @@ All three run simultaneously instead of sequentially — total time ~1x instead 
 async def main():
     sb = AsyncSandbox(api_key="ro_live_...")
 
-    async with await sb.session(tier="pro", env={"GITHUB_TOKEN": "ghp_..."}) as sess:
+    async with await sb.session(env={"GITHUB_TOKEN": "ghp_..."}) as sess:
         await sess.run("x = 100")
         await sess.run("x *= 3")
         result = await sess.run("print(x)")
@@ -238,12 +238,7 @@ except SandboxError as e:
 
 ---
 
-## Tiers
+## Billing And Limits
 
-| | Free | Pro |
-|---|---|---|
-| Stateless execution | Yes | Yes |
-| Sessions | 1 session | 3 sessions |
-| Max execution time | 10s | 60s |
-| Rate limit | 2 req/s | 10 req/s |
-| Parallel executions | Yes | Yes |
+All accounts use PAYG billing. Limits are server-owned and returned by the API;
+clients select a supported resource size rather than a plan.

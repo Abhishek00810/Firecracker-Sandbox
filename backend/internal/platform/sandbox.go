@@ -9,33 +9,33 @@ import (
 )
 
 type Sandbox struct {
-	ID       string         `json:"id"`
-	UserID   string         `json:"user_id"`
-	APIKeyID string         `json:"api_key_id,omitempty"`
-	Name     string         `json:"name"`
-	State    string         `json:"state"`
-	Tier     string         `json:"tier"`
-	VCPUs    int            `json:"vcpus"`
-	MemoryMB int            `json:"memory_mb"`
-	DiskGB   int            `json:"disk_gb"`
-	Internet bool           `json:"internet"`
-	Metadata map[string]any `json:"metadata,omitempty"`
+	ID           string         `json:"id"`
+	UserID       string         `json:"user_id"`
+	APIKeyID     string         `json:"api_key_id,omitempty"`
+	Name         string         `json:"name"`
+	State        string         `json:"state"`
+	BillingModel string         `json:"billing_model"`
+	VCPUs        int            `json:"vcpus"`
+	MemoryMB     int            `json:"memory_mb"`
+	DiskGB       int            `json:"disk_gb"`
+	Internet     bool           `json:"internet"`
+	Metadata     map[string]any `json:"metadata,omitempty"`
 }
 
 type SandboxListItem struct {
-	ID       string         `json:"id"`
-	Name     string         `json:"name"`
-	State    string         `json:"state"`
-	Tier     string         `json:"tier"`
-	VCPUs    int            `json:"vcpus"`
-	MemoryMB int            `json:"memory_mb"`
-	DiskGB   int            `json:"disk_gb"`
-	Metadata map[string]any `json:"metadata,omitempty"`
-	Created  string         `json:"created_at,omitempty"`
+	ID           string         `json:"id"`
+	Name         string         `json:"name"`
+	State        string         `json:"state"`
+	BillingModel string         `json:"billing_model"`
+	VCPUs        int            `json:"vcpus"`
+	MemoryMB     int            `json:"memory_mb"`
+	DiskGB       int            `json:"disk_gb"`
+	Metadata     map[string]any `json:"metadata,omitempty"`
+	Created      string         `json:"created_at,omitempty"`
 }
 
 func (c *Client) ListSandboxes(ctx context.Context, userID string) ([]SandboxListItem, error) {
-	rows, err := c.pool.Query(ctx, `SELECT id::text,name,state,tier,vcpus,memory_mb,disk_gb,COALESCE(metadata,'{}'::jsonb),created_at FROM sandboxes WHERE user_id=$1 AND state<>'destroyed' ORDER BY created_at DESC`, userID)
+	rows, err := c.pool.Query(ctx, `SELECT id::text,name,state,billing_model,vcpus,memory_mb,disk_gb,COALESCE(metadata,'{}'::jsonb),created_at FROM sandboxes WHERE user_id=$1 AND state<>'destroyed' ORDER BY created_at DESC`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list sandboxes: %w", err)
 	}
@@ -45,7 +45,7 @@ func (c *Client) ListSandboxes(ctx context.Context, userID string) ([]SandboxLis
 		var item SandboxListItem
 		var metadata []byte
 		var created time.Time
-		if err := rows.Scan(&item.ID, &item.Name, &item.State, &item.Tier, &item.VCPUs, &item.MemoryMB, &item.DiskGB, &metadata, &created); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.State, &item.BillingModel, &item.VCPUs, &item.MemoryMB, &item.DiskGB, &metadata, &created); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal(metadata, &item.Metadata)
@@ -61,7 +61,7 @@ func (c *Client) UpsertSandbox(ctx context.Context, sb Sandbox) {
 	if sb.APIKeyID != "" {
 		apiKeyID = sb.APIKeyID
 	}
-	_, err := c.pool.Exec(ctx, `INSERT INTO sandboxes (id,user_id,api_key_id,name,state,tier,vcpus,memory_mb,disk_gb,internet,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (id) DO UPDATE SET user_id=EXCLUDED.user_id,api_key_id=EXCLUDED.api_key_id,name=EXCLUDED.name,state=EXCLUDED.state,tier=EXCLUDED.tier,vcpus=EXCLUDED.vcpus,memory_mb=EXCLUDED.memory_mb,disk_gb=EXCLUDED.disk_gb,internet=EXCLUDED.internet,metadata=EXCLUDED.metadata,updated_at=now()`, sb.ID, sb.UserID, apiKeyID, sb.Name, sb.State, sb.Tier, sb.VCPUs, sb.MemoryMB, sb.DiskGB, sb.Internet, metadata)
+	_, err := c.pool.Exec(ctx, `INSERT INTO sandboxes (id,user_id,api_key_id,name,state,billing_model,vcpus,memory_mb,disk_gb,internet,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (id) DO UPDATE SET user_id=EXCLUDED.user_id,api_key_id=EXCLUDED.api_key_id,name=EXCLUDED.name,state=EXCLUDED.state,billing_model=EXCLUDED.billing_model,vcpus=EXCLUDED.vcpus,memory_mb=EXCLUDED.memory_mb,disk_gb=EXCLUDED.disk_gb,internet=EXCLUDED.internet,metadata=EXCLUDED.metadata,updated_at=now()`, sb.ID, sb.UserID, apiKeyID, sb.Name, sb.State, sb.BillingModel, sb.VCPUs, sb.MemoryMB, sb.DiskGB, sb.Internet, metadata)
 	if err != nil {
 		slog.Warn("sandbox upsert failed", "err", err)
 	}
@@ -126,7 +126,7 @@ func (c *Client) InsertSandboxLog(ctx context.Context, entry SandboxLog) {
 type UsageMeter struct {
 	UserID        string
 	SandboxID     string
-	Tier          string
+	BillingModel  string
 	Bucket        string
 	VCPUSeconds   float64
 	RAMGBSeconds  float64
@@ -134,27 +134,27 @@ type UsageMeter struct {
 }
 
 func (c *Client) AccrueUsageMeter(ctx context.Context, meter UsageMeter) {
-	_, err := c.pool.Exec(ctx, `INSERT INTO usage_meters (user_id,sandbox_id,tier,bucket,vcpu_seconds,ram_gb_seconds,disk_gb_seconds) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (sandbox_id,bucket) DO UPDATE SET vcpu_seconds=usage_meters.vcpu_seconds+EXCLUDED.vcpu_seconds,ram_gb_seconds=usage_meters.ram_gb_seconds+EXCLUDED.ram_gb_seconds,disk_gb_seconds=usage_meters.disk_gb_seconds+EXCLUDED.disk_gb_seconds`, meter.UserID, meter.SandboxID, meter.Tier, meter.Bucket, meter.VCPUSeconds, meter.RAMGBSeconds, meter.DiskGBSeconds)
+	_, err := c.pool.Exec(ctx, `INSERT INTO usage_meters (user_id,sandbox_id,billing_model,bucket,vcpu_seconds,ram_gb_seconds,disk_gb_seconds) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (sandbox_id,bucket) DO UPDATE SET vcpu_seconds=usage_meters.vcpu_seconds+EXCLUDED.vcpu_seconds,ram_gb_seconds=usage_meters.ram_gb_seconds+EXCLUDED.ram_gb_seconds,disk_gb_seconds=usage_meters.disk_gb_seconds+EXCLUDED.disk_gb_seconds`, meter.UserID, meter.SandboxID, meter.BillingModel, meter.Bucket, meter.VCPUSeconds, meter.RAMGBSeconds, meter.DiskGBSeconds)
 	if err != nil {
 		slog.Warn("usage meter accrue failed", "err", err)
 	}
 }
 
 type SandboxRef struct {
-	ID       string    `json:"id"`
-	State    string    `json:"state"`
-	UserID   string    `json:"user_id"`
-	Tier     string    `json:"tier"`
-	VCPUs    int       `json:"vcpus"`
-	MemoryMB int       `json:"memory_mb"`
-	DiskGB   int       `json:"disk_gb"`
-	Internet bool      `json:"internet"`
-	Created  time.Time `json:"created_at"`
-	LastUsed time.Time `json:"last_used_at"`
+	ID           string    `json:"id"`
+	State        string    `json:"state"`
+	UserID       string    `json:"user_id"`
+	BillingModel string    `json:"billing_model"`
+	VCPUs        int       `json:"vcpus"`
+	MemoryMB     int       `json:"memory_mb"`
+	DiskGB       int       `json:"disk_gb"`
+	Internet     bool      `json:"internet"`
+	Created      time.Time `json:"created_at"`
+	LastUsed     time.Time `json:"last_used_at"`
 }
 
 func (c *Client) ListSandboxesByState(ctx context.Context, states []string) ([]SandboxRef, error) {
-	rows, err := c.pool.Query(ctx, `SELECT id::text,state,user_id::text,COALESCE(tier,''),COALESCE(vcpus,0),COALESCE(memory_mb,0),COALESCE(disk_gb,0),COALESCE(internet,true),created_at,COALESCE(last_used_at,created_at) FROM sandboxes WHERE state=ANY($1)`, states)
+	rows, err := c.pool.Query(ctx, `SELECT id::text,state,user_id::text,COALESCE(billing_model,'payg'),COALESCE(vcpus,0),COALESCE(memory_mb,0),COALESCE(disk_gb,0),COALESCE(internet,true),created_at,COALESCE(last_used_at,created_at) FROM sandboxes WHERE state=ANY($1)`, states)
 	if err != nil {
 		return nil, fmt.Errorf("list sandboxes by state: %w", err)
 	}
@@ -162,7 +162,7 @@ func (c *Client) ListSandboxesByState(ctx context.Context, states []string) ([]S
 	refs := make([]SandboxRef, 0)
 	for rows.Next() {
 		var ref SandboxRef
-		if err := rows.Scan(&ref.ID, &ref.State, &ref.UserID, &ref.Tier, &ref.VCPUs, &ref.MemoryMB, &ref.DiskGB, &ref.Internet, &ref.Created, &ref.LastUsed); err != nil {
+		if err := rows.Scan(&ref.ID, &ref.State, &ref.UserID, &ref.BillingModel, &ref.VCPUs, &ref.MemoryMB, &ref.DiskGB, &ref.Internet, &ref.Created, &ref.LastUsed); err != nil {
 			return nil, err
 		}
 		refs = append(refs, ref)

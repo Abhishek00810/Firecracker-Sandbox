@@ -11,7 +11,6 @@ import (
 	"backend/internal/queue"
 	"backend/internal/ratelimit"
 	"backend/internal/session"
-	"backend/internal/tierconfig"
 	"backend/internal/vmsize"
 	"context"
 	"encoding/json"
@@ -80,21 +79,17 @@ func main() {
 		slog.Warn("cgroup init failed, limits will not be enforced", "err", err)
 	}
 
-	// Tier values live in the tier_configs table, owned and seeded by the
-	// SvelteKit app; the backend refuses to guess if they're missing.
-	tiers, err := platformClient.LoadTierConfigs(context.Background())
+	// The server owns one PAYG execution policy. Clients select resources, not plans.
+	executionPolicy, err := platformClient.LoadExecutionPolicy(context.Background())
 	if err != nil {
-		slog.Error("tier config load failed", "err", err)
+		slog.Error("execution policy load failed", "err", err)
 		os.Exit(1)
 	}
-	tierconfig.Set(tiers)
-	if !tierconfig.Has(tierconfig.PAYG) {
-		slog.Error("tier_configs has no payg row — run pnpm db:push in sk-renderops-platform")
+	billingConfig, err := platformClient.LoadBillingConfig(context.Background())
+	if err != nil {
+		slog.Error("billing config load failed", "err", err)
 		os.Exit(1)
 	}
-
-	freeTc := tierconfig.Get(tierconfig.PAYG)
-	proTc := tierconfig.Get(tierconfig.PAYG)
 
 	// Network slots are pre-created by server.sh (SLOT_COUNT). The Go slot pool MUST
 	// match that count exactly: handing out a slot with no backing netns makes the
@@ -119,26 +114,12 @@ func main() {
 			slog.Warn("invalid MAX_CONCURRENT_PROVISIONS, using default", "value", v, "default", maxProvisions)
 		}
 	}
-	// Of the total budget, reserve a slice for Pro only so a Free burst can never
-	// starve paying users. Default = a quarter of the budget (min 1); override with
-	// PRO_RESERVED_PROVISIONS. Clamped inside the manager so Free always keeps >=1.
-	proReserved := maxProvisions / 4
-	if proReserved < 1 {
-		proReserved = 1
-	}
-	if v := os.Getenv("PRO_RESERVED_PROVISIONS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-			proReserved = n
-		} else {
-			slog.Warn("invalid PRO_RESERVED_PROVISIONS, using default", "value", v, "default", proReserved)
-		}
-	}
-	slog.Info("provisioning concurrency limit", "max_concurrent_provisions", maxProvisions, "pro_reserved", proReserved)
+	slog.Info("provisioning concurrency limit", "max_concurrent_provisions", maxProvisions)
 
 	if cfg.FCRunUID > 0 {
 		slog.Info("firecracker privilege drop enabled", "uid", cfg.FCRunUID, "gid", cfg.FCRunGID)
 	}
-	vmManager := firecracker.NewFirecrackerManager(cfg.SocketDir, cfg.AssetsPath, cfg.FirecrackerBinary, slotCount, maxProvisions, proReserved, cfg.FCRunUID, cfg.FCRunGID)
+	vmManager := firecracker.NewFirecrackerManager(cfg.SocketDir, cfg.AssetsPath, cfg.FirecrackerBinary, slotCount, maxProvisions, cfg.FCRunUID, cfg.FCRunGID)
 
 	config := firecracker.VMConfig{
 		VCPUCount:  1, // 1 vCPU: halves thread pressure per VM → ~2x concurrency before the starvation cliff (test)
@@ -151,15 +132,11 @@ func main() {
 		BootArgs:   "console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on rng_core.default_quality=1024",
 	}
 
-	freeCgroupCfg := cgroup.Config{
-		CPUQuotaUS:  50_000, // 0.5 core
-		CPUPeriodUS: 100_000,
-		MemMaxBytes: 256 * 1024 * 1024, // 256MB
-	}
-	premiumCgroupCfg := cgroup.Config{
-		CPUQuotaUS:  200_000, // 2 cores
-		CPUPeriodUS: 100_000,
-		MemMaxBytes: 512 * 1024 * 1024, // 512MB
+	defaultSize := vmsize.Default()
+	statelessCgroupCfg := cgroup.Config{
+		CPUQuotaUS:  defaultSize.CgroupCPUQuotaUS(),
+		CPUPeriodUS: vmsize.CgroupCPUPeriodUS,
+		MemMaxBytes: defaultSize.CgroupMemMaxBytes(),
 	}
 
 	// Create the default-size snapshot template once at startup: boot one VM, warm up
@@ -172,13 +149,8 @@ func main() {
 		slog.Info("snapshot template ready", "snap", tmpl.SnapPath)
 	}
 
-	// Pro pools carry Pro=true so provisioning uses the reserved/priority path.
-	proConfig := config
-	proConfig.Pro = true
-
-	// Stateless /execute pools (default size).
-	freePool := firecracker.NewVMPoolWithSnapshot(0, freeTc.MaxPoolSize, config, vmManager, freeCgroupCfg, template, false, false)
-	premiumPool := firecracker.NewVMPoolWithSnapshot(0, proTc.MaxPoolSize, proConfig, vmManager, premiumCgroupCfg, template, false, false)
+	// Stateless /execute uses one PAYG pool at the default resource size.
+	statelessPool := firecracker.NewVMPoolWithSnapshot(executionPolicy.MinPoolSize, executionPolicy.MaxPoolSize, config, vmManager, statelessCgroupCfg, template, false, false)
 
 	// One session pool per resource size (vmsize.Sizes is the single source of truth). The
 	// default size reuses the template above; each other size gets its own template so all
@@ -191,7 +163,6 @@ func main() {
 		szCfg.VCPUCount = sz.VCPUs
 		szCfg.MemSizeMiB = sz.MemoryMB
 		szCfg.DiskGB = sz.DiskGB
-		szCfg.Pro = true
 		szCgroup := cgroup.Config{
 			CPUQuotaUS:  sz.CgroupCPUQuotaUS(),
 			CPUPeriodUS: vmsize.CgroupCPUPeriodUS,
@@ -218,7 +189,7 @@ func main() {
 				slog.Info("size template ready", "size", sz.Name, "snap", tmpl.SnapPath)
 			}
 		}
-		sizePools[sz.Key()] = firecracker.NewVMPoolWithSnapshot(0, proTc.MaxPoolSize, szCfg, vmManager, szCgroup, szTemplate, false, false)
+		sizePools[sz.Key()] = firecracker.NewVMPoolWithSnapshot(0, executionPolicy.MaxPoolSize, szCfg, vmManager, szCgroup, szTemplate, false, false)
 		sizeTemplates[sz.Key()] = szTemplate
 	}
 	slog.Info("VM pools initialized", "session_sizes", len(sizePools))
@@ -238,7 +209,7 @@ func main() {
 	}
 
 	// Raw resource-time metering: the manager's ticker hands us per-minute deltas; we write
-	// them as raw units to usage_meters (no cost — pricing is applied later via tier_rates).
+	// them as raw units to usage_meters (pricing is applied later via pricing_rates).
 	sessionMeterHook := func(s session.MeterSample) {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
@@ -246,7 +217,7 @@ func main() {
 			platformClient.AccrueUsageMeter(ctx, platform.UsageMeter{
 				UserID:        s.UserID,
 				SandboxID:     s.SandboxID,
-				Tier:          s.Tier,
+				BillingModel:  s.BillingModel,
 				Bucket:        time.Now().UTC().Truncate(time.Hour).Format(time.RFC3339), // one row per sandbox per hour
 				VCPUSeconds:   s.VCPUSeconds,
 				RAMGBSeconds:  s.RAMGBSeconds,
@@ -259,9 +230,9 @@ func main() {
 		vmManager,
 		template,
 		config,
-		proTc.MaxSessions,
-		proTc.SessionIdleTimeout,
-		proTc.SessionMaxLifetime,
+		executionPolicy.MaxSessions,
+		executionPolicy.SessionIdleTimeout,
+		executionPolicy.SessionMaxLifetime,
 		sizePools,
 		sizeTemplates,
 		sessionStateHook,
@@ -300,37 +271,24 @@ func main() {
 		slog.Info("startup reconcile complete", "db_active_paused", len(refs), "ghosts_destroyed", ghosts, "state_synced", synced)
 	}()
 
-	freeExec := firecracker.NewFirecrackerExecutor(vmManager)
-	freeExec.Pool = freePool
-	freeQueue := queue.NewJobQueue(freeExec, freeTc.MaxPoolSize)
-	freeQueue.Start()
+	execEngine := firecracker.NewFirecrackerExecutor(vmManager)
+	execEngine.Pool = statelessPool
+	execQueue := queue.NewJobQueue(execEngine, executionPolicy.MaxPoolSize)
+	execQueue.Start()
 
-	premiumExec := firecracker.NewFirecrackerExecutor(vmManager)
-	premiumExec.Pool = premiumPool
-	premiumQueue := queue.NewJobQueue(premiumExec, proTc.MaxPoolSize)
-	premiumQueue.Start()
-
-	freeLimiter := ratelimit.NewTenantLimiter(rate.Limit(freeTc.RateLimit), freeTc.RateBurst)
-	premiumLimiter := ratelimit.NewTenantLimiter(rate.Limit(proTc.RateLimit), proTc.RateBurst)
+	tenantLimiter := ratelimit.NewTenantLimiter(rate.Limit(executionPolicy.RateLimit), executionPolicy.RateBurst)
 
 	http.HandleFunc("/health", healthHandler)
-	http.HandleFunc("/execute", handler.ExecuteHandler(freeQueue, premiumQueue, freeLimiter, premiumLimiter, platformClient))
+	http.HandleFunc("/execute", handler.ExecuteHandler(execQueue, tenantLimiter, platformClient))
 	http.HandleFunc("/session", handler.SessionHandler(sessionMgr, platformClient))
 	http.HandleFunc("/session/", handler.SessionHandler(sessionMgr, platformClient))
 
 	metricsHandler := func(w http.ResponseWriter, r *http.Request) {
 		snap := metrics.GetSnapshot()
-		freeAvail, freeInUse := freePool.Stats()
-		premAvail, premInUse := premiumPool.Stats()
-		snap.FreePoolAvailable = freeAvail
-		snap.FreePoolInUse = freeInUse
-		snap.ProPoolAvailable = premAvail
-		snap.ProPoolInUse = premInUse
-		snap.FreeQueueDepth = freeQueue.Depth()
-		snap.ProQueueDepth = premiumQueue.Depth()
-		snap.VMPoolAvailable = freeAvail + premAvail
-		snap.VMPoolInUse = freeInUse + premInUse
-		snap.QueueDepth = snap.FreeQueueDepth + snap.ProQueueDepth
+		available, inUse := statelessPool.Stats()
+		snap.VMPoolAvailable = available
+		snap.VMPoolInUse = inUse
+		snap.QueueDepth = execQueue.Depth()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(snap)
 	}
@@ -344,7 +302,7 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
 	// Middleware chain: Logging → Auth → mux
-	chain := middleware.Logging(middleware.Auth(platformClient, cfg.SupabaseURL, cfg.SupabaseJWTSecret)(http.DefaultServeMux))
+	chain := middleware.Logging(middleware.Auth(platformClient, cfg.SupabaseURL, cfg.SupabaseJWTSecret, executionPolicy, billingConfig)(http.DefaultServeMux))
 
 	// Configured server with Slowloris-safe timeouts. ReadHeaderTimeout caps how long a
 	// client may take to send request headers — this is the Slowloris defense and is safe
@@ -383,8 +341,7 @@ func main() {
 	sessionMgr.PauseAllActive(pauseCtx)
 	pauseCancel()
 
-	freePool.Shutdown()
-	premiumPool.Shutdown()
+	statelessPool.Shutdown()
 	sessionMgr.Shutdown(context.Background())
 	slog.Info("shutdown complete")
 }

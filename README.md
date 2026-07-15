@@ -27,7 +27,7 @@ Each execution runs inside a dedicated Firecracker microVM — a separate Linux 
 | Git credential injection | Pass `GITHUB_TOKEN` at session create — private repos work |
 | cgroup v2 limits | CPU and memory hard caps enforced per VM by host kernel |
 | Bearer token auth | API key validated against Supabase, cached 60s in-memory |
-| Per-tenant tiers | Free and Pro tiers with separate VM pools and rate limits |
+| PAYG policy | Server-owned limits and pricing; clients select resources, not plans |
 | Network isolation | Per-VM network namespace with TAP device and veth pair |
 | Structured logging | JSON logs via `log/slog` with request IDs |
 | Metrics | p50/p95/p99 latency, error breakdown, pool state, queue depth |
@@ -96,12 +96,11 @@ Go REST API (port 8080)
 
 ### VM Pools
 
-Two stateless `/execute` pools (by tier), plus one `/session` pool per **size** (`vmsize.Sizes` is the single source of truth):
+One stateless `/execute` pool, plus one `/session` pool per **size** (`vmsize.Sizes` is the single source of truth):
 
 | Pool | Path | Size | Max concurrent |
 |------|------|------|----------------|
-| freePool | `/execute` | 1 vCPU / 256MB | 50 |
-| premiumPool | `/execute` | 1 vCPU / 256MB | 50 |
+| statelessPool | `/execute` | 1 vCPU / 256MB | 50 |
 | sessionPool[nano] | `/session` | 1 vCPU / 256MB / 10GB | 50 |
 | sessionPool[small] | `/session` | 2 vCPU / 512MB / 10GB | 50 |
 | sessionPool[medium] | `/session` | 2 vCPU / 1GB / 20GB | 50 |
@@ -118,7 +117,7 @@ Sessions come in fixed **sizes** (the `vmsize` menu — the single source of tru
 | small | 2 | 512MB | 10GB |
 | medium | 2 | 1GB | 20GB |
 
-A create request routes to the pool matching its size (or nano if unspecified). Stateless `/execute` runs at the default size (1 vCPU / 256MB); its cgroup caps are 0.5 core / 256MB (free) and 2 cores / 512MB (pro). A guest never sees more RAM than it booted with, regardless of the cgroup cap.
+A create request routes to the pool matching its size (or nano if unspecified). Stateless `/execute` runs at the default size (1 vCPU / 256MB). Host cgroup limits are derived from that resource size, independent of billing.
 
 > Larger sizes plus the disk-backed writable FS (`/dev/vdb`, sparse) support heavier installs (`npm install`, builds). See [Roadmap](#roadmap).
 
@@ -175,7 +174,7 @@ curl -X POST http://localhost:8080/execute \
 curl -X POST http://localhost:8080/session \
   -H "Authorization: Bearer <api_key>" \
   -H "Content-Type: application/json" \
-  -d '{"tier": "pro", "env": {"GITHUB_TOKEN": "ghp_..."}}'
+  -d '{"env": {"GITHUB_TOKEN": "ghp_..."}}'
 ```
 
 ```json
@@ -183,7 +182,7 @@ curl -X POST http://localhost:8080/session \
   "status": "success",
   "session": {
     "session_id": "abc-123",
-    "tier": "pro",
+    "billing_model": "payg",
     "state": "active",
     "created_at": "2026-06-04T10:00:00Z",
     "expires_at": "2026-06-04T10:15:00Z"
@@ -231,8 +230,9 @@ curl -X DELETE http://localhost:8080/session/abc-123 \
   "p50_duration_seconds": 0.24,
   "p95_duration_seconds": 0.78,
   "p99_duration_seconds": 1.62,
-  "free_pool_available": 0,
-  "pro_pool_available": 2
+  "vm_pool_available": 2,
+  "vm_pool_in_use": 3,
+  "queue_depth": 0
 }
 ```
 
@@ -249,7 +249,7 @@ sandbox_env/
 ├── backend/
 │   ├── cmd/api/main.go                # Entry point, pool/queue/session manager setup
 │   ├── internal/
-│   │   ├── tierconfig/tierconfig.go   # Free/Pro tier definitions (limits, timeouts, pool sizes)
+│   │   ├── policy/policy.go           # Singleton PAYG execution policy contract
 │   │   ├── executor/firecracker/
 │   │   │   ├── vm_manager.go          # VM create/snapshot restore/destroy via Firecracker API
 │   │   │   ├── vm_pool.go             # On-demand VM pool with slot management
@@ -318,19 +318,11 @@ sudo bash server.sh
 
 ---
 
-## Tier Configuration
+## Execution Policy
 
-Defined in `backend/internal/tierconfig/tierconfig.go`:
+The server loads runtime limits from the singleton `execution_policies` row and PAYG prices independently from `pricing_rates`. API clients cannot select a plan; they can only request a supported resource size.
 
-| Setting | Free | Pro |
-|---------|------|-----|
-| Rate limit | 1000 req/s | 1000 req/s |
-| Rate burst | 100 | 100 |
-| Max exec timeout | 10s | 60s |
-| Max pool size | 50 | 50 |
-| Max sessions | 50 | 50 |
-| Session idle timeout | 5 min | 15 min |
-| Session max lifetime | 2 hours | 24 hours |
+Policy values cover rate limits, execution timeouts, pool capacity, and session limits. Resource definitions remain in `backend/internal/vmsize/vmsize.go`; pricing remains in `pricing_rates`.
 
 ---
 

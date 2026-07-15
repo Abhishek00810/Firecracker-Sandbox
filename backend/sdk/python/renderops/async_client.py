@@ -11,16 +11,16 @@ from .models import NetworkConfig, Resources, RunResult
 class AsyncSession:
     """Persistent async execution session — variables survive between run() calls."""
 
-    def __init__(self, session_id: str, tier: str, client: "AsyncSandbox"):
+    def __init__(self, session_id: str, billing_model: str, client: "AsyncSandbox"):
         self.id = session_id
-        self.tier = tier
+        self.billing_model = billing_model
         self._client = client
 
     async def run(self, code: str, language: str = "python", timeout: Optional[int] = None) -> RunResult:
         """Run code inside this session. State is preserved across calls.
 
         timeout : int, optional
-            Per-run timeout in seconds. Uses the server default if unset; capped at the tier max.
+            Per-run timeout in seconds. Uses the server policy default if unset.
         """
         body: dict = {"code": code, "language": language}
         http_timeout: Optional[int] = None
@@ -53,7 +53,7 @@ class AsyncSession:
         await self.close()
 
     def __repr__(self) -> str:
-        return f"AsyncSession(id={self.id!r}, tier={self.tier!r})"
+        return f"AsyncSession(id={self.id!r}, billing_model={self.billing_model!r})"
 
 
 class AsyncSandbox:
@@ -133,7 +133,7 @@ class AsyncSandbox:
         resp = await self._post("/execute", body, timeout=http_timeout)
         return RunResult._from_execute(resp)
 
-    async def session(self, env: Optional[dict[str, str]] = None, tier: Optional[str] = None, resources: Optional[Resources] = None, network: Optional[NetworkConfig] = None, idle_timeout: Optional[int] = None, max_lifetime: Optional[int] = None) -> AsyncSession:
+    async def session(self, env: Optional[dict[str, str]] = None, resources: Optional[Resources] = None, network: Optional[NetworkConfig] = None, idle_timeout: Optional[int] = None, max_lifetime: Optional[int] = None) -> AsyncSession:
         """
         Create a persistent async session. Variables survive between run() calls.
         Use as an async context manager to auto-close:
@@ -150,8 +150,6 @@ class AsyncSandbox:
         body: dict = {}
         if env is not None:
             body["env"] = env
-        if tier is not None:
-            body["tier"] = tier
         if resources is not None:
             body["resources"] = resources.to_dict()
         if network is not None:
@@ -167,7 +165,7 @@ class AsyncSandbox:
                 data = await r.json()
                 return AsyncSession(
                     session_id=data["session"]["session_id"],
-                    tier=data["session"]["tier"],
+                    billing_model=data["session"]["billing_model"],
                     client=self,
                 )
 

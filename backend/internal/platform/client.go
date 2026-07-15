@@ -34,26 +34,25 @@ func (c *Client) Close() { c.pool.Close() }
 
 // KeyRecord is the resolved result of an api_keys lookup.
 type KeyRecord struct {
-	ID               string
-	UserID           string
-	Tier             string
-	IsActive         bool
-	ExpiresAt        *string
-	FreeUSDRemaining float64
+	ID         string
+	UserID     string
+	IsActive   bool
+	ExpiresAt  *string
+	BalanceUSD float64
 }
 
 func (c *Client) ResolveKey(keyHash string) (KeyRecord, error) {
 	var record KeyRecord
 	var expiresAt *time.Time
 	err := c.pool.QueryRow(context.Background(), `
-		SELECT k.id::text, k.user_id::text, p.tier, k.is_active,
-		       k.expires_at, p.free_usd_remaining::double precision
+		SELECT k.id::text, k.user_id::text, k.is_active,
+		       k.expires_at, p.balance_usd::double precision
 		FROM api_keys k
 		JOIN profiles p ON p.id = k.user_id
 		WHERE k.key_hash = $1
 		LIMIT 1`, keyHash).Scan(
-		&record.ID, &record.UserID, &record.Tier, &record.IsActive,
-		&expiresAt, &record.FreeUSDRemaining,
+		&record.ID, &record.UserID, &record.IsActive,
+		&expiresAt, &record.BalanceUSD,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return KeyRecord{}, fmt.Errorf("key not found")

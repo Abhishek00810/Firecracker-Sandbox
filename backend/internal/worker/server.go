@@ -64,7 +64,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	sess, err := s.svc.Create(r.Context(), req.UserID, req.Tier, req.Env,
+	sess, err := s.svc.Create(r.Context(), req.UserID, req.BillingModel, req.Env,
 		req.VCPUs, req.MemoryMB, req.DiskGB, req.Internet,
 		secs(req.IdleTimeoutS), secs(req.MaxLifetimeS))
 	if err != nil {

@@ -6,7 +6,6 @@ import { sandboxProvider } from '../dist/index.mjs';
 
 const baseUrl = process.env.SANDBOX_BASE_URL ?? 'http://localhost:8080';
 const apiKey = process.env.SANDBOX_API_KEY ?? '';
-const tier = process.env.SANDBOX_TIER ?? 'pro';
 const command = process.env.BENCH_COMMAND ?? 'python -c "print(1+1)"';
 const sequentialRuns = intEnv('BENCH_SEQUENTIAL_RUNS', 10);
 const hotRuns = intEnv('BENCH_HOT_RUNS', 25);
@@ -20,7 +19,7 @@ if (!apiKey) {
 }
 
 compute.setConfig({
-  provider: sandboxProvider({ apiKey, baseUrl, tier }),
+  provider: sandboxProvider({ apiKey, baseUrl }),
 });
 
 console.log('ComputeSDK sandbox benchmark');

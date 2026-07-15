@@ -47,15 +47,20 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				w.WriteHeader(http.StatusForbidden)
 				json.NewEncoder(w).Encode(APIError{
 					Status:    "error",
-					Code:      "tier_not_allowed",
-					Message:   "sessions are not available on the free tier",
+					Code:      "sessions_not_allowed",
+					Message:   "sessions are disabled by the current execution policy",
 					RequestID: requestID,
 				})
 				return
 			}
 
 			var createReq CreateSessionRequest
-			json.NewDecoder(r.Body).Decode(&createReq)
+			if r.Body != nil && r.ContentLength != 0 {
+				if err := decodeJSON(w, r, &createReq); err != nil {
+					http.Error(w, "invalid request body", http.StatusBadRequest)
+					return
+				}
+			}
 
 			size, err := resolveSize(createReq.Resources)
 			if err != nil {
@@ -76,11 +81,11 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 			}
 
 			// Resolve per-session idle/lifetime: caller may request values; idle is capped
-			// at the max lifetime, lifetime is capped at the tier ceiling. Unset → tier defaults.
+			// at the max lifetime, lifetime is capped at the policy ceiling.
 			idleTimeout := resolveDuration(createReq.IdleTimeoutS, tc.SessionIdleTimeout, tc.SessionMaxLifetime)
 			maxLifetime := resolveDuration(createReq.MaxLifetimeS, tc.SessionMaxLifetime, tc.SessionMaxLifetime)
 
-			sess, err := mgr.Create(r.Context(), auth.TenantID, auth.Config.Name, createReq.Env, size.VCPUs, size.MemoryMB, size.DiskGB, internet, idleTimeout, maxLifetime)
+			sess, err := mgr.Create(r.Context(), auth.TenantID, auth.Billing.Model, createReq.Env, size.VCPUs, size.MemoryMB, size.DiskGB, internet, idleTimeout, maxLifetime)
 			if err != nil {
 				slog.Error("failed to create session", "err", err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -93,12 +98,12 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				Status:    "success",
 				RequestID: requestID,
 				Session: &SessionDetail{
-					SessionID: sess.ID,
-					State:     "active",
-					Tier:      sess.Tier,
-					CreatedAt: sess.CreatedAt.Format(time.RFC3339),
-					LastUsed:  sess.LastUsed.Format(time.RFC3339),
-					ExpiresAt: sess.LastUsed.Add(tc.SessionIdleTimeout).Format(time.RFC3339),
+					SessionID:    sess.ID,
+					State:        "active",
+					BillingModel: sess.BillingModel,
+					CreatedAt:    sess.CreatedAt.Format(time.RFC3339),
+					LastUsed:     sess.LastUsed.Format(time.RFC3339),
+					ExpiresAt:    sess.LastUsed.Add(tc.SessionIdleTimeout).Format(time.RFC3339),
 				},
 				Limits: &SessionLimits{
 					MaxSessions:    tc.MaxSessions,
@@ -107,8 +112,8 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 					IdleTimeoutMs:  int(tc.SessionIdleTimeout.Milliseconds()),
 				},
 				Tenant: &TenantContext{
-					TenantID: auth.TenantID,
-					Tier:     auth.Config.Name,
+					TenantID:     auth.TenantID,
+					BillingModel: auth.Billing.Model,
 				},
 			})
 
@@ -128,17 +133,17 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				name = "sandbox"
 			}
 			upsertSandboxAsync(usageLogger, platform.Sandbox{
-				ID:       sess.ID,
-				UserID:   auth.TenantID,
-				APIKeyID: auth.APIKeyID,
-				Name:     name,
-				State:    "active",
-				Tier:     auth.Config.Name,
-				VCPUs:    size.VCPUs,
-				MemoryMB: size.MemoryMB,
-				DiskGB:   size.DiskGB,
-				Internet: internet,
-				Metadata: createReq.Metadata,
+				ID:           sess.ID,
+				UserID:       auth.TenantID,
+				APIKeyID:     auth.APIKeyID,
+				Name:         name,
+				State:        "active",
+				BillingModel: auth.Billing.Model,
+				VCPUs:        size.VCPUs,
+				MemoryMB:     size.MemoryMB,
+				DiskGB:       size.DiskGB,
+				Internet:     internet,
+				Metadata:     createReq.Metadata,
 			})
 
 		// POST /session/:id/run — execute code in session
@@ -154,7 +159,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 			}
 
 			var req RunInSessionRequest
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			if err := decodeJSON(w, r, &req); err != nil {
 				http.Error(w, "invalid request body", http.StatusBadRequest)
 				return
 			}
@@ -201,8 +206,8 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 					TimeoutLimitMs:  int(sessTc.MaxExecTimeout.Milliseconds()),
 				},
 				Tenant: &TenantContext{
-					TenantID: auth.TenantID,
-					Tier:     auth.Config.Name,
+					TenantID:     auth.TenantID,
+					BillingModel: auth.Billing.Model,
 				},
 				Session: &SessionState{
 					State:     "active",
@@ -227,7 +232,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				Language:      req.Language,
 				DurationMs:    int(execDurationMs),
 				ExitCode:      int(result.ExitCode),
-				CostUSD:       (execDurationMs / 1000.0) * auth.RateUSDPerSec,
+				CostUSD:       (execDurationMs / 1000.0) * auth.Billing.ExecutionRateUSDPerSec,
 				Stdout:        truncate(result.Stdout, 64*1024),
 				Stderr:        truncate(result.Stderr, 64*1024),
 			})
@@ -260,7 +265,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 			}
 
 			var req ExecInSessionRequest
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			if err := decodeJSON(w, r, &req); err != nil {
 				http.Error(w, "invalid request body", http.StatusBadRequest)
 				return
 			}
@@ -301,8 +306,8 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 					TimeoutLimitMs:  int(sessTc.MaxExecTimeout.Milliseconds()),
 				},
 				Tenant: &TenantContext{
-					TenantID: auth.TenantID,
-					Tier:     auth.Config.Name,
+					TenantID:     auth.TenantID,
+					BillingModel: auth.Billing.Model,
 				},
 				Session: &SessionState{
 					State:     "active",
@@ -327,7 +332,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				Language:      "bash",
 				DurationMs:    int(execDurationMs),
 				ExitCode:      int(result.ExitCode),
-				CostUSD:       (execDurationMs / 1000.0) * auth.RateUSDPerSec,
+				CostUSD:       (execDurationMs / 1000.0) * auth.Billing.ExecutionRateUSDPerSec,
 				Stdout:        truncate(result.Stdout, 64*1024),
 				Stderr:        truncate(result.Stderr, 64*1024),
 			})
@@ -434,12 +439,12 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				Status:    "success",
 				RequestID: requestID,
 				Session: &SessionDetail{
-					SessionID: sess.ID,
-					State:     string(sess.State),
-					Tier:      sess.Tier,
-					CreatedAt: sess.CreatedAt.Format(time.RFC3339),
-					LastUsed:  sess.LastUsed.Format(time.RFC3339),
-					ExpiresAt: sess.LastUsed.Add(sessTc.SessionIdleTimeout).Format(time.RFC3339),
+					SessionID:    sess.ID,
+					State:        string(sess.State),
+					BillingModel: sess.BillingModel,
+					CreatedAt:    sess.CreatedAt.Format(time.RFC3339),
+					LastUsed:     sess.LastUsed.Format(time.RFC3339),
+					ExpiresAt:    sess.LastUsed.Add(sessTc.SessionIdleTimeout).Format(time.RFC3339),
 				},
 				Limits: &SessionLimits{
 					MaxSessions:    sessTc.MaxSessions,
@@ -453,8 +458,8 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 					LastExitCode:     sess.LastExitCode,
 				},
 				Tenant: &TenantContext{
-					TenantID: auth.TenantID,
-					Tier:     sess.Tier,
+					TenantID:     auth.TenantID,
+					BillingModel: sess.BillingModel,
 				},
 			})
 

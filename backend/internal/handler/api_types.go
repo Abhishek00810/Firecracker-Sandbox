@@ -24,8 +24,8 @@ type APIError struct {
 }
 
 type TenantContext struct {
-	TenantID string `json:"tenant_id"`
-	Tier     string `json:"tier"`
+	TenantID     string `json:"tenant_id"`
+	BillingModel string `json:"billing_model"`
 }
 
 type ExecutionOutput struct {
@@ -73,8 +73,8 @@ type CreateSessionRequest struct {
 	Env          map[string]string `json:"env,omitempty"`
 	Resources    *Resources        `json:"resources,omitempty"`      //nil = default size
 	Network      *NetworkConfig    `json:"network,omitempty"`        //nil = default (internet on)
-	IdleTimeoutS *int              `json:"idle_timeout_s,omitempty"` //nil = tier default (5m); capped at max lifetime
-	MaxLifetimeS *int              `json:"max_lifetime_s,omitempty"` //nil = tier default/cap (24h)
+	IdleTimeoutS *int              `json:"idle_timeout_s,omitempty"` // nil = policy default; capped at max lifetime
+	MaxLifetimeS *int              `json:"max_lifetime_s,omitempty"` // nil = policy default/cap
 }
 
 // --- POST /session/:id/exec ---
@@ -93,12 +93,12 @@ type CreateSessionResponse struct {
 }
 
 type SessionDetail struct {
-	SessionID string `json:"session_id"`
-	State     string `json:"state"`
-	Tier      string `json:"tier"`
-	CreatedAt string `json:"created_at"`
-	LastUsed  string `json:"last_used"`
-	ExpiresAt string `json:"expires_at"`
+	SessionID    string `json:"session_id"`
+	State        string `json:"state"`
+	BillingModel string `json:"billing_model"`
+	CreatedAt    string `json:"created_at"`
+	LastUsed     string `json:"last_used"`
+	ExpiresAt    string `json:"expires_at"`
 }
 
 type SessionLimits struct {
@@ -113,7 +113,7 @@ type SessionLimits struct {
 type RunInSessionRequest struct {
 	Code     string `json:"code"`
 	Language string `json:"language"`
-	Timeout  *int   `json:"timeout,omitempty"` // per-run timeout seconds; nil = tier default, capped at tier max
+	Timeout  *int   `json:"timeout,omitempty"` // per-run timeout seconds; nil = policy default, capped at policy max
 }
 
 type SessionExecuteResponse struct {

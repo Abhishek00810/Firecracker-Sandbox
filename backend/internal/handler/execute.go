@@ -6,7 +6,6 @@ import (
 	"backend/internal/platform"
 	"backend/internal/queue"
 	"backend/internal/ratelimit"
-	"backend/internal/tierconfig"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -15,8 +14,13 @@ import (
 	"time"
 )
 
-func ExecuteHandler(freeQueue *queue.JobQueue, premiumQueue *queue.JobQueue, freeLimiter *ratelimit.TenantLimiter, premiumLimiter *ratelimit.TenantLimiter, usageLogger platform.UsageLogger) http.HandlerFunc {
+func ExecuteHandler(jobQueue *queue.JobQueue, limiter *ratelimit.TenantLimiter, usageLogger platform.UsageLogger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		requestID := middleware.RequestIDFromContext(r.Context())
 
 		auth, ok := middleware.AuthFromContext(r.Context())
@@ -25,25 +29,19 @@ func ExecuteHandler(freeQueue *queue.JobQueue, premiumQueue *queue.JobQueue, fre
 			return
 		}
 
-		limiter := freeLimiter
-		if auth.Config.Name == tierconfig.PAYG {
-			limiter = premiumLimiter
-		}
-
 		if !limiter.GetLimiter(auth.TenantID).Allow() {
 			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 			return
 		}
 
-		jobQueue := freeQueue
-		if auth.Config.Name == tierconfig.PAYG {
-			jobQueue = premiumQueue
-		}
-
 		var req ExecuteRequest
-		err := json.NewDecoder(r.Body).Decode(&req)
+		err := decodeJSON(w, r, &req)
 		if err != nil {
-			http.Error(w, "Invalid request", http.StatusBadRequest)
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if req.Code == "" || req.Language == "" {
+			http.Error(w, "code and language are required", http.StatusBadRequest)
 			return
 		}
 
@@ -91,7 +89,7 @@ func ExecuteHandler(freeQueue *queue.JobQueue, premiumQueue *queue.JobQueue, fre
 			Language:      req.Language,
 			DurationMs:    int(duration * 1000),
 			ExitCode:      int(result.Result.ExitCode),
-			CostUSD:       duration * auth.RateUSDPerSec,
+			CostUSD:       duration * auth.Billing.ExecutionRateUSDPerSec,
 			Stdout:        truncate(result.Result.Stdout, 64*1024),
 			Stderr:        truncate(result.Result.Stderr, 64*1024),
 		})
@@ -115,8 +113,8 @@ func ExecuteHandler(freeQueue *queue.JobQueue, premiumQueue *queue.JobQueue, fre
 				TimeoutLimitMs:  int(execTimeout.Milliseconds()),
 			},
 			Tenant: &TenantContext{
-				TenantID: auth.TenantID,
-				Tier:     auth.Config.Name,
+				TenantID:     auth.TenantID,
+				BillingModel: auth.Billing.Model,
 			},
 		}
 

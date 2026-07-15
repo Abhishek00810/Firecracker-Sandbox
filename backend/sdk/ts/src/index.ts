@@ -9,7 +9,6 @@ import type {
 export interface SandboxConfig {
   apiKey?: string;
   baseUrl?: string;
-  tier?: string;
 }
 
 interface SandboxHandle {
@@ -46,13 +45,11 @@ export const sandboxProvider = defineProvider<SandboxHandle, SandboxConfig>({
       create: async (config: SandboxConfig, _options?: CreateSandboxOptions) => {
         const apiKey = config.apiKey ?? process.env.SANDBOX_API_KEY ?? '';
         const baseUrl = config.baseUrl ?? process.env.SANDBOX_BASE_URL ?? 'http://localhost:8080';
-        const tier = config.tier ?? 'pro';
-
-        if (!apiKey) throw new Error('Missing SANDBOX_API_KEY');
+		if (!apiKey) throw new Error('Missing SANDBOX_API_KEY');
 
         const res = await apiFetch(baseUrl, apiKey, '/session', {
           method: 'POST',
-          body: JSON.stringify({ tier }),
+		  body: JSON.stringify({}),
         });
 
         const data = await res.json();

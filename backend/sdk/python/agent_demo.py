@@ -195,7 +195,7 @@ def main():
     sb = Sandbox(api_key=RENDEROPS_API_KEY, base_url=BASE_URL, timeout=EXEC_TIMEOUT + 30)
     env = {"GITHUB_TOKEN": GITHUB_TOKEN} if GITHUB_TOKEN else None
     print("creating sandbox (Pro)…")
-    sess = sb.session(env=env, tier="pro")
+    sess = sb.session(env=env)
     print(f"sandbox ready: {sess.id}\n")
 
     try:

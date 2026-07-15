@@ -3,6 +3,9 @@
 
 # Supabase migrations (local dev only)
 migrations/
+!migrations/
+migrations/*
+!migrations/002_payg_policy_model.sql
 
 # Cursor IDE
 .cursor/

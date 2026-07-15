@@ -58,37 +58,37 @@ func (s *Service) Hydrate(ctx context.Context, pc *platform.Client) error {
 			state = session.StatePaused
 		}
 		s.sessions[ref.ID] = &session.Session{
-			ID:        ref.ID,
-			UserID:    ref.UserID,
-			Tier:      ref.Tier,
-			VCPUs:     ref.VCPUs,
-			MemoryMB:  ref.MemoryMB,
-			DiskGB:    ref.DiskGB,
-			Internet:  ref.Internet,
-			CreatedAt: ref.Created,
-			LastUsed:  ref.LastUsed,
-			State:     state,
+			ID:           ref.ID,
+			UserID:       ref.UserID,
+			BillingModel: ref.BillingModel,
+			VCPUs:        ref.VCPUs,
+			MemoryMB:     ref.MemoryMB,
+			DiskGB:       ref.DiskGB,
+			Internet:     ref.Internet,
+			CreatedAt:    ref.Created,
+			LastUsed:     ref.LastUsed,
+			State:        state,
 		}
 	}
 	return nil
 }
 
-func (s *Service) Create(ctx context.Context, userID, tier string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*session.Session, error) {
+func (s *Service) Create(ctx context.Context, userID, billingModel string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*session.Session, error) {
 	now := time.Now()
 	sess := &session.Session{
-		ID:          uuid.NewString(),
-		UserID:      userID,
-		Tier:        tier,
-		VCPUs:       vcpus,
-		MemoryMB:    memoryMB,
-		DiskGB:      diskGB,
-		Env:         env,
-		Internet:    internet,
-		IdleTimeout: idleTimeout,
-		MaxLifetime: maxLifetime,
-		CreatedAt:   now,
-		LastUsed:    now,
-		State:       session.StateActive,
+		ID:           uuid.NewString(),
+		UserID:       userID,
+		BillingModel: billingModel,
+		VCPUs:        vcpus,
+		MemoryMB:     memoryMB,
+		DiskGB:       diskGB,
+		Env:          env,
+		Internet:     internet,
+		IdleTimeout:  idleTimeout,
+		MaxLifetime:  maxLifetime,
+		CreatedAt:    now,
+		LastUsed:     now,
+		State:        session.StateActive,
 	}
 	s.mu.Lock()
 	s.sessions[sess.ID] = sess

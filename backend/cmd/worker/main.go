@@ -64,12 +64,8 @@ func main() {
 
 	slotCount := envInt("SLOT_COUNT", 50)
 	maxProvisions := envInt("MAX_CONCURRENT_PROVISIONS", runtime.NumCPU())
-	proReserved := maxProvisions / 4
-	if proReserved < 1 {
-		proReserved = 1
-	}
 
-	vmManager := firecracker.NewFirecrackerManager(cfg.SocketDir, cfg.AssetsPath, cfg.FirecrackerBinary, slotCount, maxProvisions, proReserved, cfg.FCRunUID, cfg.FCRunGID)
+	vmManager := firecracker.NewFirecrackerManager(cfg.SocketDir, cfg.AssetsPath, cfg.FirecrackerBinary, slotCount, maxProvisions, cfg.FCRunUID, cfg.FCRunGID)
 
 	baseCfg := firecracker.VMConfig{
 		VCPUCount:  1,
@@ -100,7 +96,6 @@ func main() {
 		szCfg.VCPUCount = sz.VCPUs
 		szCfg.MemSizeMiB = sz.MemoryMB
 		szCfg.DiskGB = sz.DiskGB
-		szCfg.Pro = true
 		szCgroup := cgroup.Config{
 			CPUQuotaUS:  sz.CgroupCPUQuotaUS(),
 			CPUPeriodUS: vmsize.CgroupCPUPeriodUS,

@@ -22,7 +22,7 @@ type Session struct {
 	UserID           string // owning tenant — used to sync state + timeline events to the DB
 	VM               *firecracker.MicroVM
 	Cgroup           *cgroup.Cgroup
-	Tier             string
+	BillingModel     string
 	VCPUs            int // allocated compute shape — the billing basis
 	MemoryMB         int
 	DiskGB           int

@@ -19,7 +19,8 @@ import (
 type pausedRecord struct {
 	ID               string            `json:"id"`
 	UserID           string            `json:"user_id"`
-	Tier             string            `json:"tier"`
+	BillingModel     string            `json:"billing_model"`
+	LegacyTier       string            `json:"tier,omitempty"` // read-only compatibility for pre-PAYG manifests
 	VCPUs            int               `json:"vcpus"`
 	MemoryMB         int               `json:"memory_mb"`
 	DiskGB           int               `json:"disk_gb"`
@@ -40,7 +41,7 @@ func recordFromSession(s *Session) pausedRecord {
 	return pausedRecord{
 		ID:               s.ID,
 		UserID:           s.UserID,
-		Tier:             s.Tier,
+		BillingModel:     s.BillingModel,
 		VCPUs:            s.VCPUs,
 		MemoryMB:         s.MemoryMB,
 		DiskGB:           s.DiskGB,
@@ -59,10 +60,17 @@ func recordFromSession(s *Session) pausedRecord {
 }
 
 func (r pausedRecord) toSession() *Session {
+	billingModel := r.BillingModel
+	if billingModel == "" {
+		billingModel = r.LegacyTier
+	}
+	if billingModel == "" {
+		billingModel = "payg"
+	}
 	return &Session{
 		ID:               r.ID,
 		UserID:           r.UserID,
-		Tier:             r.Tier,
+		BillingModel:     billingModel,
 		VCPUs:            r.VCPUs,
 		MemoryMB:         r.MemoryMB,
 		DiskGB:           r.DiskGB,

@@ -11,7 +11,6 @@ import (
 	"backend/internal/cgroup"
 	"backend/internal/executor"
 	"backend/internal/executor/firecracker"
-	"backend/internal/tierconfig"
 	"backend/internal/vmsize"
 
 	"github.com/google/uuid"
@@ -29,7 +28,7 @@ type StateHook func(sessionID, userID, state string)
 type MeterSample struct {
 	UserID        string
 	SandboxID     string
-	Tier          string
+	BillingModel  string
 	VCPUSeconds   float64
 	RAMGBSeconds  float64
 	DiskGBSeconds float64
@@ -98,7 +97,7 @@ func NewManager(
 // meterTicker accrues RAW resource-time for every live session once a minute and hands each
 // delta to onMeter (which persists it to usage_meters). Compute (vCPU-s + RAM GB-s) accrues
 // while ACTIVE; disk (GB-s) accrues while the sandbox exists (active OR paused). No cost is
-// computed here — pricing is applied later at read time via tier_rates.
+// computed here; pricing is applied later at read time via pricing_rates.
 func (m *Manager) meterTicker() {
 	const interval = time.Minute
 	ticker := time.NewTicker(interval)
@@ -118,7 +117,7 @@ func (m *Manager) meterTicker() {
 			sample := MeterSample{
 				UserID:        sess.UserID,
 				SandboxID:     sess.ID,
-				Tier:          sess.Tier,
+				BillingModel:  sess.BillingModel,
 				DiskGBSeconds: float64(sess.DiskGB) * elapsed, // disk billed while alive (active + paused)
 			}
 			if sess.State == StateActive {
@@ -176,7 +175,7 @@ func (m *Manager) persistManifest() {
 
 // Create boots a VM and binds it to a new session. env vars are injected into
 // the persistent shell so commands like git can access GITHUB_TOKEN etc.
-func (m *Manager) Create(ctx context.Context, userID, tier string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*Session, error) {
+func (m *Manager) Create(ctx context.Context, userID, billingModel string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*Session, error) {
 	t0 := time.Now()
 
 	pool := m.sizePools[vmsize.Key(vcpus, memoryMB, diskGB)]
@@ -198,23 +197,23 @@ func (m *Manager) Create(ctx context.Context, userID, tier string, env map[strin
 	}
 
 	sess := &Session{
-		ID:          uuid.New().String(),
-		UserID:      userID,
-		VM:          pvm.VM,
-		Cgroup:      pvm.Cgroup,
-		PooledVM:    pvm,
-		Pool:        pool,
-		Tier:        tier,
-		VCPUs:       vcpus,
-		MemoryMB:    memoryMB,
-		DiskGB:      diskGB,
-		Env:         env,
-		Internet:    internet,
-		IdleTimeout: idleTimeout,
-		MaxLifetime: maxLifetime,
-		CreatedAt:   time.Now(),
-		LastUsed:    time.Now(),
-		State:       StateActive,
+		ID:           uuid.New().String(),
+		UserID:       userID,
+		VM:           pvm.VM,
+		Cgroup:       pvm.Cgroup,
+		PooledVM:     pvm,
+		Pool:         pool,
+		BillingModel: billingModel,
+		VCPUs:        vcpus,
+		MemoryMB:     memoryMB,
+		DiskGB:       diskGB,
+		Env:          env,
+		Internet:     internet,
+		IdleTimeout:  idleTimeout,
+		MaxLifetime:  maxLifetime,
+		CreatedAt:    time.Now(),
+		LastUsed:     time.Now(),
+		State:        StateActive,
 	}
 	if err := m.store.Add(sess); err != nil {
 		pool.Release(pvm)
@@ -241,7 +240,7 @@ func (m *Manager) Create(ctx context.Context, userID, tier string, env map[strin
 		}
 	}
 
-	slog.Info("session created", "session_id", sess.ID, "vm_id", pvm.VM.ID, "tier", tier, "warm", warm, "ms", time.Since(t0).Milliseconds())
+	slog.Info("session created", "session_id", sess.ID, "vm_id", pvm.VM.ID, "billing_model", billingModel, "warm", warm, "ms", time.Since(t0).Milliseconds())
 	return sess, nil
 }
 
@@ -482,7 +481,6 @@ func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 	}
 
 	cfg := m.vmConfig
-	cfg.Pro = sess.Tier == tierconfig.PAYG
 
 	vm, err := m.vmManager.ResumeFromSnapshot(ctx, cfg, tmpl)
 	if err != nil {

@@ -18,18 +18,18 @@ class Sandbox:
     id : str          the sandbox id
     name : str        human-readable label ("what this sandbox is for")
     state : str       "active" | "paused" | "destroyed"
-    tier : str
+    billing_model : str
     metadata : dict   user labels (purpose/owner/etc.)
     """
 
     def __init__(self, client: "Renderops", id: str, name: Optional[str] = None,
-                 state: Optional[str] = None, tier: Optional[str] = None,
+                 state: Optional[str] = None, billing_model: Optional[str] = None,
                  metadata: Optional[dict] = None):
         self._client = client
         self.id = id
         self.name = name
         self.state = state
-        self.tier = tier
+        self.billing_model = billing_model
         self.metadata = metadata or {}
 
     # ── execution ───────────────────────────────────────────────────────────
@@ -130,13 +130,13 @@ class Renderops:
         data = self._post("/session", body)
         s = data["session"]
         return Sandbox(self, id=s["session_id"], name=name, state=s.get("state"),
-                       tier=s.get("tier"), metadata=metadata)
+                       billing_model=s.get("billing_model"), metadata=metadata)
 
     def connect(self, sandbox_id: str) -> Sandbox:
         """Attach to an existing sandbox by id (e.g. to resume a paused one)."""
         data = self._get(f"/session/{sandbox_id}")
         s = data.get("session", {}) or {}
-        return Sandbox(self, id=sandbox_id, name=s.get("name"), state=s.get("state"), tier=s.get("tier"))
+        return Sandbox(self, id=sandbox_id, name=s.get("name"), state=s.get("state"), billing_model=s.get("billing_model"))
 
     def list(self) -> list[Sandbox]:
         """List your sandboxes (name, state, metadata) — everything you have running/paused."""
@@ -144,7 +144,7 @@ class Renderops:
         out: list[Sandbox] = []
         for it in data.get("sandboxes", []):
             out.append(Sandbox(self, id=it["id"], name=it.get("name"), state=it.get("state"),
-                               tier=it.get("tier"), metadata=it.get("metadata")))
+                               billing_model=it.get("billing_model"), metadata=it.get("metadata")))
         return out
 
     def run(self, code: str, language: str = "python", timeout: Optional[int] = None) -> RunResult:

@@ -12,18 +12,19 @@ import (
 	"sync"
 	"time"
 
+	"backend/internal/billing"
 	"backend/internal/platform"
-	"backend/internal/tierconfig"
+	"backend/internal/policy"
 )
 
 // AuthInfo is injected into the request context after a successful key resolution.
-// Handlers read this — they never touch tier names or headers directly.
+// Handlers read this and never accept billing-policy selection from clients.
 type AuthInfo struct {
-	TenantID         string
-	APIKeyID         string
-	Config           tierconfig.TierConfig
-	FreeUSDRemaining float64
-	RateUSDPerSec    float64
+	TenantID   string
+	APIKeyID   string
+	Config     policy.ExecutionPolicy
+	Billing    billing.Config
+	BalanceUSD float64
 }
 
 // authInfoKey is an unexported type to prevent context key collisions.
@@ -87,7 +88,7 @@ type AuthResolver interface {
 	GetProfile(userID string) (platform.Profile, error)
 }
 
-func Auth(pc AuthResolver, supabaseURL, jwtSecret string) func(http.Handler) http.Handler {
+func Auth(pc AuthResolver, supabaseURL, jwtSecret string, executionPolicy policy.ExecutionPolicy, billingConfig billing.Config) func(http.Handler) http.Handler {
 	var cache AuthCache = newKeyCache(60 * time.Second)
 	jwtv := newJWTVerifier(supabaseURL, jwtSecret)
 
@@ -116,7 +117,7 @@ func Auth(pc AuthResolver, supabaseURL, jwtSecret string) func(http.Handler) htt
 					writeAuthError(w, http.StatusUnauthorized, "invalid session token")
 					return
 				}
-				serveUser(next, pc, sub, w, r)
+				serveUser(next, pc, executionPolicy, billingConfig, sub, w, r)
 				return
 			}
 
@@ -126,7 +127,7 @@ func Auth(pc AuthResolver, supabaseURL, jwtSecret string) func(http.Handler) htt
 			if !strings.HasPrefix(key, "ro_live_") {
 				session, err := pc.ResolveSession(key)
 				if err == nil {
-					serveUser(next, pc, session.UserID, w, r)
+					serveUser(next, pc, executionPolicy, billingConfig, session.UserID, w, r)
 					return
 				}
 				if !errors.Is(err, platform.ErrSessionNotFound) {
@@ -166,21 +167,20 @@ func Auth(pc AuthResolver, supabaseURL, jwtSecret string) func(http.Handler) htt
 				}
 			}
 
-			if record.FreeUSDRemaining <= 0 {
+			if record.BalanceUSD <= 0 {
 				writeAuthError(w, http.StatusPaymentRequired, "insufficient balance — add credits to continue")
 				return
 			}
 
-			tc := tierconfig.Get(record.Tier)
 			info := AuthInfo{
-				TenantID:         record.UserID,
-				APIKeyID:         record.ID,
-				Config:           tc,
-				FreeUSDRemaining: record.FreeUSDRemaining,
-				RateUSDPerSec:    tc.RateUSDPerSec,
+				TenantID:   record.UserID,
+				APIKeyID:   record.ID,
+				Config:     executionPolicy,
+				Billing:    billingConfig,
+				BalanceUSD: record.BalanceUSD,
 			}
 
-			slog.Debug("auth: resolved", "tenant_id", record.UserID, "tier", record.Tier)
+			slog.Debug("auth: resolved", "tenant_id", record.UserID, "billing_model", billingConfig.Model)
 
 			ctx := context.WithValue(r.Context(), authInfoKey{}, info)
 			next.ServeHTTP(w, r.WithContext(ctx))
@@ -191,23 +191,22 @@ func Auth(pc AuthResolver, supabaseURL, jwtSecret string) func(http.Handler) htt
 // serveUser resolves the app profile shared by Better Auth sessions and legacy
 // Supabase JWTs, writes an auth error when needed, and calls the next handler on
 // success. Dashboard requests intentionally have no API key id.
-func serveUser(next http.Handler, pc AuthResolver, userID string, w http.ResponseWriter, r *http.Request) {
+func serveUser(next http.Handler, pc AuthResolver, executionPolicy policy.ExecutionPolicy, billingConfig billing.Config, userID string, w http.ResponseWriter, r *http.Request) {
 	prof, err := pc.GetProfile(userID)
 	if err != nil {
 		slog.Warn("auth: profile lookup failed", "user_id", userID, "err", err)
 		writeAuthError(w, http.StatusUnauthorized, "user profile not found")
 		return
 	}
-	if prof.FreeUSDRemaining <= 0 {
+	if prof.BalanceUSD <= 0 {
 		writeAuthError(w, http.StatusPaymentRequired, "insufficient balance — add credits to continue")
 		return
 	}
-	tc := tierconfig.Get(prof.Tier)
 	info := AuthInfo{
-		TenantID:         userID,
-		Config:           tc,
-		FreeUSDRemaining: prof.FreeUSDRemaining,
-		RateUSDPerSec:    tc.RateUSDPerSec,
+		TenantID:   userID,
+		Config:     executionPolicy,
+		Billing:    billingConfig,
+		BalanceUSD: prof.BalanceUSD,
 	}
 	ctx := context.WithValue(r.Context(), authInfoKey{}, info)
 	next.ServeHTTP(w, r.WithContext(ctx))

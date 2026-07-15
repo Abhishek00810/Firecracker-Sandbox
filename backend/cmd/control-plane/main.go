@@ -12,7 +12,6 @@ import (
 	"backend/internal/metrics"
 	"backend/internal/middleware"
 	"backend/internal/platform"
-	"backend/internal/tierconfig"
 	"context"
 	"encoding/json"
 	"log/slog"
@@ -76,16 +75,14 @@ func main() {
 	}
 	defer platformClient.Close()
 
-	// Tier values live in the tier_configs table, owned and seeded by the
-	// SvelteKit app; the control plane refuses to guess if they're missing.
-	tiers, err := platformClient.LoadTierConfigs(context.Background())
+	executionPolicy, err := platformClient.LoadExecutionPolicy(context.Background())
 	if err != nil {
-		slog.Error("tier config load failed", "err", err)
+		slog.Error("execution policy load failed", "err", err)
 		os.Exit(1)
 	}
-	tierconfig.Set(tiers)
-	if !tierconfig.Has(tierconfig.PAYG) {
-		slog.Error("tier_configs has no payg row — run pnpm db:push in sk-renderops-platform")
+	billingConfig, err := platformClient.LoadBillingConfig(context.Background())
+	if err != nil {
+		slog.Error("billing config load failed", "err", err)
 		os.Exit(1)
 	}
 
@@ -127,7 +124,7 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
-	chain := middleware.Logging(middleware.Auth(platformClient, cfg.SupabaseURL, cfg.SupabaseJWTSecret)(http.DefaultServeMux))
+	chain := middleware.Logging(middleware.Auth(platformClient, cfg.SupabaseURL, cfg.SupabaseJWTSecret, executionPolicy, billingConfig)(http.DefaultServeMux))
 
 	srv := &http.Server{
 		Addr:              port,

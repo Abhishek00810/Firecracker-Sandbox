@@ -8,7 +8,7 @@ import "backend/internal/executor"
 // CreateRequest is what the control plane sends to boot a sandbox on this worker.
 type CreateRequest struct {
 	UserID       string            `json:"user_id"`
-	Tier         string            `json:"tier"`
+	BillingModel string            `json:"billing_model"`
 	Env          map[string]string `json:"env,omitempty"`
 	VCPUs        int               `json:"vcpus"`
 	MemoryMB     int               `json:"memory_mb"`
