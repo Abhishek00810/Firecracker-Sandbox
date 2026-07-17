@@ -72,7 +72,7 @@ func TestCreateCallsWorkerAPI(t *testing.T) {
 		}
 		var req workers.CreateRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
-		if req.VCPUs != 2 || req.MemoryMB != 512 {
+		if req.BillingModel != "payg" || req.VCPUs != 2 || req.MemoryMB != 512 {
 			t.Errorf("create req = %#v", req)
 		}
 		w.WriteHeader(http.StatusCreated)
@@ -82,7 +82,7 @@ func TestCreateCallsWorkerAPI(t *testing.T) {
 
 	res, err := New(server.Client(), "secret").Create(context.Background(),
 		workers.Endpoint{WorkerID: "w1", BaseURL: server.URL},
-		workers.CreateRequest{UserID: "u1", VCPUs: 2, MemoryMB: 512, DiskGB: 10})
+		workers.CreateRequest{UserID: "u1", BillingModel: "payg", VCPUs: 2, MemoryMB: 512, DiskGB: 10})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}

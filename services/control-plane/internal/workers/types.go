@@ -21,13 +21,15 @@ type Registry interface {
 	GetEndpoint(ctx context.Context, workerID string) (Endpoint, error)
 }
 
-// ---- Contract types: mirror the worker's private HTTP API. They deliberately
-// carry NO billing/pricing fields — the worker is billing-agnostic; pricing
-// stays control-plane only. ----
+// ---- Contract types: mirror the worker's private HTTP API. BillingModel is
+// durable sandbox metadata selected by the control plane. Prices, balances,
+// and billing rules never cross this boundary; the worker remains
+// billing-agnostic. ----
 
 // CreateRequest boots a sandbox on a worker (POST /worker/sandbox).
 type CreateRequest struct {
 	UserID       string            `json:"user_id"`
+	BillingModel string            `json:"billing_model"`
 	Env          map[string]string `json:"env,omitempty"`
 	VCPUs        int               `json:"vcpus"`
 	MemoryMB     int               `json:"memory_mb"`
