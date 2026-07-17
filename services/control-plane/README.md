@@ -6,12 +6,15 @@ remains unchanged while this service grows behind compatibility tests.
 ## Current slice
 
 - Health endpoint on `GET /health`
+- Database-backed API-key authentication (`Authorization: Bearer` or `X-API-Key`)
+- Protected identity endpoint on `GET /me`
+- Server-owned execution policy loaded from `execution_policies` at startup
 - Static, configuration-backed worker registry
 - Private HTTPS/JSON worker client matching the current worker API
 - Application execution service with sandbox allocation and worker lookup ports
 
-Public execution routes are intentionally not exposed until this service owns
-database-backed authentication and sandbox allocation persistence.
+Public execution routes are intentionally not exposed until sandbox allocation
+persistence and the execution service are wired into the HTTP composition root.
 
 ## Required configuration
 

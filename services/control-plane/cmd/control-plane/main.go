@@ -11,6 +11,7 @@ import (
 
 	"github.com/renderops-ai/renderops-sandbox/services/control-plane/internal/adapters/postgres"
 	"github.com/renderops-ai/renderops-sandbox/services/control-plane/internal/api/httpapi"
+	"github.com/renderops-ai/renderops-sandbox/services/control-plane/internal/application/auth"
 	"github.com/renderops-ai/renderops-sandbox/services/control-plane/internal/config"
 	"github.com/renderops-ai/renderops-sandbox/services/control-plane/internal/workers/registry"
 )
@@ -39,9 +40,20 @@ func main() {
 	defer store.Close()
 	slog.Info("database connected")
 
+	// Load the singleton runtime policy and build the authenticator (API key ->
+	// tenant + balance gate). Failing here means a misconfigured control plane
+	// never starts.
+	executionPolicy, err := store.LoadExecutionPolicy(context.Background())
+	if err != nil {
+		slog.Error("load execution policy failed", "err", err)
+		os.Exit(1)
+	}
+	authenticator := auth.NewAuthenticator(store, executionPolicy)
+	slog.Info("auth ready", "rate_limit", executionPolicy.RateLimit, "max_sessions", executionPolicy.MaxSessions)
+
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
-		Handler:           httpapi.NewRouter(),
+		Handler:           httpapi.NewRouter(authenticator),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		IdleTimeout:       120 * time.Second,
