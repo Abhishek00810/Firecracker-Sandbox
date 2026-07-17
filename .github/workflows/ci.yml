@@ -33,6 +33,31 @@ jobs:
       - name: Run tests
         run: go test ./...
 
+  control-plane:
+    name: Control Plane
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/control-plane
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: services/control-plane/go.mod
+
+      - name: Check formatting
+        run: |
+          test -z "$(gofmt -l .)"
+
+      - name: Build control plane
+        run: go build ./cmd/control-plane
+
+      - name: Run tests
+        run: go test ./...
+
   guest-agent:
     name: Guest Agent
     runs-on: ubuntu-latest
