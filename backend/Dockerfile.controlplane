@@ -13,7 +13,8 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/control-plane ./cm
 FROM alpine:3.21 AS runtime
 
 # ca-certificates: TLS to Postgres/Supabase. wget (busybox) serves healthchecks.
-RUN apk --no-cache add ca-certificates && adduser -D -H -u 10001 app
+# openssh-client: the agent SSH tunnel (SSH_COMMAND, e.g. "ssh ro") shells out to ssh.
+RUN apk --no-cache add ca-certificates openssh-client && adduser -D -H -u 10001 app
 USER app
 
 COPY --from=build /out/control-plane /usr/local/bin/control-plane
