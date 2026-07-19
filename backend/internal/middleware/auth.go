@@ -77,8 +77,8 @@ func (c *keyCache) set(hash string, record platform.KeyRecord) {
 
 // ── Middleware ────────────────────────────────────────────────────────────────
 
-// Auth returns middleware that validates Better Auth session tokens, SDK API
-// keys, and legacy Supabase JWTs during the migration period.
+// Auth returns middleware that validates Better Auth session tokens and SDK
+// API keys.
 // Keys are cached for 60 seconds to avoid a DB round-trip on every request.
 // A revoked key can still be used for up to 60 seconds after revocation.
 // AuthResolver resolves SDK API keys and dashboard sessions to identities.
@@ -88,9 +88,8 @@ type AuthResolver interface {
 	GetProfile(userID string) (platform.Profile, error)
 }
 
-func Auth(pc AuthResolver, supabaseURL, jwtSecret string, executionPolicy policy.ExecutionPolicy, billingConfig billing.Config) func(http.Handler) http.Handler {
+func Auth(pc AuthResolver, executionPolicy policy.ExecutionPolicy, billingConfig billing.Config) func(http.Handler) http.Handler {
 	var cache AuthCache = newKeyCache(60 * time.Second)
-	jwtv := newJWTVerifier(supabaseURL, jwtSecret)
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -108,20 +107,7 @@ func Auth(pc AuthResolver, supabaseURL, jwtSecret string, executionPolicy policy
 			}
 			key := strings.TrimPrefix(raw, "Bearer ")
 
-			// Legacy dashboard path: keep accepting Supabase JWTs while old clients are
-			// being retired. Better Auth sessions are opaque tokens handled below.
-			if looksLikeJWT(key) {
-				sub, err := jwtv.verify(key)
-				if err != nil {
-					slog.Warn("auth: jwt verification failed", "err", err)
-					writeAuthError(w, http.StatusUnauthorized, "invalid session token")
-					return
-				}
-				serveUser(next, pc, executionPolicy, billingConfig, sub, w, r)
-				return
-			}
-
-			// Current dashboard path: Better Auth stores the opaque token in the
+			// Dashboard path: Better Auth stores the opaque token in the
 			// public.session table. SDK keys have a stable prefix, so they skip this
 			// lookup and retain the existing cached API-key path.
 			if !strings.HasPrefix(key, "ro_live_") {
@@ -189,7 +175,7 @@ func Auth(pc AuthResolver, supabaseURL, jwtSecret string, executionPolicy policy
 }
 
 // serveUser resolves the app profile shared by Better Auth sessions and legacy
-// Supabase JWTs, writes an auth error when needed, and calls the next handler on
+// writes an auth error when needed, and calls the next handler on
 // success. Dashboard requests intentionally have no API key id.
 func serveUser(next http.Handler, pc AuthResolver, executionPolicy policy.ExecutionPolicy, billingConfig billing.Config, userID string, w http.ResponseWriter, r *http.Request) {
 	prof, err := pc.GetProfile(userID)

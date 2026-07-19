@@ -1,160 +1,158 @@
 // Package controlplane holds the control-plane side of the split architecture.
 //
-// Service is a session.Service implementation with no local VMs: the control
-// plane owns auth, Postgres, and the API surface, while actual execution will
-// be dispatched to remote host agents. Until agents exist, lifecycle calls
-// (create/pause/resume/destroy) manage state only, and Execute/Exec return a
-// clear "no agent" error.
+// Service is a plane.Service implementation with no local VMs: it dispatches
+// execution to a remote host agent over SSH, while Postgres (the sandboxes
+// table, owned by the sk platform's migrations) stays the source of truth for
+// state, ownership, and listing.
 package controlplane
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"sync"
+	"strings"
 	"time"
 
-	"backend/internal/executor"
+	"backend/internal/agent"
+	"backend/internal/plane"
 	"backend/internal/platform"
-	"backend/internal/session"
-
-	"github.com/google/uuid"
 )
 
-// ErrNoAgent is returned for execution paths until host agents are implemented.
-var ErrNoAgent = errors.New("no agent host available: execution is not yet supported on the control plane")
-
-// StateHook mirrors the session manager's hook: it syncs every lifecycle
-// transition to the sandboxes table so the dashboard stays truthful.
-type StateHook func(sessionID, userID, state string)
-
 type Service struct {
-	mu       sync.RWMutex
-	sessions map[string]*session.Session
-	hook     StateHook
+	db    *platform.Client
+	agent *agent.Client
 }
 
-var _ session.Service = (*Service)(nil)
+var _ plane.Service = (*Service)(nil)
 
-func NewService(hook StateHook) *Service {
-	if hook == nil {
-		hook = func(string, string, string) {}
-	}
-	return &Service{sessions: make(map[string]*session.Session), hook: hook}
+func NewService(db *platform.Client, ag *agent.Client) *Service {
+	return &Service{db: db, agent: ag}
 }
 
-// Hydrate seeds the in-memory store from the sandboxes table so ownership
-// checks and pause/resume/destroy keep working across control-plane restarts.
-func (s *Service) Hydrate(ctx context.Context, pc *platform.Client) error {
-	refs, err := pc.ListSandboxesByState(ctx, []string{"active", "paused"})
-	if err != nil {
-		return err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, ref := range refs {
-		state := session.StateActive
-		if ref.State == "paused" {
-			state = session.StatePaused
-		}
-		s.sessions[ref.ID] = &session.Session{
-			ID:           ref.ID,
-			UserID:       ref.UserID,
-			BillingModel: ref.BillingModel,
-			VCPUs:        ref.VCPUs,
-			MemoryMB:     ref.MemoryMB,
-			DiskGB:       ref.DiskGB,
-			Internet:     ref.Internet,
-			CreatedAt:    ref.Created,
-			LastUsed:     ref.LastUsed,
-			State:        state,
-		}
-	}
-	return nil
-}
-
-func (s *Service) Create(ctx context.Context, userID, billingModel string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*session.Session, error) {
-	now := time.Now()
-	sess := &session.Session{
-		ID:           uuid.NewString(),
+// Create boots the sandbox on the agent and returns the agent-assigned id; the
+// handler then inserts the sandbox row under that id. If the agent fails, no
+// row is written — create is all-or-nothing.
+func (s *Service) Create(ctx context.Context, userID, billingModel string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*plane.SessionInfo, error) {
+	resp, err := s.agent.Create(ctx, plane.CreateRequest{
 		UserID:       userID,
 		BillingModel: billingModel,
+		Env:          env,
 		VCPUs:        vcpus,
 		MemoryMB:     memoryMB,
 		DiskGB:       diskGB,
+		Internet:     internet,
+		IdleTimeoutS: int(idleTimeout.Seconds()),
+		MaxLifetimeS: int(maxLifetime.Seconds()),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("provision sandbox on agent: %w", err)
+	}
+	now := time.Now()
+	return &plane.SessionInfo{
+		ID:           resp.SandboxID,
+		UserID:       userID,
+		BillingModel: billingModel,
+		VCPUs:        resp.VCPUs,
+		MemoryMB:     resp.MemoryMB,
+		DiskGB:       resp.DiskGB,
 		Env:          env,
 		Internet:     internet,
 		IdleTimeout:  idleTimeout,
 		MaxLifetime:  maxLifetime,
 		CreatedAt:    now,
 		LastUsed:     now,
-		State:        session.StateActive,
+		State:        plane.StateActive,
+	}, nil
+}
+
+func (s *Service) Execute(ctx context.Context, sessionID, code, language string, timeoutSec int) (plane.ExecResult, error) {
+	res, err := s.agent.Run(ctx, sessionID, plane.RunRequest{Code: code, Language: language, TimeoutS: timeoutSec})
+	return res, s.reconcile(ctx, sessionID, err)
+}
+
+func (s *Service) Exec(ctx context.Context, sessionID, command string, timeoutSec int) (plane.ExecResult, error) {
+	res, err := s.agent.Exec(ctx, sessionID, plane.ExecRequest{Command: command, TimeoutS: timeoutSec})
+	return res, s.reconcile(ctx, sessionID, err)
+}
+
+// reconcile self-heals zombie rows: if the agent no longer has the VM (e.g. it
+// restarted and lost all in-memory VMs), the DB row is still "active" but dead.
+// On a not-found error we mark it destroyed so it drops out of the dashboard,
+// and return a clear message instead of the raw agent error.
+func (s *Service) reconcile(ctx context.Context, sessionID string, err error) error {
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		return err
 	}
-	s.mu.Lock()
-	s.sessions[sess.ID] = sess
-	s.mu.Unlock()
-	// No hook call: the handler upserts the sandbox row on create.
-	return sess, nil
-}
-
-func (s *Service) Execute(ctx context.Context, sessionID, code, language string, timeoutSec int) (executor.ExecutionResult, error) {
-	return executor.ExecutionResult{}, ErrNoAgent
-}
-
-func (s *Service) Exec(ctx context.Context, sessionID, command string, timeoutSec int) (executor.ExecutionResult, error) {
-	return executor.ExecutionResult{}, ErrNoAgent
+	s.db.UpdateSandboxState(ctx, sessionID, "destroyed")
+	return fmt.Errorf("this sandbox is no longer running (its VM was reclaimed) — create a new one")
 }
 
 func (s *Service) Pause(ctx context.Context, sessionID string) error {
-	sess, err := s.transition(sessionID, session.StatePaused)
-	if err != nil {
+	if err := s.agent.Pause(ctx, sessionID); err != nil {
 		return err
 	}
-	s.hook(sess.ID, sess.UserID, "paused")
-	return nil
+	return s.transition(ctx, sessionID, "paused", "sandbox paused")
 }
 
 func (s *Service) Resume(ctx context.Context, sessionID string) error {
-	sess, err := s.transition(sessionID, session.StateActive)
-	if err != nil {
+	if err := s.agent.Resume(ctx, sessionID); err != nil {
 		return err
 	}
-	s.hook(sess.ID, sess.UserID, "active")
-	return nil
+	return s.transition(ctx, sessionID, "active", "sandbox resumed")
 }
 
 func (s *Service) Destroy(ctx context.Context, sessionID string) error {
-	s.mu.Lock()
-	sess, ok := s.sessions[sessionID]
-	if ok {
-		delete(s.sessions, sessionID)
+	// A VM the agent no longer knows about is already gone — that's success for
+	// destroy, so mark the row destroyed rather than stranding it.
+	if err := s.agent.Destroy(ctx, sessionID); err != nil && !strings.Contains(err.Error(), "not found") {
+		return err
 	}
-	s.mu.Unlock()
-	if !ok {
+	return s.transition(ctx, sessionID, "destroyed", "sandbox destroyed")
+}
+
+// GetSession reads the sandbox row; destroyed sandboxes read as gone.
+func (s *Service) GetSession(ctx context.Context, id string) (*plane.SessionInfo, bool) {
+	ref, ok, err := s.db.GetSandbox(ctx, id)
+	if err != nil || !ok || ref.State == "destroyed" {
+		return nil, false
+	}
+	state := plane.StateActive
+	if ref.State == "paused" {
+		state = plane.StatePaused
+	}
+	return &plane.SessionInfo{
+		ID:           ref.ID,
+		UserID:       ref.UserID,
+		BillingModel: ref.BillingModel,
+		VCPUs:        ref.VCPUs,
+		MemoryMB:     ref.MemoryMB,
+		DiskGB:       ref.DiskGB,
+		Internet:     ref.Internet,
+		CreatedAt:    ref.Created,
+		LastUsed:     ref.LastUsed,
+		State:        state,
+	}, true
+}
+
+// transition updates the sandbox row's state synchronously (so the dashboard
+// reads the new state immediately) and appends a timeline log entry. The agent
+// call already happened in the caller.
+func (s *Service) transition(ctx context.Context, sessionID, state, logMsg string) error {
+	ref, ok, err := s.db.GetSandbox(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("look up session %s: %w", sessionID, err)
+	}
+	if !ok || ref.State == "destroyed" {
 		return fmt.Errorf("session %s not found", sessionID)
 	}
-	s.hook(sess.ID, sess.UserID, "destroyed")
+	s.db.UpdateSandboxState(ctx, sessionID, state)
+	if ref.UserID != "" {
+		s.db.InsertSandboxLog(ctx, platform.SandboxLog{
+			SandboxID: sessionID,
+			UserID:    ref.UserID,
+			Stream:    "system",
+			Level:     "info",
+			Content:   logMsg,
+		})
+	}
 	return nil
-}
-
-func (s *Service) GetSession(id string) (*session.Session, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	sess, ok := s.sessions[id]
-	return sess, ok
-}
-
-func (s *Service) transition(sessionID string, state session.SessionState) (*session.Session, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sess, ok := s.sessions[sessionID]
-	if !ok {
-		return nil, fmt.Errorf("session %s not found", sessionID)
-	}
-	sess.State = state
-	sess.LastUsed = time.Now()
-	if state == session.StatePaused {
-		sess.PausedAt = time.Now()
-	}
-	return sess, nil
 }

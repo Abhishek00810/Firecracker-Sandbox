@@ -17,6 +17,8 @@ type UsageLogger interface {
 	InsertSandboxLog(ctx context.Context, l SandboxLog)
 	InsertSandboxRun(ctx context.Context, run SandboxRun)
 	ListSandboxes(ctx context.Context, userID string) ([]SandboxListItem, error)
+	// BillSandboxRuntime debits the owner's balance for unbilled wall-clock time.
+	BillSandboxRuntime(ctx context.Context, sandboxID string, ratePerSec float64)
 }
 
 type Service interface {

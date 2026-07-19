@@ -1,56 +1,76 @@
-FROM alpine:3.20
+# syntax=docker/dockerfile:1
+#
+# Dockerfile.rootfs — self-contained build of the RenderOps VM assets. Everything
+# comes from THIS repo (guest-agent/) plus Alpine packages and the Go toolchain;
+# there is no dependency on any external asset tree. Built via `make assets`,
+# which uses BuildKit `--output` to emit the artifacts straight to the host:
+#
+#   docker build --target rootfs-export    -o type=local,dest=assets/rootfs .  → rootfs-alpine.ext4
+#   docker build --target initramfs-export -o type=local,dest=assets .         → initramfs.cpio.gz
+#
+ARG ALPINE=alpine:3.20
 
-# System packages
+# ── guest-agent: built from this repo's source, no host Go needed ────────────
+FROM golang:1.23-alpine AS guestbuild
+WORKDIR /src
+COPY guest-agent/go.mod guest-agent/go.sum ./
+RUN go mod download
+COPY guest-agent/ ./
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /guest-agent .
+
+# ── rootfs contents: Alpine + python/node + jupyter stack + guest-agent ──────
+FROM ${ALPINE} AS rootfs
 RUN apk add --no-cache \
-    bash \
-    busybox \
-    iproute2 \
-    util-linux \
-    ca-certificates \
-    curl \
-    git \
-    openssh-client \
-    python3 \
-    py3-pip \
-    nodejs \
-    npm
-
-# Python kernel stack for stateful Python execution (kernel_bridge.py)
+    bash busybox iproute2 util-linux ca-certificates curl git openssh-client \
+    python3 py3-pip nodejs npm
+# Python kernel stack for stateful execution (kernel_bridge.py).
 RUN pip install --no-cache-dir --break-system-packages \
-    ipykernel==7.2.0 \
-    ipython==9.12.0 \
-    jupyter_client==8.8.0 \
-    jupyter_core==5.9.1 \
-    pyzmq==27.1.0 \
-    debugpy==1.8.20 \
-    psutil==7.2.2
-
-# Bridge scripts for stateful Python/Node execution
+    ipykernel==7.2.0 ipython==9.12.0 jupyter_client==8.8.0 jupyter_core==5.9.1 \
+    pyzmq==27.1.0 debugpy==1.8.20 psutil==7.2.2
+# Bridges + the guest-agent binary from this repo.
 COPY guest-agent/kernel_bridge.py /usr/local/bin/kernel_bridge.py
 COPY guest-agent/node_bridge.js   /usr/local/bin/node_bridge.js
-
-# Git: never prompt for credentials inside a VM
-RUN git config --global credential.helper ""
+COPY --from=guestbuild /guest-agent /usr/local/bin/guest-agent
+RUN chmod +x /usr/local/bin/guest-agent /usr/local/bin/kernel_bridge.py
+# Guest identity + policy baked in (no per-VM runtime rootfs mount):
+#   - never prompt for git credentials inside a VM
+#   - pip installs into the system env (ephemeral single-use VMs) — dodge PEP 668
+#   - DNS so hostnames resolve without relying on network config flow
+#   - fixed network identity: every slot reuses TAP 172.16.0.1, guest 172.16.0.2
 ENV GIT_TERMINAL_PROMPT=0
+RUN git config --global credential.helper "" \
+ && printf '[global]\nbreak-system-packages = true\n' > /etc/pip.conf \
+ && echo "nameserver 8.8.8.8" > /etc/resolv.conf \
+ && printf 'GUESTIP=172.16.0.2\nGWIP=172.16.0.1\n' > /etc/vm-network.env \
+ && mkdir -p /workspace
 
-# Bake in DNS so VMs can resolve hostnames without relying on network config flow
-RUN echo "nameserver 8.8.8.8" > /etc/resolv.conf
+# ── pack the rootfs into an ext4 image (mkfs -d, no mount / no privileges) ───
+FROM ${ALPINE} AS ext4build
+ARG ROOTFS_SIZE=2G
+RUN apk add --no-cache e2fsprogs
+COPY --from=rootfs / /rootfs-root
+# Drop pseudo-fs mountpoints so mke2fs doesn't choke on device nodes; the guest
+# init mounts proc/sys/devtmpfs itself. -d populates the fs from a directory
+# without mounting it, so this works in an unprivileged build.
+RUN rm -rf /rootfs-root/proc /rootfs-root/sys && mkdir -p /rootfs-root/proc /rootfs-root/sys \
+ && rm -rf /rootfs-root/dev && mkdir -p /rootfs-root/dev \
+ && mkdir -p /out \
+ && mkfs.ext4 -q -L rootfs -m 0 -d /rootfs-root /out/rootfs-alpine.ext4 ${ROOTFS_SIZE}
 
-# Make `pip install` work out of the box for users. Sandbox VMs are ephemeral and
-# single-use, so installing into the system environment is fine — without this, PEP 668
-# ("externally-managed-environment") makes every user `pip install` fail.
-RUN printf '[global]\nbreak-system-packages = true\n' > /etc/pip.conf
+FROM scratch AS rootfs-export
+COPY --from=ext4build /out/rootfs-alpine.ext4 /
 
-# Bake the guest network identity. Every VM uses the same address: the slot design
-# renames each slot's TAP to the template's name and assigns the same host IP
-# (172.16.0.1), and the guest is 172.16.0.2. Baking this here removes the per-VM
-# runtime rootfs mount that used to write it at boot (and the mount leak that caused).
-RUN printf 'GUESTIP=172.16.0.2\nGWIP=172.16.0.1\n' > /etc/vm-network.env
+# ── initramfs: static busybox + this repo's OverlayFS init ───────────────────
+FROM ${ALPINE} AS initramfsbuild
+RUN apk add --no-cache busybox-static cpio gzip
+WORKDIR /irfs
+RUN mkdir -p bin proc sys dev lower upper merged \
+ && cp /bin/busybox.static bin/busybox \
+ && for a in sh mount mkdir sleep switch_root; do ln -s busybox bin/$a; done
+COPY guest-agent/initramfs/init /irfs/init
+RUN chmod +x /irfs/init \
+ && mkdir -p /out \
+ && (cd /irfs && find . | cpio -o -H newc | gzip -9 > /out/initramfs.cpio.gz)
 
-RUN mkdir -p /workspace
-
-# guest-agent baked into the image (previously injected by server.sh at runtime via a
-# loop mount). Baking removes the last runtime rootfs mount. NOTE: updating the agent
-# now requires rebuilding the rootfs (build_rootfs.sh), not just restarting the server.
-COPY guest-agent/guest-agent-amd64 /usr/local/bin/guest-agent
-RUN chmod +x /usr/local/bin/guest-agent
+FROM scratch AS initramfs-export
+COPY --from=initramfsbuild /out/initramfs.cpio.gz /

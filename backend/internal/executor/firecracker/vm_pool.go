@@ -42,10 +42,6 @@ type PooledVM struct {
 	Cgroup       *cgroup.Cgroup
 }
 
-func NewVMPool(minSize, maxSize int, cfg VMConfig, mgr VMManager, cgroupConfig cgroup.Config) *VMPool {
-	return NewVMPoolWithSnapshot(minSize, maxSize, cfg, mgr, cgroupConfig, nil, false, false)
-}
-
 func NewVMPoolWithSnapshot(minSize, maxSize int, cfg VMConfig, mgr VMManager, cgroupConfig cgroup.Config, tmpl *SnapshotTemplate,
 	warmPythonStateful bool, warmNodeBridge bool) *VMPool {
 	pool := &VMPool{

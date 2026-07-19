@@ -1,9 +1,11 @@
 package handler
 
 import (
+	"context"
+
 	"backend/internal/middleware"
+	"backend/internal/plane"
 	"backend/internal/platform"
-	"backend/internal/session"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -20,7 +22,7 @@ import (
 //	POST   /session/:id/run  → run code in session
 //	DELETE /session/:id      → destroy session
 //	GET    /session/:id      → session info
-func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.HandlerFunc {
+func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := middleware.RequestIDFromContext(r.Context())
 
@@ -62,7 +64,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				}
 			}
 
-			size, err := resolveSize(createReq.Resources)
+			size, err := resolveSize(createReq)
 			if err != nil {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusBadRequest)
@@ -153,7 +155,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				http.Error(w, "missing session id", http.StatusBadRequest)
 				return
 			}
-			if !ownsSession(mgr, sessionID, auth.TenantID) {
+			if !ownsSession(r.Context(), mgr, sessionID, auth.TenantID) {
 				http.Error(w, "session not found", http.StatusNotFound)
 				return
 			}
@@ -183,7 +185,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 			}
 			execDurationMs := time.Since(start).Seconds() * 1000
 
-			sessSt, _ := mgr.GetSession(sessionID)
+			sessSt, _ := mgr.GetSession(r.Context(), sessionID)
 			sessTc := auth.Config
 
 			output := &ExecutionOutput{
@@ -236,6 +238,8 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				Stdout:        truncate(result.Stdout, 64*1024),
 				Stderr:        truncate(result.Stderr, 64*1024),
 			})
+			// Wall-clock sandbox time is what burns credit (not just this command).
+			billRuntimeAsync(usageLogger, sessionID, auth.Billing.ExecutionRateUSDPerSec)
 			recordRunAsync(usageLogger, platform.SandboxRun{
 				ID:         uuid.NewString(),
 				SandboxID:  sessionID,
@@ -259,7 +263,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				http.Error(w, "missing session id", http.StatusBadRequest)
 				return
 			}
-			if !ownsSession(mgr, sessionID, auth.TenantID) {
+			if !ownsSession(r.Context(), mgr, sessionID, auth.TenantID) {
 				http.Error(w, "session not found", http.StatusNotFound)
 				return
 			}
@@ -283,7 +287,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 			}
 			execDurationMs := time.Since(start).Seconds() * 1000
 
-			sessSt, _ := mgr.GetSession(sessionID)
+			sessSt, _ := mgr.GetSession(r.Context(), sessionID)
 			sessTc := auth.Config
 
 			output := &ExecutionOutput{
@@ -336,6 +340,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				Stdout:        truncate(result.Stdout, 64*1024),
 				Stderr:        truncate(result.Stderr, 64*1024),
 			})
+			billRuntimeAsync(usageLogger, sessionID, auth.Billing.ExecutionRateUSDPerSec)
 			recordRunAsync(usageLogger, platform.SandboxRun{
 				ID:         uuid.NewString(),
 				SandboxID:  sessionID,
@@ -359,7 +364,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				http.Error(w, "missing session id", http.StatusBadRequest)
 				return
 			}
-			if !ownsSession(mgr, sessionID, auth.TenantID) {
+			if !ownsSession(r.Context(), mgr, sessionID, auth.TenantID) {
 				http.Error(w, "session not found", http.StatusNotFound)
 				return
 			}
@@ -368,6 +373,8 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
+			// Bill active time up to the pause.
+			billRuntimeAsync(usageLogger, sessionID, auth.Billing.ExecutionRateUSDPerSec)
 			// state + timeline sync to the DB is handled by the manager's state hook
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{"status": "success", "session_id": sessionID, "state": "paused"})
@@ -379,7 +386,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 				http.Error(w, "missing session id", http.StatusBadRequest)
 				return
 			}
-			if !ownsSession(mgr, sessionID, auth.TenantID) {
+			if !ownsSession(r.Context(), mgr, sessionID, auth.TenantID) {
 				http.Error(w, "session not found", http.StatusNotFound)
 				return
 			}
@@ -395,11 +402,13 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 			// DELETE /session/:id — destroy session
 		case r.Method == http.MethodDelete && path != "":
 			sessionID := path
-			if !ownsSession(mgr, sessionID, auth.TenantID) {
+			if !ownsSession(r.Context(), mgr, sessionID, auth.TenantID) {
 				http.Error(w, "session not found", http.StatusNotFound)
 				return
 			}
 
+			// Debit remaining wall-clock before destroy (sync so we don't lose the charge).
+			usageLogger.BillSandboxRuntime(r.Context(), sessionID, auth.Billing.ExecutionRateUSDPerSec)
 			if err := mgr.Destroy(r.Context(), sessionID); err != nil {
 				slog.Error("session destroy failed", "session_id", sessionID, "err", err)
 				http.Error(w, err.Error(), http.StatusNotFound)
@@ -427,7 +436,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 		case r.Method == http.MethodGet && path != "":
 			sessionID := path
 
-			sess, ok := mgr.GetSession(sessionID)
+			sess, ok := mgr.GetSession(r.Context(), sessionID)
 			if !ok || sess.UserID != auth.TenantID {
 				http.Error(w, "session not found", http.StatusNotFound)
 				return
@@ -471,7 +480,7 @@ func SessionHandler(mgr session.Service, usageLogger platform.UsageLogger) http.
 
 // ownsSession keeps every id-based operation tenant-scoped. Returning the same
 // 404 for missing and foreign sessions avoids leaking another tenant's ids.
-func ownsSession(mgr session.Service, sessionID, userID string) bool {
-	sess, ok := mgr.GetSession(sessionID)
+func ownsSession(ctx context.Context, mgr plane.Service, sessionID, userID string) bool {
+	sess, ok := mgr.GetSession(ctx, sessionID)
 	return ok && sess.UserID == userID
 }

@@ -48,30 +48,14 @@ type UsageInfo struct {
 	TimeoutLimitMs  int     `json:"timeout_limit_ms"`
 }
 
-// --- POST /execute ---
-
-type ExecuteRequest struct {
-	Code     string `json:"code"`
-	Language string `json:"language"`
-	Timeout  *int   `json:"timeout,omitempty"`
-}
-
-type ExecuteResponse struct {
-	Status    string           `json:"status"`
-	RequestID string           `json:"request_id"`
-	Result    *ExecutionOutput `json:"result,omitempty"`
-	Error     *ErrorDetail     `json:"error,omitempty"`
-	Usage     *UsageInfo       `json:"usage"`
-	Tenant    *TenantContext   `json:"tenant"`
-}
-
 // --- POST /session ---
 
 type CreateSessionRequest struct {
 	Name         string            `json:"name,omitempty"`     //dashboard-facing label; default "sandbox"
 	Metadata     map[string]any    `json:"metadata,omitempty"` //user labels (purpose/owner/etc.) for list + filter
 	Env          map[string]string `json:"env,omitempty"`
-	Resources    *Resources        `json:"resources,omitempty"`      //nil = default size
+	Size         string            `json:"size,omitempty"`           // named size from the menu ("nano"...); the sk dashboard sends this
+	Resources    *Resources        `json:"resources,omitempty"`      //nil = default size; wins over Size when both are set
 	Network      *NetworkConfig    `json:"network,omitempty"`        //nil = default (internet on)
 	IdleTimeoutS *int              `json:"idle_timeout_s,omitempty"` // nil = policy default; capped at max lifetime
 	MaxLifetimeS *int              `json:"max_lifetime_s,omitempty"` // nil = policy default/cap
@@ -149,29 +133,4 @@ type SessionStats struct {
 	RunCount         int     `json:"run_count"`
 	TotalExecutionMs float64 `json:"total_execution_ms"`
 	LastExitCode     *int    `json:"last_exit_code"`
-}
-
-// --- DELETE /session/:id ---
-
-type DestroySessionResponse struct {
-	Status    string        `json:"status"`
-	RequestID string        `json:"request_id"`
-	SessionID string        `json:"session_id"`
-	Usage     *SessionUsage `json:"usage"`
-}
-
-type SessionUsage struct {
-	TotalExecutionMs float64 `json:"total_execution_ms"`
-	RunCount         int     `json:"run_count"`
-	AliveMs          float64 `json:"alive_ms"`
-}
-
-// --- GET /health ---
-
-type HealthResponse struct {
-	Status     string            `json:"status"`
-	Version    string            `json:"version"`
-	Uptime     string            `json:"uptime"`
-	UptimeMs   int64             `json:"uptime_ms"`
-	Components map[string]string `json:"components"`
 }

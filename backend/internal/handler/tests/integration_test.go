@@ -2,32 +2,25 @@ package handler_test
 
 import (
 	"backend/internal/billing"
-	"backend/internal/executor"
 	"backend/internal/handler"
 	"backend/internal/middleware"
+	"backend/internal/plane"
 	"backend/internal/platform"
-	"backend/internal/queue"
-	"backend/internal/ratelimit"
-	"backend/internal/session"
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
-
-	"golang.org/x/time/rate"
 )
 
-func TestExecuteHandlerRequiresAuth(t *testing.T) {
+func TestSessionRequiresAuth(t *testing.T) {
 	server := newTestServer(t, testDeps{})
 
-	req := httptest.NewRequest(http.MethodPost, "/execute", bytes.NewBufferString(`{"code":"print(1)","language":"python"}`))
-	req.Header.Set("Content-Type", "application/json")
+	req := httptest.NewRequest(http.MethodPost, "/session", nil)
 	rec := httptest.NewRecorder()
 
 	server.ServeHTTP(rec, req)
@@ -37,68 +30,7 @@ func TestExecuteHandlerRequiresAuth(t *testing.T) {
 	}
 }
 
-func TestExecuteHandlerRequiresPostAndPayload(t *testing.T) {
-	server := newTestServer(t, testDeps{})
-
-	getReq := httptest.NewRequest(http.MethodGet, "/execute", nil)
-	getReq.Header.Set("Authorization", "Bearer ro_live_test-key")
-	getRec := httptest.NewRecorder()
-	server.ServeHTTP(getRec, getReq)
-	if getRec.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("expected 405, got %d", getRec.Code)
-	}
-
-	postReq := httptest.NewRequest(http.MethodPost, "/execute", bytes.NewBufferString(`{"code":""}`))
-	postReq.Header.Set("Authorization", "Bearer ro_live_test-key")
-	postRec := httptest.NewRecorder()
-	server.ServeHTTP(postRec, postReq)
-	if postRec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d", postRec.Code)
-	}
-}
-
-func TestExecuteHandlerSuccess(t *testing.T) {
-	server := newTestServer(t, testDeps{
-		executor: fakeExecutor{
-			result: executor.ExecutionResult{
-				Stdout:            "2\n",
-				ExitCode:          0,
-				TerminationReason: "success",
-				GuestDuration:     0.012,
-			},
-		},
-	})
-
-	req := httptest.NewRequest(http.MethodPost, "/execute", bytes.NewBufferString(`{"code":"print(1+1)","language":"python"}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer ro_live_test-key")
-	rec := httptest.NewRecorder()
-
-	server.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	var resp handler.ExecuteResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if resp.Status != "success" {
-		t.Fatalf("expected success status, got %q", resp.Status)
-	}
-	if resp.Result == nil || resp.Result.Stdout != "2\n" {
-		t.Fatalf("unexpected result payload: %+v", resp.Result)
-	}
-	if resp.Tenant == nil || resp.Tenant.BillingModel != billing.PAYG {
-		t.Fatalf("unexpected tenant payload: %+v", resp.Tenant)
-	}
-	if rec.Header().Get("X-Request-ID") == "" {
-		t.Fatal("expected X-Request-ID header to be set")
-	}
-}
-
-func TestExecuteHandlerAcceptsBetterAuthSession(t *testing.T) {
+func TestSessionCreateAcceptsBetterAuthSession(t *testing.T) {
 	server := newTestServer(t, testDeps{
 		resolver: &fakePlatformService{
 			record: platform.KeyRecord{
@@ -109,17 +41,16 @@ func TestExecuteHandlerAcceptsBetterAuthSession(t *testing.T) {
 		},
 	})
 
-	req := httptest.NewRequest(http.MethodPost, "/execute", bytes.NewBufferString(`{"code":"print(1)","language":"python"}`))
-	req.Header.Set("Content-Type", "application/json")
+	req := httptest.NewRequest(http.MethodPost, "/session", nil)
 	req.Header.Set("Authorization", "Bearer better-auth-session-token")
 	rec := httptest.NewRecorder()
 
 	server.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp handler.ExecuteResponse
+	var resp handler.CreateSessionResponse
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -128,37 +59,7 @@ func TestExecuteHandlerAcceptsBetterAuthSession(t *testing.T) {
 	}
 }
 
-func TestExecuteHandlerSystemErrorReturnsServiceUnavailable(t *testing.T) {
-	server := newTestServer(t, testDeps{
-		executor: fakeExecutor{
-			err: errors.New("failed to acquire VM"),
-		},
-	})
-
-	req := httptest.NewRequest(http.MethodPost, "/execute", bytes.NewBufferString(`{"code":"print(1+1)","language":"python"}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer ro_live_test-key")
-	rec := httptest.NewRecorder()
-
-	server.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expected 503 for system error, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	var resp handler.ExecuteResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if resp.Status != "error" {
-		t.Fatalf("expected error status, got %q", resp.Status)
-	}
-	if resp.Error == nil || resp.Error.Code != "system_error" {
-		t.Fatalf("expected system_error payload, got %+v", resp.Error)
-	}
-}
-
-func TestExecuteUsageLogDoesNotUseRequestCancellationContext(t *testing.T) {
+func TestSessionCreateUsageLogDoesNotUseRequestCancellationContext(t *testing.T) {
 	resolver := &fakePlatformService{
 		record: platform.KeyRecord{
 			ID:         "key-1",
@@ -172,16 +73,15 @@ func TestExecuteUsageLogDoesNotUseRequestCancellationContext(t *testing.T) {
 	server := newTestServer(t, testDeps{resolver: resolver})
 
 	ctx, cancel := context.WithCancel(context.Background())
-	req := httptest.NewRequest(http.MethodPost, "/execute", bytes.NewBufferString(`{"code":"print(1+1)","language":"python"}`)).WithContext(ctx)
-	req.Header.Set("Content-Type", "application/json")
+	req := httptest.NewRequest(http.MethodPost, "/session", nil).WithContext(ctx)
 	req.Header.Set("Authorization", "Bearer ro_live_test-key")
 	rec := httptest.NewRecorder()
 
 	server.ServeHTTP(rec, req)
 	cancel()
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
 	select {
@@ -263,6 +163,114 @@ func TestSessionLifecycle(t *testing.T) {
 	}
 }
 
+// TestSKPlatformContract replays, verbatim, every call sk-renderops-platform
+// makes to the Go backend (src/lib/server/actions/sandboxes.js): create,
+// pause, resume, destroy — authenticated the way sk authenticates (a
+// better-auth session token as Bearer), with the bodies sk sends and the
+// response fields sk parses. If this test fails, the dashboard is broken.
+func TestSKPlatformContract(t *testing.T) {
+	server := newTestServer(t, testDeps{
+		resolver: &fakePlatformService{
+			record:        platform.KeyRecord{ID: "profile-source", BalanceUSD: 10},
+			sessionUserID: "dash-user",
+		},
+	})
+
+	do := func(method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		var rdr *bytes.Buffer
+		if body != "" {
+			rdr = bytes.NewBufferString(body)
+		} else {
+			rdr = &bytes.Buffer{}
+		}
+		req := httptest.NewRequest(method, path, rdr)
+		// backendCall sets both headers on every request, body or not.
+		req.Header.Set("Authorization", "Bearer better-auth-session-token")
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		server.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// createSandbox: POST /session with the dashboard form's default body.
+	rec := do(http.MethodPost, "/session",
+		`{"name":"my-box","size":"small","network":{"internet":true},"idle_timeout_s":300,"max_lifetime_s":3600}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// sk reads data.session.session_id and data.session.state.
+	var createResp struct {
+		Session *struct {
+			SessionID string `json:"session_id"`
+			State     string `json:"state"`
+		} `json:"session"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&createResp); err != nil {
+		t.Fatalf("create: decode: %v", err)
+	}
+	if createResp.Session == nil || createResp.Session.SessionID == "" {
+		t.Fatalf("create: sk needs session.session_id, got %s", rec.Body.String())
+	}
+	if createResp.Session.State != "active" {
+		t.Fatalf("create: sk expects state active, got %q", createResp.Session.State)
+	}
+	id := createResp.Session.SessionID
+
+	// pauseSandbox: POST /session/{id}/pause — sk only checks res.ok.
+	if rec := do(http.MethodPost, "/session/"+id+"/pause", ""); rec.Code != http.StatusOK {
+		t.Fatalf("pause: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// resumeSandbox: POST /session/{id}/resume — sk only checks res.ok.
+	if rec := do(http.MethodPost, "/session/"+id+"/resume", ""); rec.Code != http.StatusOK {
+		t.Fatalf("resume: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// destroySandbox: DELETE /session/{id} — sk only checks res.ok (204, empty body).
+	if rec := do(http.MethodDelete, "/session/"+id, ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("destroy: expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestSessionCreateAcceptsDashboardBody locks in the exact create body the sk
+// dashboard sends (named size + network + timeouts) — it must never 400.
+func TestSessionCreateAcceptsDashboardBody(t *testing.T) {
+	server := newTestServer(t, testDeps{})
+	body := `{"name":"my-box","size":"small","network":{"internet":true},"idle_timeout_s":300,"max_lifetime_s":3600}`
+	req := httptest.NewRequest(http.MethodPost, "/session", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer ro_live_test-key")
+	rec := httptest.NewRecorder()
+
+	server.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for dashboard create body, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp handler.CreateSessionResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Session == nil || resp.Session.SessionID == "" {
+		t.Fatalf("unexpected create response: %+v", resp)
+	}
+}
+
+func TestSessionCreateRejectsUnknownSize(t *testing.T) {
+	server := newTestServer(t, testDeps{})
+	req := httptest.NewRequest(http.MethodPost, "/session", bytes.NewBufferString(`{"size":"mega"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer ro_live_test-key")
+	rec := httptest.NewRecorder()
+
+	server.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unknown size, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestSessionCreateRejectsClientSelectedTier(t *testing.T) {
 	server := newTestServer(t, testDeps{})
 	req := httptest.NewRequest(http.MethodPost, "/session", bytes.NewBufferString(`{"tier":"pro"}`))
@@ -279,7 +287,7 @@ func TestSessionCreateRejectsClientSelectedTier(t *testing.T) {
 
 func TestSessionLifecycleRejectsForeignTenant(t *testing.T) {
 	svc := newFakeSessionService()
-	svc.sessions["foreign-session"] = &session.Session{
+	svc.sessions["foreign-session"] = &plane.SessionInfo{
 		ID:           "foreign-session",
 		UserID:       "tenant-2",
 		BillingModel: billing.PAYG,
@@ -304,13 +312,12 @@ func TestSessionLifecycleRejectsForeignTenant(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if _, ok := svc.GetSession("foreign-session"); !ok {
+	if _, ok := svc.GetSession(context.Background(), "foreign-session"); !ok {
 		t.Fatal("foreign tenant session was deleted")
 	}
 }
 
 type testDeps struct {
-	executor   fakeExecutor
 	resolver   *fakePlatformService
 	sessionSvc *fakeSessionService
 }
@@ -330,43 +337,16 @@ func newTestServer(t *testing.T, deps testDeps) http.Handler {
 		}
 	}
 
-	exec := deps.executor
-	if exec.result.TerminationReason == "" && exec.err == nil {
-		exec = fakeExecutor{
-			result: executor.ExecutionResult{
-				Stdout:            "ok\n",
-				ExitCode:          0,
-				TerminationReason: "success",
-				GuestDuration:     0.005,
-			},
-		}
-	}
-
 	sessionSvc := deps.sessionSvc
 	if sessionSvc == nil {
 		sessionSvc = newFakeSessionService()
 	}
 
-	execQueue := queue.NewJobQueue(exec, 1)
-	execQueue.Start()
-
-	tenantLimiter := ratelimit.NewTenantLimiter(rate.Limit(1000), 1000)
-
 	mux := http.NewServeMux()
-	mux.HandleFunc("/execute", handler.ExecuteHandler(execQueue, tenantLimiter, resolver))
 	mux.HandleFunc("/session", handler.SessionHandler(sessionSvc, resolver))
 	mux.HandleFunc("/session/", handler.SessionHandler(sessionSvc, resolver))
 
-	return middleware.Logging(middleware.Auth(resolver, "http://supabase.test", "test-jwt-secret", testExecutionPolicy(), testBillingConfig())(mux))
-}
-
-type fakeExecutor struct {
-	result executor.ExecutionResult
-	err    error
-}
-
-func (f fakeExecutor) Execute(ctx context.Context, code string, language string) (executor.ExecutionResult, error) {
-	return f.result, f.err
+	return middleware.Logging(middleware.Auth(resolver, testExecutionPolicy(), testBillingConfig())(mux))
 }
 
 type fakePlatformService struct {
@@ -408,6 +388,8 @@ func (f *fakePlatformService) UpsertSandbox(ctx context.Context, sb platform.San
 func (f *fakePlatformService) UpdateSandboxState(ctx context.Context, id, state string)      {}
 func (f *fakePlatformService) InsertSandboxLog(ctx context.Context, l platform.SandboxLog)   {}
 func (f *fakePlatformService) InsertSandboxRun(ctx context.Context, run platform.SandboxRun) {}
+func (f *fakePlatformService) BillSandboxRuntime(ctx context.Context, sandboxID string, ratePerSec float64) {
+}
 func (f *fakePlatformService) ListSandboxes(ctx context.Context, userID string) ([]platform.SandboxListItem, error) {
 	return nil, nil
 }
@@ -418,56 +400,57 @@ func (f *fakePlatformService) GetProfile(userID string) (platform.Profile, error
 
 type fakeSessionService struct {
 	mu       sync.Mutex
-	sessions map[string]*session.Session
+	sessions map[string]*plane.SessionInfo
 }
 
 func newFakeSessionService() *fakeSessionService {
-	return &fakeSessionService{sessions: map[string]*session.Session{}}
+	return &fakeSessionService{sessions: map[string]*plane.SessionInfo{}}
 }
 
-func (f *fakeSessionService) Exec(ctx context.Context, sessionID, command string, timeoutSec int) (executor.ExecutionResult, error) {
+func (f *fakeSessionService) Exec(ctx context.Context, sessionID, command string, timeoutSec int) (plane.ExecResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if _, ok := f.sessions[sessionID]; !ok {
-		return executor.ExecutionResult{}, fmt.Errorf("session %s not found", sessionID)
+		return plane.ExecResult{}, fmt.Errorf("session %s not found", sessionID)
 	}
-	return executor.ExecutionResult{
+	return plane.ExecResult{
 		Stdout:            "exec output\n",
 		ExitCode:          0,
 		TerminationReason: "success",
 	}, nil
 }
 
-func (f *fakeSessionService) Create(ctx context.Context, userID, billingModel string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*session.Session, error) {
+func (f *fakeSessionService) Create(ctx context.Context, userID, billingModel string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*plane.SessionInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	id := fmt.Sprintf("sess-%d", len(f.sessions)+1)
-	sess := &session.Session{
+	sess := &plane.SessionInfo{
 		ID:           id,
 		UserID:       userID,
 		BillingModel: billingModel,
 		CreatedAt:    time.Now().UTC(),
 		LastUsed:     time.Now().UTC(),
+		State:        plane.StateActive,
 	}
 	f.sessions[id] = sess
 	return sess, nil
 }
 
-func (f *fakeSessionService) Execute(ctx context.Context, sessionID, code, language string, timeoutSec int) (executor.ExecutionResult, error) {
+func (f *fakeSessionService) Execute(ctx context.Context, sessionID, code, language string, timeoutSec int) (plane.ExecResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	sess, ok := f.sessions[sessionID]
 	if !ok {
-		return executor.ExecutionResult{}, fmt.Errorf("session %s not found", sessionID)
+		return plane.ExecResult{}, fmt.Errorf("session %s not found", sessionID)
 	}
 	sess.LastUsed = time.Now().UTC()
 	sess.RunCount++
 	sess.TotalExecutionMs += 7
 	exitCode := 0
 	sess.LastExitCode = &exitCode
-	return executor.ExecutionResult{
+	return plane.ExecResult{
 		Stdout:            "session output\n",
 		ExitCode:          0,
 		TerminationReason: "success",
@@ -488,7 +471,7 @@ func (f *fakeSessionService) Destroy(ctx context.Context, sessionID string) erro
 	return nil
 }
 
-func (f *fakeSessionService) GetSession(id string) (*session.Session, bool) {
+func (f *fakeSessionService) GetSession(ctx context.Context, id string) (*plane.SessionInfo, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	sess, ok := f.sessions[id]

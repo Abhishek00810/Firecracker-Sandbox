@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"backend/internal/plane"
 	"backend/internal/session"
 )
 
@@ -26,17 +27,17 @@ func NewServer(svc session.Service, token string, maxSlots int) *Server {
 // Handler returns the worker API mux.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/worker/health", s.health)
-	mux.HandleFunc("/worker/capacity", s.authed(s.capacity))
-	mux.HandleFunc("/worker/sandbox", s.authed(s.create))     // POST
-	mux.HandleFunc("/worker/sandbox/", s.authed(s.sandboxOp)) // /{id}/run|exec|pause|resume, DELETE /{id}
+	mux.HandleFunc(plane.RouteHealth, s.health)
+	mux.HandleFunc(plane.RouteCapacity, s.authed(s.capacity))
+	mux.HandleFunc(plane.RouteSandbox, s.authed(s.create))          // POST
+	mux.HandleFunc(plane.RouteSandboxPrefix, s.authed(s.sandboxOp)) // /{id}/run|exec|pause|resume, DELETE /{id}
 	return mux
 }
 
 // authed enforces the internal shared token before dispatching.
 func (s *Server) authed(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.token != "" && r.Header.Get("X-Worker-Token") != s.token {
+		if s.token != "" && r.Header.Get(plane.AuthHeader) != s.token {
 			writeErr(w, http.StatusUnauthorized, "unauthorized", "invalid or missing worker token")
 			return
 		}
@@ -51,7 +52,7 @@ func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) capacity(w http.ResponseWriter, _ *http.Request) {
 	// Placeholder: report the configured max; live free-slot accounting comes with
 	// the scheduler. Good enough for the control plane to know a worker exists.
-	writeJSON(w, http.StatusOK, Capacity{FreeSlots: s.maxSlots, MaxSlots: s.maxSlots})
+	writeJSON(w, http.StatusOK, plane.Capacity{FreeSlots: s.maxSlots, MaxSlots: s.maxSlots})
 }
 
 func (s *Server) create(w http.ResponseWriter, r *http.Request) {
@@ -59,7 +60,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "use POST")
 		return
 	}
-	var req CreateRequest
+	var req plane.CreateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
@@ -71,7 +72,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "create_failed", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, CreateResponse{
+	writeJSON(w, http.StatusCreated, plane.CreateResponse{
 		SandboxID: sess.ID, State: string(sess.State),
 		VCPUs: sess.VCPUs, MemoryMB: sess.MemoryMB, DiskGB: sess.DiskGB,
 	})
@@ -79,7 +80,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 
 // sandboxOp routes /worker/sandbox/{id}[/op].
 func (s *Server) sandboxOp(w http.ResponseWriter, r *http.Request) {
-	rest := strings.TrimPrefix(r.URL.Path, "/worker/sandbox/")
+	rest := strings.TrimPrefix(r.URL.Path, plane.RouteSandboxPrefix)
 	parts := strings.SplitN(rest, "/", 2)
 	id := parts[0]
 	op := ""
@@ -93,7 +94,7 @@ func (s *Server) sandboxOp(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case op == "run" && r.Method == http.MethodPost:
-		var req RunRequest
+		var req plane.RunRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
 			return
@@ -102,7 +103,7 @@ func (s *Server) sandboxOp(w http.ResponseWriter, r *http.Request) {
 		s.writeResult(w, res, err)
 
 	case op == "exec" && r.Method == http.MethodPost:
-		var req ExecRequest
+		var req plane.ExecRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
 			return
@@ -156,7 +157,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func writeErr(w http.ResponseWriter, status int, code, msg string) {
-	writeJSON(w, status, ErrorResponse{Code: code, Error: msg})
+	writeJSON(w, status, plane.ErrorResponse{Code: code, Error: msg})
 }
 
 func secs(n int) time.Duration { return time.Duration(n) * time.Second }

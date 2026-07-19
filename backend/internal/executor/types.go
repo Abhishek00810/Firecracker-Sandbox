@@ -1,11 +1,5 @@
 package executor
 
-import "context"
-
-type Executor interface {
-	Execute(ctx context.Context, code string, language string) (ExecutionResult, error)
-}
-
 type ExecutionResult struct {
 	Stdout            string  `json:"stdout"`
 	Stderr            string  `json:"stderr"`

@@ -4,9 +4,11 @@
 package main
 
 import (
+	"backend/internal/bootstrap"
 	"backend/internal/cgroup"
 	"backend/internal/config"
 	"backend/internal/executor/firecracker"
+	"backend/internal/plane"
 	"backend/internal/session"
 	"backend/internal/vmsize"
 	"backend/internal/worker"
@@ -58,12 +60,43 @@ func main() {
 		slog.Warn("startup warning", "message", warning)
 	}
 
+	slotCount := envInt("SLOT_COUNT", 50)
+	maxProvisions := envInt("MAX_CONCURRENT_PROVISIONS", runtime.NumCPU())
+
+	// Self-bootstrap: make THIS host able to run VMs with no external setup. The
+	// control plane only shipped the binary + asset bundle; the agent does the
+	// rest to itself, idempotently, before serving — unpack + verify assets, then
+	// provision the fcvm user, network slots, and nftables. In warn mode (dev on a
+	// non-KVM box) a failure is logged instead of fatal.
+	bootstrapStep := func(stage string, err error) {
+		if err == nil {
+			return
+		}
+		if cfg.HostValidationMode == "warn" {
+			slog.Warn("bootstrap step skipped", "stage", stage, "err", err)
+			return
+		}
+		slog.Error("bootstrap failed", "stage", stage, "err", err)
+		os.Exit(1)
+	}
+	bootstrapStep("assets", bootstrap.EnsureAssets(cfg.RootDirectory))
+	bootstrapStep("assets-validate", cfg.ValidateAssets())
+	if uid, gid, perr := bootstrap.Provision(bootstrap.ProvisionParams{
+		Root:        cfg.RootDirectory,
+		SlotCount:   slotCount,
+		SocketDir:   cfg.SocketDir,
+		SnapshotDir: cfg.SnapshotDir,
+		AssetsDir:   cfg.AssetsPath,
+	}); perr != nil {
+		bootstrapStep("provision", perr)
+	} else {
+		cfg.FCRunUID, cfg.FCRunGID = uid, gid
+		slog.Info("host provisioned", "fc_uid", uid, "fc_gid", gid, "slots", slotCount)
+	}
+
 	if err := cgroup.Init(); err != nil {
 		slog.Warn("cgroup init failed, limits will not be enforced", "err", err)
 	}
-
-	slotCount := envInt("SLOT_COUNT", 50)
-	maxProvisions := envInt("MAX_CONCURRENT_PROVISIONS", runtime.NumCPU())
 
 	vmManager := firecracker.NewFirecrackerManager(cfg.SocketDir, cfg.AssetsPath, cfg.FirecrackerBinary, slotCount, maxProvisions, cfg.FCRunUID, cfg.FCRunGID)
 
@@ -138,7 +171,7 @@ func main() {
 
 	bind := os.Getenv("WORKER_BIND")
 	if bind == "" {
-		bind = "127.0.0.1:9000"
+		bind = plane.DefaultAgentAddr
 	}
 	token := os.Getenv("WORKER_TOKEN")
 	if token == "" {

@@ -64,6 +64,16 @@ func Resolve(vcpus, memoryMB, diskGB int) (Size, error) {
 	return Size{}, fmt.Errorf("unsupported size %dvcpu/%dMB/%dGB (allowed: %s)", vcpus, memoryMB, diskGB, menu())
 }
 
+// ByName resolves a size by its menu name ("nano", "small", ...).
+func ByName(name string) (Size, error) {
+	for _, s := range Sizes {
+		if s.Name == name {
+			return s, nil
+		}
+	}
+	return Size{}, fmt.Errorf("unknown size %q (allowed: %s)", name, menu())
+}
+
 func menu() string {
 	out := ""
 	for i, s := range Sizes {

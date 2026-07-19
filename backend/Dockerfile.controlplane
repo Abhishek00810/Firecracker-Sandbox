@@ -1,7 +1,7 @@
 # Control plane (cmd/control-plane): auth + Postgres + REST API, no VMs.
 # Runs on any host — no KVM, Firecracker assets, or privileged networking.
-# Build context: this backend/ directory (unlike Dockerfile, which is cmd/api
-# with Firecracker and builds from the repo root).
+# Build context: this backend/ directory. The host agent (cmd/worker) is not
+# containerized — it runs on the KVM host via renderops-start.sh.
 FROM golang:1.25-alpine AS build
 
 WORKDIR /src

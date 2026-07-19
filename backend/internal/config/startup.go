@@ -1,6 +1,7 @@
 package config
 
 import (
+	"backend/internal/bootstrap"
 	"errors"
 	"fmt"
 	"os"
@@ -12,8 +13,7 @@ import (
 
 type Config struct {
 	DatabaseURL        string
-	SupabaseURL        string
-	SupabaseJWTSecret  string // legacy HS256 JWT secret (optional; ES256 uses JWKS)
+	RootDirectory      string // ROOT_DIRECTORY on the worker host; all agent paths derive from it
 	AssetsPath         string
 	KernelPath         string
 	RootfsPath         string
@@ -28,21 +28,42 @@ type Config struct {
 	FCRunUID           int // uid Firecracker VMMs drop to via setpriv; 0 = run as root (disabled)
 	FCRunGID           int // gid Firecracker VMMs drop to via setpriv; 0 = run as root (disabled)
 	Warnings           []string
+
+	// Control-plane → agent dispatch. SSHCommand (e.g. "ssh ro") opens a tunnel
+	// to the agent; if empty, the control plane talks to AgentAddr directly.
+	SSHCommand     string
+	AgentLocalPort string // local end of the SSH forward to agent:9876
+	AgentAddr      string // direct agent address when SSHCommand is empty
+	WorkerToken    string // X-Worker-Token shared secret
 }
 
-// Load builds the full config for the API/monolith — requires DATABASE_URL.
-func Load() (*Config, error) { return load(true) }
-
-// LoadWorker builds the config for a host agent (worker): the same Firecracker
-// assets + host validation as Load, but with no DATABASE_URL requirement — the
-// worker has no DB (the control plane owns Postgres).
+// LoadWorker builds the config for a host agent (worker): Firecracker assets
+// + host validation, but no DATABASE_URL requirement — the worker has no DB
+// (the control plane owns Postgres).
 func LoadWorker() (*Config, error) { return load(false) }
+
+// ValidateAssets checks the VM assets + firecracker binary exist and are usable.
+// Split out of load() so the agent can bootstrap (unpack the pushed bundle) on a
+// fresh host first, then validate. Call after bootstrap.EnsureAssets.
+func (c *Config) ValidateAssets() error {
+	if err := requireFile(c.KernelPath); err != nil {
+		return fmt.Errorf("kernel asset invalid: %w", err)
+	}
+	if err := requireFile(c.RootfsPath); err != nil {
+		return fmt.Errorf("rootfs asset invalid: %w", err)
+	}
+	if err := requireFile(c.InitrdPath); err != nil {
+		return fmt.Errorf("initramfs asset invalid: %w", err)
+	}
+	if err := requireExecutable(c.FirecrackerBinary); err != nil {
+		return fmt.Errorf("firecracker binary invalid: %w", err)
+	}
+	return nil
+}
 
 func load(requireDB bool) (*Config, error) {
 	cfg := &Config{
 		DatabaseURL:        strings.TrimSpace(os.Getenv("DATABASE_URL")),
-		SupabaseURL:        strings.TrimSpace(os.Getenv("SUPABASE_URL")),
-		SupabaseJWTSecret:  defaultString(strings.TrimSpace(os.Getenv("SUPABASE_JWT_SECRET")), strings.TrimSpace(os.Getenv("SUPABASE_JWT_KEY"))),
 		Port:               defaultString(strings.TrimSpace(os.Getenv("PORT")), "8080"),
 		LogLevel:           defaultString(strings.TrimSpace(os.Getenv("LOG_LEVEL")), "info"),
 		LogFormat:          defaultString(strings.TrimSpace(os.Getenv("LOG_FORMAT")), "json"),
@@ -58,9 +79,21 @@ func load(requireDB bool) (*Config, error) {
 		return nil, fmt.Errorf("get working directory: %w", err)
 	}
 
+	// ROOT_DIRECTORY is the agent's anchor on the worker host — every path below
+	// derives from it. Establish the directory tree before resolving any path so
+	// $ROOT/assets, $ROOT/sockets etc. exist to be found.
+	cfg.RootDirectory, err = resolveRoot(os.Getenv("ROOT_DIRECTORY"))
+	if err != nil {
+		return nil, fmt.Errorf("resolve root directory: %w", err)
+	}
+	if err := bootstrap.EnsureLayout(cfg.RootDirectory); err != nil {
+		return nil, err
+	}
+
 	cfg.AssetsPath, err = resolvePath(
 		strings.TrimSpace(os.Getenv("ASSETS_PATH")),
 		[]string{
+			filepath.Join(cfg.RootDirectory, "assets"),
 			"/app/assets",
 			filepath.Join(cwd, "assets"),
 			filepath.Join(cwd, "..", "assets"),
@@ -71,37 +104,24 @@ func load(requireDB bool) (*Config, error) {
 		return nil, fmt.Errorf("resolve assets path: %w", err)
 	}
 
-	cfg.FirecrackerBinary, err = resolvePath(
+	// Firecracker binary + VM assets default to the pushed bundle under
+	// $ROOT/assets. Existence is deliberately NOT checked here: the agent's
+	// bootstrap (bootstrap.EnsureAssets) unpacks the bundle first, then calls
+	// cfg.ValidateAssets(). This lets a freshly allocated VM start with an empty
+	// assets dir and populate it before validating.
+	cfg.FirecrackerBinary = defaultString(
 		strings.TrimSpace(os.Getenv("FIRECRACKER_BINARY")),
-		[]string{
-			"/app/firecracker/firecracker-v1.7.0-aarch64",
-			filepath.Join(cwd, "release-v1.7.0-aarch64", "firecracker-v1.7.0-aarch64"),
-			filepath.Join(cwd, "..", "release-v1.7.0-aarch64", "firecracker-v1.7.0-aarch64"),
-		},
-		false,
+		filepath.Join(cfg.AssetsPath, "firecracker"),
 	)
-	if err != nil {
-		return nil, fmt.Errorf("resolve firecracker binary: %w", err)
+	if abs, aerr := filepath.Abs(cfg.FirecrackerBinary); aerr == nil {
+		cfg.FirecrackerBinary = abs
 	}
 
 	cfg.KernelPath = filepath.Join(cfg.AssetsPath, "kernel", "vmlinux")
 	cfg.RootfsPath = filepath.Join(cfg.AssetsPath, "rootfs", "rootfs-alpine.ext4")
 	cfg.InitrdPath = filepath.Join(cfg.AssetsPath, "initramfs.cpio.gz")
 
-	if err := requireFile(cfg.KernelPath); err != nil {
-		return nil, fmt.Errorf("kernel asset invalid: %w", err)
-	}
-	if err := requireFile(cfg.RootfsPath); err != nil {
-		return nil, fmt.Errorf("rootfs asset invalid: %w", err)
-	}
-	if err := requireFile(cfg.InitrdPath); err != nil {
-		return nil, fmt.Errorf("initramfs asset invalid: %w", err)
-	}
-	if err := requireExecutable(cfg.FirecrackerBinary); err != nil {
-		return nil, fmt.Errorf("firecracker binary invalid: %w", err)
-	}
-
-	cfg.SocketDir = defaultString(strings.TrimSpace(os.Getenv("SOCKET_DIR")), filepath.Join(os.TempDir(), "fc-sockets"))
+	cfg.SocketDir = defaultString(strings.TrimSpace(os.Getenv("SOCKET_DIR")), filepath.Join(cfg.RootDirectory, "sockets"))
 	cfg.SocketDir, err = filepath.Abs(cfg.SocketDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolve socket dir: %w", err)
@@ -146,6 +166,25 @@ func intEnv(key string, fallback int) int {
 		}
 	}
 	return fallback
+}
+
+// resolveRoot turns ROOT_DIRECTORY (default "~/aman") into an absolute path,
+// expanding a leading ~ against the agent user's home. This is the one place a
+// remote path is anchored — everything else derives from it, so nothing is
+// hardcoded (plan.md invariant).
+func resolveRoot(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		raw = "~/aman"
+	}
+	if raw == "~" || strings.HasPrefix(raw, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("expand ~ in ROOT_DIRECTORY: %w", err)
+		}
+		raw = filepath.Join(home, strings.TrimPrefix(raw, "~"))
+	}
+	return filepath.Abs(raw)
 }
 
 func resolvePath(explicit string, candidates []string, wantDir bool) (string, error) {

@@ -21,6 +21,18 @@ func insertUsageLogAsync(logger platform.UsageLogger, log platform.UsageLog) {
 	}()
 }
 
+// billRuntimeAsync debits unbilled sandbox wall-clock time against the user's credit.
+func billRuntimeAsync(logger platform.UsageLogger, sandboxID string, ratePerSec float64) {
+	if sandboxID == "" || ratePerSec <= 0 {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		defer cancel()
+		logger.BillSandboxRuntime(ctx, sandboxID, ratePerSec)
+	}()
+}
+
 func upsertSandboxAsync(w platform.UsageLogger, sb platform.Sandbox) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)

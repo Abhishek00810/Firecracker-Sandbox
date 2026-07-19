@@ -9,7 +9,7 @@ import (
 
 func TestLoadResolvesPathsAndDirs(t *testing.T) {
 	if runtime.GOOS != "linux" {
-		t.Skip("host validation in config.Load() requires Linux")
+		t.Skip("host validation in config.LoadWorker() requires Linux")
 	}
 
 	tmp := t.TempDir()
@@ -33,18 +33,21 @@ func TestLoadResolvesPathsAndDirs(t *testing.T) {
 	socketDir := filepath.Join(tmp, "sockets")
 	snapshotDir := filepath.Join(tmp, "snapshots")
 
-	t.Setenv("DATABASE_URL", "postgresql://renderops:secret@postgres:5432/renderops")
+	t.Setenv("ROOT_DIRECTORY", tmp)
 	t.Setenv("ASSETS_PATH", assetsDir)
 	t.Setenv("FIRECRACKER_BINARY", firecrackerBinary)
 	t.Setenv("SOCKET_DIR", socketDir)
 	t.Setenv("SNAPSHOT_DIR", snapshotDir)
 	t.Setenv("HOST_VALIDATION_MODE", "warn")
 
-	cfg, err := Load()
+	cfg, err := LoadWorker()
 	if err != nil {
-		t.Fatalf("Load() returned error: %v", err)
+		t.Fatalf("LoadWorker() returned error: %v", err)
 	}
 
+	if cfg.RootDirectory != tmp {
+		t.Fatalf("expected root directory %q, got %q", tmp, cfg.RootDirectory)
+	}
 	if cfg.AssetsPath != assetsDir {
 		t.Fatalf("expected assets path %q, got %q", assetsDir, cfg.AssetsPath)
 	}

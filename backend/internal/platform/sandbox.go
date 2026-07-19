@@ -3,9 +3,12 @@ package platform
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 type Sandbox struct {
@@ -71,8 +74,12 @@ func (c *Client) UpdateSandboxState(ctx context.Context, id, state string) {
 	var err error
 	switch state {
 	case "paused":
+		// Capture pause time for billing/runtime; keep last_used_at as last activity.
 		_, err = c.pool.Exec(ctx, `UPDATE sandboxes SET state=$2,updated_at=now(),paused_at=now(),expires_at=now()+interval '7 days' WHERE id=$1`, id, state)
 	case "active":
+		_, err = c.pool.Exec(ctx, `UPDATE sandboxes SET state=$2,updated_at=now(),last_used_at=now(),paused_at=NULL,expires_at=NULL WHERE id=$1`, id, state)
+	case "destroyed", "destroying", "error":
+		// Stamp last_used_at so dashboard duration (created → end) is non-zero.
 		_, err = c.pool.Exec(ctx, `UPDATE sandboxes SET state=$2,updated_at=now(),last_used_at=now(),expires_at=NULL WHERE id=$1`, id, state)
 	default:
 		_, err = c.pool.Exec(ctx, `UPDATE sandboxes SET state=$2,updated_at=now() WHERE id=$1`, id, state)
@@ -151,6 +158,21 @@ type SandboxRef struct {
 	Internet     bool      `json:"internet"`
 	Created      time.Time `json:"created_at"`
 	LastUsed     time.Time `json:"last_used_at"`
+}
+
+// GetSandbox fetches one sandbox row by id. ok=false when no row matches
+// (the id::text comparison also makes malformed ids a miss, not an error).
+func (c *Client) GetSandbox(ctx context.Context, id string) (SandboxRef, bool, error) {
+	var ref SandboxRef
+	err := c.pool.QueryRow(ctx, `SELECT id::text,state,user_id::text,COALESCE(billing_model,'payg'),COALESCE(vcpus,0),COALESCE(memory_mb,0),COALESCE(disk_gb,0),COALESCE(internet,true),created_at,COALESCE(last_used_at,created_at) FROM sandboxes WHERE id::text=$1`, id).
+		Scan(&ref.ID, &ref.State, &ref.UserID, &ref.BillingModel, &ref.VCPUs, &ref.MemoryMB, &ref.DiskGB, &ref.Internet, &ref.Created, &ref.LastUsed)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return SandboxRef{}, false, nil
+		}
+		return SandboxRef{}, false, fmt.Errorf("get sandbox: %w", err)
+	}
+	return ref, true, nil
 }
 
 func (c *Client) ListSandboxesByState(ctx context.Context, states []string) ([]SandboxRef, error) {

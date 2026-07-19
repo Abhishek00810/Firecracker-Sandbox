@@ -2,12 +2,15 @@ package handler
 
 import "backend/internal/vmsize"
 
-// resolveSize validates a requested resource shape against the canonical size menu
-// (vmsize.Sizes — the single source of truth shared with pool construction + routing).
-// A nil or all-zero request returns the default size.
-func resolveSize(r *Resources) (vmsize.Size, error) {
-	if r == nil {
-		return vmsize.Default(), nil
+// resolveSize validates the requested shape against the canonical size menu
+// (vmsize.Sizes — the single source of truth shared with pool construction +
+// routing). Explicit resources win, then a named size, then the default.
+func resolveSize(req CreateSessionRequest) (vmsize.Size, error) {
+	if req.Resources != nil {
+		return vmsize.Resolve(req.Resources.VCPUs, req.Resources.MemoryMB, req.Resources.DiskGB)
 	}
-	return vmsize.Resolve(r.VCPUs, r.MemoryMB, r.DiskGB)
+	if req.Size != "" {
+		return vmsize.ByName(req.Size)
+	}
+	return vmsize.Default(), nil
 }

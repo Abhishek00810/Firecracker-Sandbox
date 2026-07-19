@@ -620,18 +620,13 @@ func (m *Manager) reaper() {
 		for _, sess := range m.store.All() {
 			switch sess.State {
 			case StateActive:
-				lifetimeExpired := sess.MaxLifetime > 0 && now.Sub(sess.CreatedAt) > sess.MaxLifetime
-				idleExpired := sess.IdleTimeout > 0 && now.Sub(sess.LastUsed) > sess.IdleTimeout
-				switch {
-				case lifetimeExpired:
+				// Idle auto-pause is disabled: snapshot-resume is broken (vsock
+				// rebind fails), so a paused sandbox is unrecoverable. Sessions
+				// stay active until their hard max lifetime, then are destroyed.
+				if sess.MaxLifetime > 0 && now.Sub(sess.CreatedAt) > sess.MaxLifetime {
 					slog.Info("session max lifetime reached, destroying", "session_id", sess.ID)
 					if err := m.Destroy(context.Background(), sess.ID); err != nil {
 						slog.Error("reaper destroy failed", "session_id", sess.ID, "err", err)
-					}
-				case idleExpired:
-					slog.Info("session idle, pausing", "session_id", sess.ID, "idle_for", now.Sub(sess.LastUsed))
-					if err := m.Pause(context.Background(), sess.ID); err != nil {
-						slog.Error("reaper pause failed", "session_id", sess.ID, "err", err)
 					}
 				}
 			case StatePaused:

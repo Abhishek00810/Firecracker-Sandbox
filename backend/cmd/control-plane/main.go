@@ -6,10 +6,10 @@
 package main
 
 import (
+	"backend/internal/agent"
 	"backend/internal/config"
 	"backend/internal/controlplane"
 	"backend/internal/handler"
-	"backend/internal/metrics"
 	"backend/internal/middleware"
 	"backend/internal/platform"
 	"context"
@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -43,19 +44,6 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 		"status":  "ok",
 		"message": "control plane is healthy",
 		"role":    "control-plane",
-	})
-}
-
-// executeUnavailable replaces the one-shot /execute path until host agents
-// can run jobs. 503 so SDKs treat it as retryable-later, not a client error.
-func executeUnavailable(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusServiceUnavailable)
-	json.NewEncoder(w).Encode(handler.APIError{
-		Status:    "error",
-		Code:      "no_agent_available",
-		Message:   "execution is not yet available on the control plane; host agents are not implemented",
-		RequestID: middleware.RequestIDFromContext(r.Context()),
 	})
 }
 
@@ -86,37 +74,35 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Same hook contract as the session manager in cmd/api: every lifecycle
-	// transition is synced to the sandboxes table + timeline log.
-	stateHook := func(sessionID, userID, state string) {
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
-			defer cancel()
-			platformClient.UpdateSandboxState(ctx, sessionID, state)
-			msg := map[string]string{"paused": "sandbox paused", "active": "sandbox resumed", "destroyed": "sandbox destroyed"}[state]
-			if msg != "" && userID != "" {
-				platformClient.InsertSandboxLog(ctx, platform.SandboxLog{SandboxID: sessionID, UserID: userID, Stream: "system", Level: "info", Content: msg})
-			}
-		}()
+	// Reach the host agent: open the SSH tunnel (host/user/key in ~/.ssh/config
+	// under the SSH_COMMAND alias) and target its local end. With no SSH_COMMAND,
+	// talk to AgentAddr directly (control plane co-located with the agent).
+	agentBase := "http://" + cfg.AgentAddr
+	if cfg.SSHCommand != "" {
+		remotePort := "9876"
+		if _, p, ok := strings.Cut(cfg.AgentAddr, ":"); ok {
+			remotePort = p
+		}
+		if err := agent.StartTunnel(context.Background(), cfg.SSHCommand, cfg.AgentLocalPort, remotePort); err != nil {
+			slog.Error("agent tunnel failed", "err", err)
+			os.Exit(1)
+		}
+		agentBase = "http://127.0.0.1:" + cfg.AgentLocalPort
+	}
+	agentClient := agent.NewClient(agentBase, cfg.WorkerToken)
+	if err := agentClient.Health(context.Background()); err != nil {
+		slog.Warn("agent not healthy at startup; create/run will fail until it is", "base", agentBase, "err", err)
+	} else {
+		slog.Info("agent reachable", "base", agentBase)
 	}
 
-	svc := controlplane.NewService(stateHook)
-	{
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		if err := svc.Hydrate(ctx, platformClient); err != nil {
-			slog.Warn("sandbox hydration from DB failed; existing sandboxes won't be controllable until recreated", "err", err)
-		}
-		cancel()
-	}
+	// Postgres is the source of truth for sandbox state; execution dispatches to
+	// the agent over the tunnel.
+	svc := controlplane.NewService(platformClient, agentClient)
 
 	http.HandleFunc("/health", healthHandler)
-	http.HandleFunc("/execute", executeUnavailable)
 	http.HandleFunc("/session", handler.SessionHandler(svc, platformClient))
 	http.HandleFunc("/session/", handler.SessionHandler(svc, platformClient))
-	http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(metrics.GetSnapshot())
-	})
 
 	port := ":" + cfg.Port
 	slog.Info("control plane is running", "port", port)
@@ -124,7 +110,7 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
-	chain := middleware.Logging(middleware.Auth(platformClient, cfg.SupabaseURL, cfg.SupabaseJWTSecret, executionPolicy, billingConfig)(http.DefaultServeMux))
+	chain := middleware.Logging(middleware.Auth(platformClient, executionPolicy, billingConfig)(http.DefaultServeMux))
 
 	srv := &http.Server{
 		Addr:              port,
