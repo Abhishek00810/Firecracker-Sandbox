@@ -9,7 +9,7 @@ on:
 
 jobs:
   backend:
-    name: Backend
+    name: Backend (control-plane + worker)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -27,8 +27,36 @@ jobs:
         run: |
           test -z "$(gofmt -l .)"
 
+      - name: Vet
+        run: go vet ./...
+
       - name: Build control plane
         run: go build -o /tmp/renderops-control-plane ./cmd/control-plane
 
+      - name: Build worker
+        run: go build -o /tmp/renderops-worker ./cmd/worker
+
       - name: Run tests
         run: go test ./...
+
+  guest-agent:
+    name: Guest Agent
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: guest-agent
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: guest-agent/go.mod
+
+      - name: Check formatting
+        run: |
+          test -z "$(gofmt -l .)"
+
+      - name: Build and test (linux target)
+        run: GOOS=linux GOARCH=amd64 go test ./...

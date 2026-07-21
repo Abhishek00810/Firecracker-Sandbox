@@ -1,0 +1,23 @@
+# RenderOps Control Plane — runs on the basic server (D2s v3).
+# Install: sudo cp control-plane.service /etc/systemd/system/
+#          sudo systemctl daemon-reload && sudo systemctl enable --now renderops-control-plane
+[Unit]
+Description=RenderOps Control Plane
+After=network-online.target renderops-worker-tunnel.service
+Wants=network-online.target renderops-worker-tunnel.service
+
+[Service]
+Type=simple
+User=renderops
+ExecStart=/opt/renderops/renderops-control-plane
+EnvironmentFile=/etc/renderops/control-plane.env
+Restart=always
+RestartSec=3
+# Hardening — the control plane needs no special privileges.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/renderops
+
+[Install]
+WantedBy=multi-user.target

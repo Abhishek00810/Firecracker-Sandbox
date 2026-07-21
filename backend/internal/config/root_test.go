@@ -12,10 +12,10 @@ func TestResolveRoot(t *testing.T) {
 		t.Fatalf("UserHomeDir: %v", err)
 	}
 	cases := []struct{ in, want string }{
-		{"", filepath.Join(home, "aman")},   // default
-		{"~", home},                         // bare tilde
+		{"", filepath.Join(home, "aman")}, // default
+		{"~", home},                       // bare tilde
 		{"~/aman", filepath.Join(home, "aman")},
-		{"~/aman/", filepath.Join(home, "aman")}, // trailing slash cleaned
+		{"~/aman/", filepath.Join(home, "aman")},    // trailing slash cleaned
 		{"  ~/aman  ", filepath.Join(home, "aman")}, // trimmed
 	}
 	for _, c := range cases {
