@@ -74,10 +74,15 @@ jobs:
         working-directory: backend
         run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/renderops-control-plane ./cmd/control-plane
 
+      - name: Install sshpass
+        run: sudo apt-get update -qq && sudo apt-get install -y sshpass
+
+      # TEMPORARY: password auth via sshpass. Swap for a dedicated key once the
+      # basic server is hardened (CP_PASSWORD -> CP_SSH_KEY, drop sshpass).
       - name: Deploy to basic server
         run: bash ops/deploy/install-control-plane.sh /tmp/renderops-control-plane
         env:
-          SSH_KEY: ${{ secrets.CP_SSH_KEY }}
+          CP_PASSWORD: ${{ secrets.CP_PASSWORD }}
           SSH_HOST: ${{ secrets.CP_HOST }}
           SSH_USER: ${{ secrets.CP_USER }}
 
