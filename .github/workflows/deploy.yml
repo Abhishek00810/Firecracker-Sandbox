@@ -97,8 +97,7 @@ jobs:
       - name: Install and restart
         run: |
           chmod +x renderops-control-plane
-          sudo install -D -m 0755 renderops-control-plane /opt/renderops/renderops-control-plane
-          sudo systemctl restart renderops-control-plane
+          sudo /opt/renderops/deploy-control-plane.sh "$PWD/renderops-control-plane"
       - name: Health check
         run: |
           for i in $(seq 1 15); do
