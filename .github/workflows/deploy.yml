@@ -1,0 +1,107 @@
+name: Deploy
+
+# Deploys are automated: on every push to main, CI must pass, then each binary
+# ships to its server over an SSH key held ONLY by GitHub Actions. No human SSHes
+# in to deploy. Path filters keep the two servers independent — a control-plane
+# change never redeploys the worker, and vice-versa.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Which server to deploy (both | control-plane | worker)"
+        default: "both"
+        type: choice
+        options: [both, control-plane, worker]
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Detect which server(s) a push actually touched, so we only deploy those.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      control_plane: ${{ steps.filter.outputs.control_plane }}
+      worker: ${{ steps.filter.outputs.worker }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            control_plane:
+              - 'backend/cmd/control-plane/**'
+              - 'backend/internal/controlplane/**'
+              - 'backend/internal/agent/**'
+              - 'backend/internal/plane/**'
+              - 'backend/internal/platform/**'
+              - 'backend/internal/middleware/**'
+              - 'backend/internal/policy/**'
+              - 'backend/internal/billing/**'
+              - 'backend/go.mod'
+              - 'backend/go.sum'
+            worker:
+              - 'backend/cmd/worker/**'
+              - 'backend/internal/executor/**'
+              - 'backend/internal/session/**'
+              - 'backend/internal/worker/**'
+              - 'backend/internal/bootstrap/**'
+              - 'backend/internal/cgroup/**'
+              - 'backend/internal/vmsize/**'
+              - 'backend/internal/plane/**'
+              - 'backend/go.mod'
+              - 'backend/go.sum'
+
+  deploy-control-plane:
+    needs: changes
+    if: >-
+      github.event_name == 'workflow_dispatch' && (inputs.target == 'both' || inputs.target == 'control-plane')
+      || github.event_name == 'push' && needs.changes.outputs.control_plane == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+
+      - name: Build control-plane (linux/amd64)
+        working-directory: backend
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/renderops-control-plane ./cmd/control-plane
+
+      - name: Deploy to basic server
+        run: bash ops/deploy/install-control-plane.sh /tmp/renderops-control-plane
+        env:
+          SSH_KEY: ${{ secrets.CP_SSH_KEY }}
+          SSH_HOST: ${{ secrets.CP_HOST }}
+          SSH_USER: ${{ secrets.CP_USER }}
+
+  deploy-worker:
+    needs: changes
+    if: >-
+      github.event_name == 'workflow_dispatch' && (inputs.target == 'both' || inputs.target == 'worker')
+      || github.event_name == 'push' && needs.changes.outputs.worker == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+
+      - name: Build worker (linux/amd64)
+        working-directory: backend
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/renderops-worker ./cmd/worker
+
+      - name: Deploy to bare-metal host
+        run: bash ops/deploy/install-worker.sh /tmp/renderops-worker
+        env:
+          SSH_KEY: ${{ secrets.WORKER_SSH_KEY }}
+          SSH_HOST: ${{ secrets.WORKER_HOST }}
+          SSH_USER: ${{ secrets.WORKER_USER }}
