@@ -1,0 +1,96 @@
+# RenderOps stack for the basic server (control plane + platform + Caddy + dev DB).
+# Lives at /opt/renderops/docker-compose.yml on the box. CI pushes images to GHCR;
+# the box only pulls (no source/toolchain on the box).
+#
+# Secrets come from /opt/renderops/.env (see .env.example). The control-plane
+# tunnel key lives at /opt/renderops/keys/ and is mounted read-only.
+name: renderops
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: renderops
+      POSTGRES_USER: renderops
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U renderops -d renderops"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [internal]
+
+  control-plane:
+    # Built + pushed by CI (renderops-sandbox). The box only pulls this image.
+    image: ghcr.io/renderops-ai/control-plane:latest
+    restart: unless-stopped
+    environment:
+      PORT: "8081"
+      DATABASE_URL: postgresql://renderops:${POSTGRES_PASSWORD}@postgres:5432/renderops?sslmode=disable
+      WORKER_TOKEN: ${WORKER_TOKEN:?WORKER_TOKEN is required}
+      # The control plane opens its own SSH tunnel to the worker from inside the
+      # container (openssh-client is in the image). SSH_COMMAND reaches the
+      # bare-metal worker; the tunnel forwards AGENT_LOCAL_PORT -> AGENT_ADDR's port.
+      SSH_COMMAND: ssh -i /keys/worker_key -o UserKnownHostsFile=/keys/known_hosts -o StrictHostKeyChecking=accept-new ${WORKER_SSH_USER:-renderopsadmin}@${WORKER_SSH_HOST:?WORKER_SSH_HOST is required}
+      AGENT_ADDR: 127.0.0.1:9876
+      AGENT_LOCAL_PORT: "19876"
+    volumes:
+      - ./keys:/keys:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8081/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    networks: [internal]
+
+  platform:
+    # Built + pushed by CI (renderops-platform). The box only pulls this image.
+    image: ghcr.io/renderops-ai/platform:latest
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://renderops:${POSTGRES_PASSWORD}@postgres:5432/renderops?sslmode=disable
+      BACKEND_URL: http://control-plane:8081
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET is required}
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL:?BETTER_AUTH_URL is required}
+      ORIGIN: ${BETTER_AUTH_URL:?BETTER_AUTH_URL is required}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      control-plane:
+        condition: service_healthy
+    networks: [internal]
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      platform:
+        condition: service_started
+    networks: [internal]
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  caddy-data:
+  caddy-config:
