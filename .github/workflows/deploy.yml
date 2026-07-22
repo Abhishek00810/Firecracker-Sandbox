@@ -1,12 +1,12 @@
 name: Deploy
 
-# Deploys are automated: on every push to main, per-server.
-#   Control plane -> a SELF-HOSTED runner living on the basic server. GitHub
-#     builds the binary and hands the deploy job to the runner, which installs
-#     it locally. No SSH, no key, no password leaves GitHub.
-#   Worker -> GitHub SSHes into the bare-metal host with a key held as a secret.
-# Path filters keep the two independent — a control-plane change never redeploys
-# the worker, and vice-versa.
+# Deploys are automated, per-server, on every push to main:
+#   Control plane -> built as a Docker image, pushed to GHCR, then a SELF-HOSTED
+#     runner on the basic server runs `docker compose pull && up -d`. No source
+#     or Go toolchain on the box; it only pulls the image.
+#   Worker -> GitHub SSHes into the bare-metal host with a key held as a secret
+#     and installs the binary (Firecracker can't be containerized).
+# Path filters keep the two independent.
 
 on:
   push:
@@ -23,8 +23,10 @@ concurrency:
   group: deploy-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/control-plane
+
 jobs:
-  # Detect which server(s) a push actually touched, so we only deploy those.
   changes:
     runs-on: ubuntu-latest
     outputs:
@@ -45,6 +47,7 @@ jobs:
               - 'backend/internal/middleware/**'
               - 'backend/internal/policy/**'
               - 'backend/internal/billing/**'
+              - 'backend/Dockerfile.controlplane'
               - 'backend/go.mod'
               - 'backend/go.sum'
             worker:
@@ -59,59 +62,61 @@ jobs:
               - 'backend/go.mod'
               - 'backend/go.sum'
 
-  # ---- CONTROL PLANE: build on GitHub, deploy on the box via self-hosted runner ----
+  # ---- CONTROL PLANE: build image on GitHub -> GHCR -> compose pull on the box ----
 
-  # Build stays on a GitHub-hosted runner so the basic server needs no Go toolchain.
-  # The compiled binary is handed to the deploy job as an artifact.
-  build-control-plane:
+  build-control-plane-image:
     needs: changes
     if: >-
       github.event_name == 'workflow_dispatch' && (inputs.target == 'both' || inputs.target == 'control-plane')
       || github.event_name == 'push' && needs.changes.outputs.control_plane == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write        # push to GHCR
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
         with:
-          go-version-file: backend/go.mod
-      - name: Build control-plane (linux/amd64)
-        working-directory: backend
-        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/renderops-control-plane ./cmd/control-plane
-      - uses: actions/upload-artifact@v4
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        uses: docker/build-push-action@v6
         with:
-          name: renderops-control-plane
-          path: /tmp/renderops-control-plane
-          retention-days: 3
+          context: ./backend
+          file: ./backend/Dockerfile.controlplane
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
 
-  # Runs ON the basic server (the self-hosted runner picks it up via the
-  # 'control-plane' label). Installs the binary locally and restarts the service.
+  # Runs ON the basic server via the self-hosted runner (label: control-plane).
+  # Pulls the freshly-pushed image and recreates ONLY the control-plane service.
   deploy-control-plane:
-    needs: build-control-plane
+    needs: build-control-plane-image
     runs-on: [self-hosted, control-plane]
     environment: production
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: renderops-control-plane
-          path: .
-      - name: Install and restart
+      - name: Pull image and recreate control-plane
+        working-directory: /opt/renderops
         run: |
-          chmod +x renderops-control-plane
-          sudo install -D -m 0755 renderops-control-plane /opt/renderops/renderops-control-plane
-          sudo systemctl restart renderops-control-plane
+          docker compose pull control-plane
+          docker compose up -d control-plane
       - name: Health check
+        working-directory: /opt/renderops
         run: |
-          for i in $(seq 1 15); do
-            if curl -fsS -m 4 http://127.0.0.1:8080/health >/dev/null 2>&1; then
-              echo "healthy after ${i}s"; exit 0
+          for i in $(seq 1 20); do
+            if docker compose exec -T control-plane wget -qO- http://127.0.0.1:8081/health >/dev/null 2>&1; then
+              echo "control-plane healthy after ${i}s"; exit 0
             fi
-            sleep 1
+            sleep 2
           done
           echo "control-plane did not become healthy:"
-          sudo systemctl status renderops-control-plane --no-pager -l | tail -20 || true
+          docker compose logs --tail=40 control-plane || true
           exit 1
 
-  # ---- WORKER: build on GitHub, deploy over SSH key to the bare-metal host ----
+  # ---- WORKER: build binary on GitHub -> SSH key -> bare-metal host ----
 
   deploy-worker:
     needs: changes
