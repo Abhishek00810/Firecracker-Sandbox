@@ -1,0 +1,4 @@
+dev.renderops.com {
+	encode zstd gzip
+	reverse_proxy platform:3000
+}

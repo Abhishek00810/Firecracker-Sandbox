@@ -1,0 +1,9 @@
+[Unit]
+Description=Back up the RenderOps PostgreSQL database
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+Environment=RENDEROPS_DIR=/opt/renderops
+ExecStart=/opt/renderops/backup.sh

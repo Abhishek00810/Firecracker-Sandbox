@@ -39,8 +39,9 @@ if [ ! -f /etc/renderops/worker.env ]; then
   echo "ERROR: /etc/renderops/worker.env missing — run the one-time worker host setup first." >&2
   exit 1
 fi
-if [ ! -f /opt/renderops/worker/assets/manifest.sha256 ]; then
-  echo "ERROR: Firecracker assets not provisioned at /opt/renderops/worker/assets — run host setup first." >&2
+if [ ! -f /opt/renderops/worker/assets/manifest.sha256 ] &&
+   [ ! -f /opt/renderops/worker/renderops-assets.tar.gz ]; then
+  echo "ERROR: Firecracker assets or renderops-assets.tar.gz are missing — run worker setup first." >&2
   exit 1
 fi
 install -D -m 0755 /tmp/renderops-worker.new /opt/renderops/renderops-worker

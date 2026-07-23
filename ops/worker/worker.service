@@ -11,13 +11,8 @@ Wants=network-online.target
 Type=simple
 # Runs as root: Firecracker needs KVM, network namespaces, TAP devices, cgroups.
 User=root
-# Firecracker runs as the fc user (uid 997 / gid 988) and must create its API
-# socket + snapshot files in these dirs. /dev/shm is tmpfs (wiped on reboot),
-# so these must be (re)created with fc-user ownership on EVERY start — otherwise
-# snapshot template creation fails and the worker falls back to slow cold boot.
-ExecStartPre=/bin/mkdir -p /opt/renderops/worker/sockets /dev/shm/fc-snapshots
-ExecStartPre=/bin/chown 997:988 /opt/renderops/worker/sockets /dev/shm/fc-snapshots
-ExecStartPre=/bin/chmod 750 /opt/renderops/worker/sockets /dev/shm/fc-snapshots
+# The worker bootstraps directories, the fcvm account, ownership, network
+# namespaces, and cgroups on every start. Do not hard-code the host's fcvm UID.
 ExecStart=/opt/renderops/renderops-worker
 EnvironmentFile=/etc/renderops/worker.env
 Restart=always

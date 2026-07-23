@@ -1,4 +1,4 @@
-# RenderOps stack for the basic server (control plane + platform + Caddy + dev DB).
+# RenderOps control-plane stack: API, dashboard, Caddy, and the development DB.
 # Lives at /opt/renderops/docker-compose.yml on the box. CI pushes images to GHCR;
 # the box only pulls (no source/toolchain on the box).
 #

@@ -50,6 +50,7 @@ jobs:
               - 'backend/Dockerfile.controlplane'
               - 'backend/go.mod'
               - 'backend/go.sum'
+              - 'ops/control-plane/**'
             worker:
               - 'backend/cmd/worker/**'
               - 'backend/internal/executor/**'
@@ -62,6 +63,7 @@ jobs:
               - 'backend/internal/plane/**'
               - 'backend/go.mod'
               - 'backend/go.sum'
+              - 'ops/worker/**'
 
   # ---- CONTROL PLANE: build image on GitHub -> GHCR -> compose pull on the box ----
 
@@ -98,12 +100,29 @@ jobs:
     needs: build-control-plane-image
     runs-on: [self-hosted, control-plane]
     environment: production
+    permissions:
+      contents: read
+      packages: read
     steps:
+      - uses: actions/checkout@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Synchronize Compose runtime files
+        run: |
+          cp ops/control-plane/docker-compose.yml /opt/renderops/docker-compose.yml
+          cp ops/control-plane/Caddyfile /opt/renderops/Caddyfile
+          cd /opt/renderops
+          docker compose config --quiet
       - name: Pull image and recreate control-plane
         working-directory: /opt/renderops
         run: |
           docker compose pull control-plane
           docker compose up -d control-plane
+          docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile || true
       - name: Health check
         working-directory: /opt/renderops
         run: |
@@ -135,7 +154,7 @@ jobs:
         working-directory: backend
         run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/renderops-worker ./cmd/worker
       - name: Deploy to bare-metal host
-        run: bash ops/deploy/install-worker.sh /tmp/renderops-worker
+        run: bash ops/worker/install.sh /tmp/renderops-worker
         env:
           SSH_KEY: ${{ secrets.WORKER_SSH_KEY }}
           SSH_HOST: ${{ secrets.WORKER_HOST }}
