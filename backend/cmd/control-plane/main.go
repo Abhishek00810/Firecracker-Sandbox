@@ -7,8 +7,8 @@ package main
 
 import (
 	"backend/internal/agent"
-	"backend/internal/config"
 	"backend/internal/controlplane"
+	controlconfig "backend/internal/controlplane/config"
 	"backend/internal/handler"
 	"backend/internal/middleware"
 	"backend/internal/platform"
@@ -50,7 +50,7 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	setupLogger()
 
-	cfg, err := config.LoadControlPlane()
+	cfg, err := controlconfig.Load()
 	if err != nil {
 		slog.Error("startup validation failed", "err", err)
 		os.Exit(1)

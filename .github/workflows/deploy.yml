@@ -58,6 +58,7 @@ jobs:
               - 'backend/internal/bootstrap/**'
               - 'backend/internal/cgroup/**'
               - 'backend/internal/vmsize/**'
+              - 'backend/internal/workerplane/**'
               - 'backend/internal/plane/**'
               - 'backend/go.mod'
               - 'backend/go.sum'

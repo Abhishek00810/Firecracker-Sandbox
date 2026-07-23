@@ -9,7 +9,7 @@ import (
 
 func TestLoadResolvesPathsAndDirs(t *testing.T) {
 	if runtime.GOOS != "linux" {
-		t.Skip("host validation in config.LoadWorker() requires Linux")
+		t.Skip("host validation in worker config requires Linux")
 	}
 
 	tmp := t.TempDir()
@@ -40,9 +40,9 @@ func TestLoadResolvesPathsAndDirs(t *testing.T) {
 	t.Setenv("SNAPSHOT_DIR", snapshotDir)
 	t.Setenv("HOST_VALIDATION_MODE", "warn")
 
-	cfg, err := LoadWorker()
+	cfg, err := Load()
 	if err != nil {
-		t.Fatalf("LoadWorker() returned error: %v", err)
+		t.Fatalf("Load() returned error: %v", err)
 	}
 
 	if cfg.RootDirectory != tmp {

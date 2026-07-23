@@ -6,12 +6,12 @@ package main
 import (
 	"backend/internal/bootstrap"
 	"backend/internal/cgroup"
-	"backend/internal/config"
 	"backend/internal/executor/firecracker"
 	"backend/internal/plane"
 	"backend/internal/session"
 	"backend/internal/vmsize"
 	"backend/internal/worker"
+	workerconfig "backend/internal/workerplane/config"
 	"context"
 	"log/slog"
 	"net/http"
@@ -51,7 +51,7 @@ func envInt(key string, def int) int {
 func main() {
 	setupLogger()
 
-	cfg, err := config.LoadWorker()
+	cfg, err := workerconfig.Load()
 	if err != nil {
 		slog.Error("worker startup validation failed", "err", err)
 		os.Exit(1)

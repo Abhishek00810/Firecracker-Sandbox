@@ -6,10 +6,21 @@ import (
 	"strings"
 )
 
-// LoadControlPlane loads only what the control plane needs: Postgres, auth,
-// and the listen port. No Firecracker assets, no KVM/cgroup host validation —
-// the control plane runs on any OS; VM requirements move to the host agents.
-func LoadControlPlane() (*Config, error) {
+type Config struct {
+	DatabaseURL string
+	Port        string
+	LogLevel    string
+	LogFormat   string
+
+	SSHCommand     string
+	AgentLocalPort string
+	AgentAddr      string
+	WorkerToken    string
+}
+
+// Load reads only control-plane settings. It performs no worker host or asset
+// validation, so the control plane remains independent of Firecracker.
+func Load() (*Config, error) {
 	cfg := &Config{
 		DatabaseURL:    strings.TrimSpace(os.Getenv("DATABASE_URL")),
 		Port:           defaultString(strings.TrimSpace(os.Getenv("PORT")), "8080"),
@@ -26,4 +37,11 @@ func LoadControlPlane() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func defaultString(value, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
 }

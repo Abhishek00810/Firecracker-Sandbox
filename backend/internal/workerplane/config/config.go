@@ -12,7 +12,6 @@ import (
 )
 
 type Config struct {
-	DatabaseURL        string
 	RootDirectory      string // ROOT_DIRECTORY on the worker host; all agent paths derive from it
 	AssetsPath         string
 	KernelPath         string
@@ -21,57 +20,17 @@ type Config struct {
 	FirecrackerBinary  string
 	SocketDir          string
 	SnapshotDir        string
-	Port               string
-	LogLevel           string
-	LogFormat          string
 	HostValidationMode string
 	FCRunUID           int // uid Firecracker VMMs drop to via setpriv; 0 = run as root (disabled)
 	FCRunGID           int // gid Firecracker VMMs drop to via setpriv; 0 = run as root (disabled)
 	Warnings           []string
-
-	// Control-plane → agent dispatch. SSHCommand (e.g. "ssh ro") opens a tunnel
-	// to the agent; if empty, the control plane talks to AgentAddr directly.
-	SSHCommand     string
-	AgentLocalPort string // local end of the SSH forward to agent:9876
-	AgentAddr      string // direct agent address when SSHCommand is empty
-	WorkerToken    string // X-Worker-Token shared secret
 }
 
-// LoadWorker builds the config for a host agent (worker): Firecracker assets
-// + host validation, but no DATABASE_URL requirement — the worker has no DB
-// (the control plane owns Postgres).
-func LoadWorker() (*Config, error) { return load(false) }
-
-// ValidateAssets checks the VM assets + firecracker binary exist and are usable.
-// Split out of load() so the agent can bootstrap (unpack the pushed bundle) on a
-// fresh host first, then validate. Call after bootstrap.EnsureAssets.
-func (c *Config) ValidateAssets() error {
-	if err := requireFile(c.KernelPath); err != nil {
-		return fmt.Errorf("kernel asset invalid: %w", err)
-	}
-	if err := requireFile(c.RootfsPath); err != nil {
-		return fmt.Errorf("rootfs asset invalid: %w", err)
-	}
-	if err := requireFile(c.InitrdPath); err != nil {
-		return fmt.Errorf("initramfs asset invalid: %w", err)
-	}
-	if err := requireExecutable(c.FirecrackerBinary); err != nil {
-		return fmt.Errorf("firecracker binary invalid: %w", err)
-	}
-	return nil
-}
-
-func load(requireDB bool) (*Config, error) {
+// Load builds the worker host configuration. It does not read or require a
+// database URL because persistence belongs to the control plane.
+func Load() (*Config, error) {
 	cfg := &Config{
-		DatabaseURL:        strings.TrimSpace(os.Getenv("DATABASE_URL")),
-		Port:               defaultString(strings.TrimSpace(os.Getenv("PORT")), "8080"),
-		LogLevel:           defaultString(strings.TrimSpace(os.Getenv("LOG_LEVEL")), "info"),
-		LogFormat:          defaultString(strings.TrimSpace(os.Getenv("LOG_FORMAT")), "json"),
 		HostValidationMode: defaultString(strings.TrimSpace(os.Getenv("HOST_VALIDATION_MODE")), "strict"),
-	}
-
-	if requireDB && cfg.DatabaseURL == "" {
-		return nil, errors.New("DATABASE_URL must be set")
 	}
 
 	cwd, err := os.Getwd()
@@ -149,6 +108,24 @@ func load(requireDB bool) (*Config, error) {
 	cfg.Warnings = warnings
 
 	return cfg, nil
+}
+
+// ValidateAssets checks that the VM assets and Firecracker binary are usable.
+// The worker calls this after bootstrap has unpacked the asset bundle.
+func (c *Config) ValidateAssets() error {
+	if err := requireFile(c.KernelPath); err != nil {
+		return fmt.Errorf("kernel asset invalid: %w", err)
+	}
+	if err := requireFile(c.RootfsPath); err != nil {
+		return fmt.Errorf("rootfs asset invalid: %w", err)
+	}
+	if err := requireFile(c.InitrdPath); err != nil {
+		return fmt.Errorf("initramfs asset invalid: %w", err)
+	}
+	if err := requireExecutable(c.FirecrackerBinary); err != nil {
+		return fmt.Errorf("firecracker binary invalid: %w", err)
+	}
+	return nil
 }
 
 func defaultString(v, fallback string) string {
