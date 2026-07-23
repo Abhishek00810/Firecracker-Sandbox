@@ -6,6 +6,7 @@ import (
 	"strings"
 )
 
+// Config contains the control plane's database, API, and worker-connection settings.
 type Config struct {
 	DatabaseURL string
 	Port        string
