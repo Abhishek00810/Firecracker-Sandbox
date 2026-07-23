@@ -1,6 +1,6 @@
 # RenderOps Worker — runs on the bare-metal Firecracker host.
 # Boots and manages microVMs, so it runs privileged (KVM, netns, cgroups).
-# Install: sudo cp worker.service /etc/systemd/system/
+# Install: sudo cp worker.service /etc/systemd/system/renderops-worker.service
 #          sudo systemctl daemon-reload && sudo systemctl enable --now renderops-worker
 [Unit]
 Description=RenderOps Worker (Firecracker host agent)
@@ -11,6 +11,13 @@ Wants=network-online.target
 Type=simple
 # Runs as root: Firecracker needs KVM, network namespaces, TAP devices, cgroups.
 User=root
+# Firecracker runs as the fc user (uid 997 / gid 988) and must create its API
+# socket + snapshot files in these dirs. /dev/shm is tmpfs (wiped on reboot),
+# so these must be (re)created with fc-user ownership on EVERY start — otherwise
+# snapshot template creation fails and the worker falls back to slow cold boot.
+ExecStartPre=/bin/mkdir -p /opt/renderops/worker/sockets /dev/shm/fc-snapshots
+ExecStartPre=/bin/chown 997:988 /opt/renderops/worker/sockets /dev/shm/fc-snapshots
+ExecStartPre=/bin/chmod 750 /opt/renderops/worker/sockets /dev/shm/fc-snapshots
 ExecStart=/opt/renderops/renderops-worker
 EnvironmentFile=/etc/renderops/worker.env
 Restart=always
