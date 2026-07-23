@@ -143,6 +143,8 @@ findings_global.md
 # secret/backup files — never commit
 .env.bak*
 *.bak
+*.pem
+control-vpn.txt
 
 # Confidential business docs (AWS credits requirement/storage sheets) — never commit
 *.xlsx
