@@ -2,3 +2,8 @@ dev.renderops.com {
 	encode zstd gzip
 	reverse_proxy platform:3000
 }
+
+dev-api.renderops.com {
+	encode zstd gzip
+	reverse_proxy control-plane:8081
+}
