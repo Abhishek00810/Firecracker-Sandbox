@@ -48,6 +48,34 @@ func envInt(key string, def int) int {
 	return def
 }
 
+// createTemplateWithRetry wraps CreateTemplate with bounded retries. Template VM
+// warm-up occasionally fails because the guest-agent vsock isn't ready in time —
+// especially during the startup burst, when several size templates warm up back
+// to back and the previous template VM's kernel-side teardown (netns / vsock CID /
+// TAP) is still settling. A short settle delay plus a retry turns that transient
+// flake into a reliably warm template, so a size never silently drops to cold-boot
+// (which disables pause/resume for that size). This mirrors the resume-path vsock
+// handshake retry (2103f8f); the host has ample spare capacity, so the retry cost
+// is negligible on the rare flaky boot.
+func createTemplateWithRetry(mgr *firecracker.FireCrackerManager, cfg firecracker.VMConfig, snapDir string, attempts int) (*firecracker.SnapshotTemplate, error) {
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		if i > 0 {
+			time.Sleep(2 * time.Second) // let the previous template VM's teardown settle
+		}
+		tmpl, err := mgr.CreateTemplate(context.Background(), cfg, snapDir)
+		if err == nil {
+			if i > 0 {
+				slog.Info("template creation succeeded on retry", "attempt", i+1, "snap_dir", snapDir)
+			}
+			return tmpl, nil
+		}
+		lastErr = err
+		slog.Warn("template creation failed, retrying", "attempt", i+1, "attempts", attempts, "snap_dir", snapDir, "err", err)
+	}
+	return nil, lastErr
+}
+
 func main() {
 	setupLogger()
 
@@ -113,7 +141,7 @@ func main() {
 
 	// Default-size template once at startup; each non-default size gets its own.
 	var template *firecracker.SnapshotTemplate
-	if tmpl, err := vmManager.CreateTemplate(context.Background(), baseCfg, cfg.SnapshotDir); err != nil {
+	if tmpl, err := createTemplateWithRetry(vmManager, baseCfg, cfg.SnapshotDir, 3); err != nil {
 		slog.Warn("snapshot template creation failed, falling back to cold boot", "err", err)
 	} else {
 		template = tmpl
@@ -142,7 +170,7 @@ func main() {
 			} else if cfg.FCRunUID > 0 {
 				os.Chown(snapSubDir, cfg.FCRunUID, cfg.FCRunGID)
 			}
-			if tmpl, err := vmManager.CreateTemplate(context.Background(), szCfg, snapSubDir); err != nil {
+			if tmpl, err := createTemplateWithRetry(vmManager, szCfg, snapSubDir, 3); err != nil {
 				slog.Warn("size template creation failed, falling back to cold boot", "size", sz.Name, "err", err)
 				szTemplate = nil
 			} else {
