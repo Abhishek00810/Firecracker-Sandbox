@@ -87,6 +87,7 @@ func NewManager(
 		os.Chown(m.pauseDir, vmManager.FCUid, vmManager.FCGid)
 	}
 	m.recoverPaused()
+	m.cleanupOrphanedDisks()
 	go m.reaper()
 	if onMeter != nil {
 		go m.meterTicker()
@@ -157,6 +158,73 @@ func (m *Manager) recoverPaused() {
 	if recovered > 0 {
 		slog.Info("recovered paused sessions from manifest", "count", recovered)
 		m.persistManifest()
+	}
+}
+
+// cleanupOrphanedDisks removes leaked per-VM writable disks and stale pause
+// snapshots left behind by ungraceful VM/worker death — e.g. a `systemctl restart`
+// kills running VMs without ever calling teardown, so their writable-*.ext4 (and
+// any half-written pause snapshot) are never removed. Run ONCE at startup, AFTER
+// recoverPaused: at that point no live/pool VMs exist yet, so the only files worth
+// keeping are those owned by a recovered PAUSED session. Anything else is an orphan.
+// Without this, orphans accumulate until the disk fills and pause snapshots fail
+// with ENOSPC.
+func (m *Manager) cleanupOrphanedDisks() {
+	// Keep-set: writable disks + pause dirs we must NOT delete.
+	keepDisk := make(map[string]bool)
+	keepPause := make(map[string]bool)
+	// (a) The template GOLDEN writable disks — every pool restore reflink-clones
+	// from these, so deleting them breaks all restores (create + resume). They
+	// live as writable-*.ext4 too, but belong to no session.
+	if m.template != nil && m.template.WritableDiskPath != "" {
+		keepDisk[m.template.WritableDiskPath] = true
+	}
+	for _, t := range m.sizeTemplates {
+		if t != nil && t.WritableDiskPath != "" {
+			keepDisk[t.WritableDiskPath] = true
+		}
+	}
+	// (b) Disks + pause snapshots owned by recovered paused sessions.
+	for _, s := range m.store.All() {
+		if s.State != StatePaused {
+			continue
+		}
+		if s.WritableDiskPath != "" {
+			keepDisk[s.WritableDiskPath] = true
+		}
+		keepPause[s.ID] = true
+	}
+
+	// 1. Orphaned per-VM writable disks in the socket dir.
+	removedDisks := 0
+	writables, _ := filepath.Glob(filepath.Join(m.vmManager.SocketDir, "writable-*.ext4"))
+	for _, p := range writables {
+		if keepDisk[p] {
+			continue
+		}
+		if err := os.Remove(p); err == nil {
+			removedDisks++
+		}
+	}
+
+	// 2. Stale pause snapshot dirs (pause/<session-id>) with no matching paused session.
+	removedPauses := 0
+	if entries, err := os.ReadDir(m.pauseDir); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() || keepPause[e.Name()] {
+				continue
+			}
+			if err := os.RemoveAll(filepath.Join(m.pauseDir, e.Name())); err == nil {
+				removedPauses++
+			}
+		}
+	}
+
+	if removedDisks > 0 || removedPauses > 0 {
+		slog.Info("cleaned orphaned VM disks + stale pause snapshots at startup",
+			"writable_disks_removed", removedDisks,
+			"pause_snapshots_removed", removedPauses,
+			"kept_paused_sessions", len(keepPause))
 	}
 }
 
