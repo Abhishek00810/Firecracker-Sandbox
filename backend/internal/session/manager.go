@@ -170,9 +170,21 @@ func (m *Manager) recoverPaused() {
 // Without this, orphans accumulate until the disk fills and pause snapshots fail
 // with ENOSPC.
 func (m *Manager) cleanupOrphanedDisks() {
-	// Keep-set: writable disks + pause dirs owned by recovered paused sessions.
+	// Keep-set: writable disks + pause dirs we must NOT delete.
 	keepDisk := make(map[string]bool)
 	keepPause := make(map[string]bool)
+	// (a) The template GOLDEN writable disks — every pool restore reflink-clones
+	// from these, so deleting them breaks all restores (create + resume). They
+	// live as writable-*.ext4 too, but belong to no session.
+	if m.template != nil && m.template.WritableDiskPath != "" {
+		keepDisk[m.template.WritableDiskPath] = true
+	}
+	for _, t := range m.sizeTemplates {
+		if t != nil && t.WritableDiskPath != "" {
+			keepDisk[t.WritableDiskPath] = true
+		}
+	}
+	// (b) Disks + pause snapshots owned by recovered paused sessions.
 	for _, s := range m.store.All() {
 		if s.State != StatePaused {
 			continue
