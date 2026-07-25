@@ -42,6 +42,29 @@ The host must provide `/dev/kvm` and cgroup v2. Setup installs host networking
 tools, creates `/etc/renderops/worker.env`, and installs the systemd unit.
 Normal deployments subsequently use `ops/worker/install.sh`.
 
+## Orchestrator server
+
+`orchestrator/` owns the standalone private Compose service used for worker
+registration, heartbeat, capacity reservation, and sandbox placement.
+
+After Docker is installed, create a temporary repository runner token in
+GitHub and prepare the dedicated server:
+
+```bash
+sudo RUNNER_TOKEN='<temporary-token>' \
+  bash ops/orchestrator/setup-github-runner.sh
+sudo RUNNER_USER=renderops-runner bash ops/orchestrator/setup.sh
+```
+
+Populate `/opt/renderops-orchestrator/.env` with a database URL reachable over
+the private network, the server's private bind IP, and an orchestrator token.
+Register the runner with the `orchestrator` label. Port `8090` must be allowed
+only from control-plane and worker private addresses; there is no public proxy.
+
+After the runner, database route, and environment are verified, set the GitHub
+repository variable `ORCHESTRATOR_DEPLOY_ENABLED=true`. Until then CI builds
+and publishes the image but deliberately skips deployment.
+
 ## Database
 
 `database/` contains database administration and observability scripts.

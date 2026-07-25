@@ -1,0 +1,28 @@
+# Dedicated internal orchestrator. There is intentionally no Caddy/public
+# ingress. Port 8090 binds only to ORCHESTRATOR_BIND_IP.
+name: renderops-orchestrator
+
+services:
+  orchestrator:
+    image: ${ORCHESTRATOR_IMAGE:-ghcr.io/renderops-ai/orchestrator:latest}
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      ORCHESTRATOR_TOKEN: ${ORCHESTRATOR_TOKEN:?ORCHESTRATOR_TOKEN is required}
+      ORCHESTRATOR_PORT: "8090"
+      ORCHESTRATOR_HEARTBEAT_TTL_SECONDS: ${ORCHESTRATOR_HEARTBEAT_TTL_SECONDS:-30}
+    ports:
+      - "${ORCHESTRATOR_BIND_IP:?ORCHESTRATOR_BIND_IP is required}:8090:8090"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8090/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
