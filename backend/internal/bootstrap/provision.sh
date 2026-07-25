@@ -105,31 +105,73 @@ table inet fc {
 }
 NFT
 
-# Create all slots in parallel — each uses unique names/IPs so there are no
-# conflicts. Slot i: netns fc-ns-i, TAP fc-tap-i (172.16.0.1/30, same as template
-# so restore needs no reconfig), veth-fc-i (host) <-> veth-ns-i (10.66.x.y).
+# build_slot fully provisions one slot: netns fc-ns-i, TAP fc-tap-i (172.16.0.1/30,
+# same as template so restore needs no reconfig), veth-fc-i (host) <-> veth-ns-i
+# (10.66.x.y), default route, and the in-ns masquerade.
+build_slot() {
+    local i="$1"
+    local H_IP="10.$((66 + i/256)).$((i % 256)).1"
+    local N_IP="10.$((66 + i/256)).$((i % 256)).2"
+
+    ip netns add fc-ns-$i
+    ip netns exec fc-ns-$i ip link set lo up
+    ip netns exec fc-ns-$i ip tuntap add fc-tap-$i mode tap user "$FC_RUN_UID" group "$FC_RUN_GID"
+    ip netns exec fc-ns-$i ip addr add "$TEMPLATE_HOST_IP"/30 dev fc-tap-$i
+    ip netns exec fc-ns-$i ip link set fc-tap-$i up
+
+    ip link add veth-fc-$i type veth peer name veth-ns-$i
+    ip link set veth-ns-$i netns fc-ns-$i
+    ip addr add "$H_IP"/30 dev veth-fc-$i
+    ip link set veth-fc-$i up
+    ip netns exec fc-ns-$i ip addr add "$N_IP"/30 dev veth-ns-$i
+    ip netns exec fc-ns-$i ip link set veth-ns-$i up
+    ip netns exec fc-ns-$i ip route add default via "$H_IP"
+    ip netns exec fc-ns-$i nft "add table ip fc_ns; add chain ip fc_ns postrouting { type nat hook postrouting priority srcnat; }; add rule ip fc_ns postrouting ip saddr 172.16.0.0/30 masquerade"
+}
+
+# teardown_slot removes a slot completely so it can be rebuilt cleanly.
+teardown_slot() {
+    local i="$1"
+    ip netns del fc-ns-$i 2>/dev/null || true
+    ip link del veth-fc-$i 2>/dev/null || true
+}
+
+# slot_ok: a slot is COMPLETE iff its netns has the host-facing veth AND a default
+# route out of it. The parallel build below can leave a slot half-built under
+# rtnetlink contention (an ip command transiently fails); checking these two is
+# enough to catch every partial slot we've seen (missing veth / missing route).
+slot_ok() {
+    local i="$1"
+    ip netns exec fc-ns-$i ip link show veth-ns-$i >/dev/null 2>&1 &&
+    ip netns exec fc-ns-$i ip route show default 2>/dev/null | grep -q '^default'
+}
+
+# Fast path: build all slots in parallel. Failures here are EXPECTED under load
+# (50 concurrent netns/veth/nft ops contend on rtnetlink) and are repaired below,
+# so suppress errors and never let a failed background job abort the script.
 for i in $(seq 0 $((SLOT_COUNT-1))); do
-    (
-        H_IP="10.$((66 + i/256)).$((i % 256)).1"
-        N_IP="10.$((66 + i/256)).$((i % 256)).2"
-
-        ip netns add fc-ns-$i
-        ip netns exec fc-ns-$i ip link set lo up
-        ip netns exec fc-ns-$i ip tuntap add fc-tap-$i mode tap user "$FC_RUN_UID" group "$FC_RUN_GID"
-        ip netns exec fc-ns-$i ip addr add $TEMPLATE_HOST_IP/30 dev fc-tap-$i
-        ip netns exec fc-ns-$i ip link set fc-tap-$i up
-
-        ip link add veth-fc-$i type veth peer name veth-ns-$i
-        ip link set veth-ns-$i netns fc-ns-$i
-        ip addr add $H_IP/30 dev veth-fc-$i
-        ip link set veth-fc-$i up
-        ip netns exec fc-ns-$i ip addr add $N_IP/30 dev veth-ns-$i
-        ip netns exec fc-ns-$i ip link set veth-ns-$i up
-        ip netns exec fc-ns-$i ip route add default via $H_IP
-        ip netns exec fc-ns-$i nft "add table ip fc_ns; add chain ip fc_ns postrouting { type nat hook postrouting priority srcnat; }; add rule ip fc_ns postrouting ip saddr 172.16.0.0/30 masquerade"
-    ) &
+    ( build_slot "$i" ) >/dev/null 2>&1 &
 done
 wait
+
+# Verify + repair: rebuild any slot the parallel pass left incomplete, SERIALLY
+# (no contention). This is the fix for silent partial provisioning — previously
+# a lost race left a slot with no veth/route and the script still reported
+# success, so any VM that landed on it had no network. Now "N slots ready" means
+# N genuinely complete slots, or we fail loudly.
+repaired=0
+for i in $(seq 0 $((SLOT_COUNT-1))); do
+    slot_ok "$i" && continue
+    teardown_slot "$i"
+    build_slot "$i" >/dev/null 2>&1 || true
+    if slot_ok "$i"; then
+        repaired=$((repaired + 1))
+    else
+        echo "[provision] ERROR: slot $i could not be provisioned after retry" >&2
+        exit 1
+    fi
+done
+[ "$repaired" -gt 0 ] && echo "[provision] repaired $repaired slot(s) that failed the parallel pass"
 
 # Register every slot's host veth in the nftables set — one masquerade + forward
 # rule serves all slots via @slot_veths.
