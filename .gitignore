@@ -144,6 +144,7 @@ findings_global.md
 .env.bak*
 *.bak
 *.pem
+renderops-orchestration-machine.pem
 control-vpn.txt
 
 # Confidential business docs (AWS credits requirement/storage sheets) — never commit
