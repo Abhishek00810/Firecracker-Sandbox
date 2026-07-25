@@ -4,9 +4,11 @@ name: Deploy
 #   Control plane -> built as a Docker image, pushed to GHCR, then a SELF-HOSTED
 #     runner on the basic server runs `docker compose pull && up -d`. No source
 #     or Go toolchain on the box; it only pulls the image.
+#   Orchestrator -> built as a private internal image and pulled by a dedicated
+#     SELF-HOSTED runner. It binds only to the server's private IP; no Caddy.
 #   Worker -> GitHub SSHes into the bare-metal host with a key held as a secret
 #     and installs the binary (Firecracker can't be containerized).
-# Path filters keep the two independent.
+# Path filters keep all three independently deployable.
 
 on:
   push:
@@ -14,23 +16,25 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: "Which server to deploy (both | control-plane | worker)"
-        default: "both"
+        description: "Which server to deploy"
+        default: "all"
         type: choice
-        options: [both, control-plane, worker]
+        options: [all, control-plane, orchestrator, worker]
 
 concurrency:
   group: deploy-${{ github.ref }}
   cancel-in-progress: false
 
 env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/control-plane
+  CONTROL_PLANE_IMAGE: ghcr.io/${{ github.repository_owner }}/control-plane
+  ORCHESTRATOR_IMAGE: ghcr.io/${{ github.repository_owner }}/orchestrator
 
 jobs:
   changes:
     runs-on: ubuntu-latest
     outputs:
       control_plane: ${{ steps.filter.outputs.control_plane }}
+      orchestrator: ${{ steps.filter.outputs.orchestrator }}
       worker: ${{ steps.filter.outputs.worker }}
     steps:
       - uses: actions/checkout@v4
@@ -51,6 +55,14 @@ jobs:
               - 'backend/go.mod'
               - 'backend/go.sum'
               - 'ops/control-plane/**'
+            orchestrator:
+              - 'backend/cmd/orchestrator/**'
+              - 'backend/internal/orchestrator/**'
+              - 'backend/internal/platform/**'
+              - 'backend/Dockerfile.orchestrator'
+              - 'backend/go.mod'
+              - 'backend/go.sum'
+              - 'ops/orchestrator/**'
             worker:
               - 'backend/cmd/worker/**'
               - 'backend/internal/executor/**'
@@ -70,7 +82,7 @@ jobs:
   build-control-plane-image:
     needs: changes
     if: >-
-      github.event_name == 'workflow_dispatch' && (inputs.target == 'both' || inputs.target == 'control-plane')
+      github.event_name == 'workflow_dispatch' && (inputs.target == 'all' || inputs.target == 'control-plane')
       || github.event_name == 'push' && needs.changes.outputs.control_plane == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -91,8 +103,8 @@ jobs:
           file: ./backend/Dockerfile.controlplane
           push: true
           tags: |
-            ${{ env.IMAGE }}:latest
-            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.CONTROL_PLANE_IMAGE }}:latest
+            ${{ env.CONTROL_PLANE_IMAGE }}:${{ github.sha }}
 
   # Runs ON the basic server via the self-hosted runner (label: control-plane).
   # Pulls the freshly-pushed image and recreates ONLY the control-plane service.
@@ -135,12 +147,83 @@ jobs:
           docker compose logs --tail=40 control-plane || true
           exit 1
 
+  # ---- ORCHESTRATOR: multi-arch image -> GHCR -> dedicated private server ----
+
+  build-orchestrator-image:
+    needs: changes
+    if: >-
+      github.event_name == 'workflow_dispatch' && (inputs.target == 'all' || inputs.target == 'orchestrator')
+      || github.event_name == 'push' && needs.changes.outputs.orchestrator == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile.orchestrator
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.ORCHESTRATOR_IMAGE }}:latest
+            ${{ env.ORCHESTRATOR_IMAGE }}:${{ github.sha }}
+
+  deploy-orchestrator:
+    needs: build-orchestrator-image
+    if: vars.ORCHESTRATOR_DEPLOY_ENABLED == 'true'
+    runs-on: [self-hosted, orchestrator]
+    environment: production
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Synchronize and deploy orchestrator
+        run: |
+          flock /opt/renderops-orchestrator/.deploy.lock bash -euc '
+            cp ops/orchestrator/docker-compose.yml /opt/renderops-orchestrator/docker-compose.yml
+            cd /opt/renderops-orchestrator
+            export ORCHESTRATOR_IMAGE="${{ env.ORCHESTRATOR_IMAGE }}:${{ github.sha }}"
+            docker compose config --quiet
+            docker compose pull orchestrator
+            docker compose up -d orchestrator
+          '
+      - name: Health check
+        working-directory: /opt/renderops-orchestrator
+        run: |
+          for i in $(seq 1 20); do
+            if docker compose exec -T orchestrator wget -qO- http://127.0.0.1:8090/health >/dev/null 2>&1; then
+              echo "orchestrator healthy after ${i}s"; exit 0
+            fi
+            sleep 2
+          done
+          echo "orchestrator did not become healthy:"
+          docker compose logs --tail=40 orchestrator || true
+          exit 1
+
   # ---- WORKER: build binary on GitHub -> SSH key -> bare-metal host ----
 
   deploy-worker:
     needs: changes
     if: >-
-      github.event_name == 'workflow_dispatch' && (inputs.target == 'both' || inputs.target == 'worker')
+      github.event_name == 'workflow_dispatch' && (inputs.target == 'all' || inputs.target == 'worker')
       || github.event_name == 'push' && needs.changes.outputs.worker == 'true'
     runs-on: ubuntu-latest
     environment: production

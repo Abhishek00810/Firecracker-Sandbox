@@ -9,7 +9,7 @@ on:
 
 jobs:
   backend:
-    name: Backend (control-plane + worker)
+    name: Backend (control-plane + orchestrator + worker)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -35,6 +35,12 @@ jobs:
 
       - name: Build worker
         run: go build -o /tmp/renderops-worker ./cmd/worker
+
+      - name: Build orchestrator
+        run: go build -o /tmp/renderops-orchestrator ./cmd/orchestrator
+
+      - name: Build orchestrator image
+        run: docker build -f Dockerfile.orchestrator -t renderops-orchestrator:ci .
 
       - name: Run tests
         run: go test ./...

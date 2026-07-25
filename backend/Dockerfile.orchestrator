@@ -1,0 +1,23 @@
+# Internal orchestrator: worker registration, health, capacity, and placement.
+# It has no public routes and does not proxy sandbox execution traffic.
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS build
+
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+	go build -trimpath -ldflags="-s -w" -o /out/orchestrator ./cmd/orchestrator
+
+FROM alpine:3.21 AS runtime
+
+RUN apk --no-cache add ca-certificates && adduser -D -H -u 10001 app
+USER app
+
+COPY --from=build /out/orchestrator /usr/local/bin/orchestrator
+
+EXPOSE 8090
+ENTRYPOINT ["orchestrator"]
