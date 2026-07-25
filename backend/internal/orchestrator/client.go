@@ -1,0 +1,111 @@
+package orchestrator
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+)
+
+type Client struct {
+	base  string
+	token string
+	http  *http.Client
+}
+
+func NewClient(base, token string) *Client {
+	return &Client{
+		base:  strings.TrimRight(strings.TrimSpace(base), "/"),
+		token: strings.TrimSpace(token),
+		http:  &http.Client{Timeout: 90 * time.Second},
+	}
+}
+
+func (c *Client) Provision(ctx context.Context, request ProvisionRequest) (Placement, error) {
+	var placement Placement
+	err := c.do(ctx, http.MethodPost, "/internal/sandboxes", request, &placement)
+	return placement, err
+}
+
+func (c *Client) Placement(ctx context.Context, sandboxID string) (Placement, error) {
+	var placement Placement
+	err := c.do(ctx, http.MethodGet, "/internal/placements/"+sandboxID, nil, &placement)
+	return placement, err
+}
+
+func (c *Client) Pause(ctx context.Context, sandboxID string) error {
+	return c.do(ctx, http.MethodPost, "/internal/sandboxes/"+sandboxID+"/pause", nil, nil)
+}
+
+func (c *Client) Resume(ctx context.Context, sandboxID string) error {
+	return c.do(ctx, http.MethodPost, "/internal/sandboxes/"+sandboxID+"/resume", nil, nil)
+}
+
+func (c *Client) Destroy(ctx context.Context, sandboxID string) error {
+	return c.do(ctx, http.MethodDelete, "/internal/sandboxes/"+sandboxID, nil, nil)
+}
+
+func (c *Client) RegisterWorker(ctx context.Context, registration WorkerRegistration) error {
+	return c.do(ctx, http.MethodPut, "/internal/workers/"+registration.ID, registration, nil)
+}
+
+func (c *Client) Heartbeat(ctx context.Context, workerID string) error {
+	return c.do(ctx, http.MethodPost, "/internal/workers/"+workerID+"/heartbeat", nil, nil)
+}
+
+func (c *Client) ReportWorkerState(ctx context.Context, workerID, sandboxID, state string) error {
+	return c.do(
+		ctx,
+		http.MethodPost,
+		"/internal/workers/"+workerID+"/sandboxes/"+sandboxID+"/state",
+		map[string]string{"state": state},
+		nil,
+	)
+}
+
+func (c *Client) Health(ctx context.Context) error {
+	return c.do(ctx, http.MethodGet, "/health", nil, nil)
+}
+
+func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
+	var reader io.Reader
+	if body != nil {
+		payload, err := json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("marshal orchestrator request: %w", err)
+		}
+		reader = bytes.NewReader(payload)
+	}
+	request, err := http.NewRequestWithContext(ctx, method, c.base+path, reader)
+	if err != nil {
+		return err
+	}
+	request.Header.Set(AuthHeader, c.token)
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	response, err := c.http.Do(request)
+	if err != nil {
+		return fmt.Errorf("orchestrator unreachable: %w", err)
+	}
+	defer response.Body.Close()
+
+	raw, _ := io.ReadAll(response.Body)
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		var apiError map[string]string
+		if json.Unmarshal(raw, &apiError) == nil && apiError["error"] != "" {
+			return fmt.Errorf("orchestrator %s: %s", apiError["code"], apiError["error"])
+		}
+		return fmt.Errorf("orchestrator returned %d: %s", response.StatusCode, string(raw))
+	}
+	if out != nil && len(raw) > 0 {
+		if err := json.Unmarshal(raw, out); err != nil {
+			return fmt.Errorf("decode orchestrator response: %w", err)
+		}
+	}
+	return nil
+}

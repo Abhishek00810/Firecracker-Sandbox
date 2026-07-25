@@ -7,6 +7,7 @@ import (
 	"backend/internal/bootstrap"
 	"backend/internal/cgroup"
 	"backend/internal/executor/firecracker"
+	"backend/internal/orchestrator"
 	"backend/internal/plane"
 	"backend/internal/session"
 	"backend/internal/vmsize"
@@ -14,6 +15,7 @@ import (
 	workerconfig "backend/internal/workerplane/config"
 	"context"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -46,6 +48,61 @@ func envInt(key string, def int) int {
 		}
 	}
 	return def
+}
+
+func startOrchestratorRegistration(ctx context.Context, slotCount int) {
+	baseURL := os.Getenv("ORCHESTRATOR_URL")
+	if baseURL == "" {
+		slog.Warn("ORCHESTRATOR_URL not set; worker registration and heartbeat are disabled")
+		return
+	}
+	registration := orchestrator.WorkerRegistration{
+		ID:                  os.Getenv("WORKER_ID"),
+		Endpoint:            os.Getenv("WORKER_ADVERTISE_URL"),
+		Pool:                os.Getenv("WORKER_POOL"),
+		AllocatableVCPUs:    envInt("WORKER_ALLOCATABLE_VCPUS", 0),
+		AllocatableMemoryMB: envInt("WORKER_ALLOCATABLE_MEMORY_MB", 0),
+		AllocatableDiskGB:   envInt("WORKER_ALLOCATABLE_DISK_GB", 0),
+		MaxSandboxes:        envInt("WORKER_MAX_SESSIONS", slotCount),
+	}
+	if registration.ID == "" ||
+		registration.Endpoint == "" ||
+		registration.AllocatableVCPUs <= 0 ||
+		registration.AllocatableMemoryMB <= 0 ||
+		registration.AllocatableDiskGB <= 0 {
+		slog.Error(
+			"worker registration disabled because identity or allocatable capacity is missing",
+			"worker_id", registration.ID,
+			"endpoint", registration.Endpoint,
+		)
+		return
+	}
+
+	client := orchestrator.NewClient(baseURL, os.Getenv("WORKER_TOKEN"))
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		registered := false
+		for {
+			if !registered {
+				if err := client.RegisterWorker(ctx, registration); err != nil {
+					slog.Warn("worker registration failed", "worker_id", registration.ID, "err", err)
+				} else {
+					registered = true
+					slog.Info("worker registered", "worker_id", registration.ID, "endpoint", registration.Endpoint)
+				}
+			} else if err := client.Heartbeat(ctx, registration.ID); err != nil {
+				registered = false
+				slog.Warn("worker heartbeat failed; registration will be retried", "worker_id", registration.ID, "err", err)
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
 }
 
 // createTemplateWithRetry wraps CreateTemplate with bounded retries. Template VM
@@ -183,7 +240,28 @@ func main() {
 	}
 	slog.Info("worker execution engine initialized", "sizes", len(sizePools))
 
-	// No DB/metering hooks on the worker — the control plane owns those.
+	var onState session.StateHook
+	if orchestratorURL, workerID := os.Getenv("ORCHESTRATOR_URL"), os.Getenv("WORKER_ID"); orchestratorURL != "" && workerID != "" {
+		orchestrationClient := orchestrator.NewClient(orchestratorURL, os.Getenv("WORKER_TOKEN"))
+		onState = func(sandboxID, _ string, state string) {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				if err := orchestrationClient.ReportWorkerState(ctx, workerID, sandboxID, state); err != nil {
+					slog.Warn(
+						"report worker sandbox state failed",
+						"worker_id", workerID,
+						"sandbox_id", sandboxID,
+						"state", state,
+						"err", err,
+					)
+				}
+			}()
+		}
+	}
+
+	// The worker never accesses the DB. Lifecycle events go to the orchestrator;
+	// metering remains owned outside the worker.
 	sessionMgr := session.NewManager(
 		vmManager,
 		template,
@@ -193,7 +271,7 @@ func main() {
 		24*time.Hour,  // default max lifetime
 		sizePools,
 		sizeTemplates,
-		nil, // onState — control plane syncs DB
+		onState,
 		nil, // onMeter — control plane meters
 	)
 
@@ -206,19 +284,28 @@ func main() {
 		slog.Warn("WORKER_TOKEN not set — worker API is UNAUTHENTICATED (dev only)")
 	}
 	srv := &http.Server{Addr: bind, Handler: worker.NewServer(sessionMgr, token, slotCount).Handler()}
+	listener, err := net.Listen("tcp", bind)
+	if err != nil {
+		slog.Error("worker listen failed", "addr", bind, "err", err)
+		os.Exit(1)
+	}
 
 	go func() {
 		slog.Info("worker listening", "addr", bind)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
 			slog.Error("worker server failed", "err", err)
 			os.Exit(1)
 		}
 	}()
 
+	registrationCtx, stopRegistration := context.WithCancel(context.Background())
+	startOrchestratorRegistration(registrationCtx, slotCount)
+
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 	slog.Info("worker shutting down")
+	stopRegistration()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	srv.Shutdown(ctx)

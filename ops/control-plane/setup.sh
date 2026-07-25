@@ -11,7 +11,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR=/opt/renderops
 DEPLOY_GROUP=renderops-deploy
 RUNNER_USER="${RUNNER_USER:-${SUDO_USER:-}}"
-WORKER_SSH_HOST="${WORKER_SSH_HOST:-20.228.220.165}"
 
 if [ -z "$RUNNER_USER" ] || ! id "$RUNNER_USER" >/dev/null 2>&1; then
 	echo "RUNNER_USER must name the existing GitHub runner account" >&2
@@ -43,26 +42,6 @@ else
 	echo "preserved existing $APP_DIR/.env"
 fi
 
-# The container runs as uid 10001. Host ownership lets it read the mounted key
-# without making that private key readable to the deploy runner.
-install -d -o 10001 -g 10001 -m 0700 "$APP_DIR/keys"
-KEY="$APP_DIR/keys/worker_key"
-if [ ! -f "$KEY" ]; then
-	ssh-keygen -q -t ed25519 -N '' -f "$KEY" -C "renderops-control-plane-tunnel"
-fi
-KNOWN_HOSTS_TMP="$(mktemp)"
-trap 'rm -f "$KNOWN_HOSTS_TMP"' EXIT
-if ssh-keyscan -H "$WORKER_SSH_HOST" > "$KNOWN_HOSTS_TMP" 2>/dev/null &&
-	[ -s "$KNOWN_HOSTS_TMP" ]; then
-	mv "$KNOWN_HOSTS_TMP" "$APP_DIR/keys/known_hosts"
-elif [ ! -s "$APP_DIR/keys/known_hosts" ]; then
-	echo "could not record the worker SSH host key for $WORKER_SSH_HOST" >&2
-	exit 1
-fi
-chown -R 10001:10001 "$APP_DIR/keys"
-chmod 0600 "$KEY"
-chmod 0644 "$KEY.pub" "$APP_DIR/keys/known_hosts"
-
 install -m 0644 "$SCRIPT_DIR/backup/renderops-backup.service" /etc/systemd/system/renderops-backup.service
 install -m 0644 "$SCRIPT_DIR/backup/renderops-backup.timer" /etc/systemd/system/renderops-backup.timer
 systemctl daemon-reload
@@ -70,9 +49,7 @@ systemctl enable --now renderops-backup.timer
 
 echo
 echo "Control-plane VPS prepared."
-echo "1. Add this public key to the worker account's authorized_keys:"
-cat "$KEY.pub"
-echo "2. Fill in $APP_DIR/.env."
-echo "3. Re-login $RUNNER_USER so new group membership applies."
-echo "4. Register the GitHub runner with label: control-plane."
-echo "5. Run the Deploy workflow with target: control-plane."
+echo "1. Fill in $APP_DIR/.env."
+echo "2. Re-login $RUNNER_USER so new group membership applies."
+echo "3. Register the GitHub runner with label: control-plane."
+echo "4. Run the Deploy workflow with target: control-plane."

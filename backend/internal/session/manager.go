@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"backend/internal/cgroup"
@@ -50,6 +51,13 @@ type Manager struct {
 	sizeTemplates map[string]*firecracker.SnapshotTemplate // keyed by vmsize.Key — per-size baked device names (for pause/resume)
 	pauseDir      string                                   // disk-backed dir for per-session pause snapshots (NOT /dev/shm)
 	manifestPath  string                                   // recovery manifest of paused sessions
+	createLocksMu sync.Mutex
+	createLocks   map[string]*createLock
+}
+
+type createLock struct {
+	mu   sync.Mutex
+	refs int
 }
 
 func NewManager(
@@ -77,6 +85,7 @@ func NewManager(
 		sizeTemplates: sizeTemplates,
 		pauseDir:      filepath.Join(vmManager.SocketDir, "pause"),
 		manifestPath:  filepath.Join(vmManager.SocketDir, "paused-sessions.json"),
+		createLocks:   make(map[string]*createLock),
 	}
 	if err := os.MkdirAll(m.pauseDir, 0o755); err != nil {
 		slog.Error("failed to create pause snapshot dir", "dir", m.pauseDir, "err", err)
@@ -244,6 +253,31 @@ func (m *Manager) persistManifest() {
 // Create boots a VM and binds it to a new session. env vars are injected into
 // the persistent shell so commands like git can access GITHUB_TOKEN etc.
 func (m *Manager) Create(ctx context.Context, userID, billingModel string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*Session, error) {
+	return m.CreateWithID(ctx, uuid.NewString(), userID, billingModel, env, vcpus, memoryMB, diskGB, internet, idleTimeout, maxLifetime)
+}
+
+// CreateWithID creates a session under the control-plane-assigned UUID. Calls
+// for the same UUID are serialized and idempotent, so a retry cannot boot a
+// second VM or consume a second capacity reservation.
+func (m *Manager) CreateWithID(ctx context.Context, sandboxID, userID, billingModel string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*Session, error) {
+	if _, err := uuid.Parse(sandboxID); err != nil {
+		return nil, fmt.Errorf("invalid sandbox id %q: %w", sandboxID, err)
+	}
+	unlock := m.lockCreate(sandboxID)
+	defer unlock()
+
+	if existing, ok := m.store.Get(sandboxID); ok {
+		if existing.UserID != userID ||
+			existing.BillingModel != billingModel ||
+			existing.VCPUs != vcpus ||
+			existing.MemoryMB != memoryMB ||
+			existing.DiskGB != diskGB ||
+			existing.Internet != internet {
+			return nil, fmt.Errorf("sandbox %s already exists with different configuration", sandboxID)
+		}
+		return existing, nil
+	}
+
 	t0 := time.Now()
 
 	pool := m.sizePools[vmsize.Key(vcpus, memoryMB, diskGB)]
@@ -265,7 +299,7 @@ func (m *Manager) Create(ctx context.Context, userID, billingModel string, env m
 	}
 
 	sess := &Session{
-		ID:           uuid.New().String(),
+		ID:           sandboxID,
 		UserID:       userID,
 		VM:           pvm.VM,
 		Cgroup:       pvm.Cgroup,
@@ -310,6 +344,28 @@ func (m *Manager) Create(ctx context.Context, userID, billingModel string, env m
 
 	slog.Info("session created", "session_id", sess.ID, "vm_id", pvm.VM.ID, "billing_model", billingModel, "warm", warm, "ms", time.Since(t0).Milliseconds())
 	return sess, nil
+}
+
+func (m *Manager) lockCreate(sandboxID string) func() {
+	m.createLocksMu.Lock()
+	lock := m.createLocks[sandboxID]
+	if lock == nil {
+		lock = &createLock{}
+		m.createLocks[sandboxID] = lock
+	}
+	lock.refs++
+	m.createLocksMu.Unlock()
+
+	lock.mu.Lock()
+	return func() {
+		lock.mu.Unlock()
+		m.createLocksMu.Lock()
+		lock.refs--
+		if lock.refs == 0 {
+			delete(m.createLocks, sandboxID)
+		}
+		m.createLocksMu.Unlock()
+	}
 }
 
 // Exec runs a shell command in the session's persistent bash process

@@ -67,11 +67,13 @@ func NewStore(max int) *Store {
 
 func (s *Store) Add(sess *Session) error {
 	s.mu.Lock()
-
 	defer s.mu.Unlock()
 
+	if _, exists := s.sessions[sess.ID]; exists {
+		return fmt.Errorf("session %s already exists", sess.ID)
+	}
 	if len(s.sessions) >= s.max {
-		return fmt.Errorf("session liimit reached (%d)", s.max)
+		return fmt.Errorf("session limit reached (%d)", s.max)
 	}
 
 	s.sessions[sess.ID] = sess

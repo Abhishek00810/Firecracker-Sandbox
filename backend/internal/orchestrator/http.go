@@ -10,28 +10,38 @@ import (
 const AuthHeader = "X-Orchestrator-Token"
 
 type HTTPServer struct {
-	service *Service
-	token   string
+	service      *Service
+	controlToken string
+	workerToken  string
 }
 
-func NewHTTPServer(service *Service, token string) *HTTPServer {
-	return &HTTPServer{service: service, token: token}
+func NewHTTPServer(service *Service, controlToken, workerToken string) *HTTPServer {
+	return &HTTPServer{
+		service:      service,
+		controlToken: controlToken,
+		workerToken:  workerToken,
+	}
 }
 
 func (s *HTTPServer) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.health)
-	mux.HandleFunc("PUT /internal/workers/{workerID}", s.authed(s.registerWorker))
-	mux.HandleFunc("POST /internal/workers/{workerID}/heartbeat", s.authed(s.heartbeat))
-	mux.HandleFunc("POST /internal/placements", s.authed(s.place))
-	mux.HandleFunc("GET /internal/placements/{sandboxID}", s.authed(s.getPlacement))
-	mux.HandleFunc("DELETE /internal/placements/{sandboxID}", s.authed(s.releasePlacement))
+	mux.HandleFunc("PUT /internal/workers/{workerID}", s.authed(s.workerToken, s.registerWorker))
+	mux.HandleFunc("POST /internal/workers/{workerID}/heartbeat", s.authed(s.workerToken, s.heartbeat))
+	mux.HandleFunc("POST /internal/workers/{workerID}/sandboxes/{sandboxID}/state", s.authed(s.workerToken, s.workerState))
+	mux.HandleFunc("POST /internal/placements", s.authed(s.controlToken, s.place))
+	mux.HandleFunc("GET /internal/placements/{sandboxID}", s.authed(s.controlToken, s.getPlacement))
+	mux.HandleFunc("DELETE /internal/placements/{sandboxID}", s.authed(s.controlToken, s.releasePlacement))
+	mux.HandleFunc("POST /internal/sandboxes", s.authed(s.controlToken, s.provision))
+	mux.HandleFunc("POST /internal/sandboxes/{sandboxID}/pause", s.authed(s.controlToken, s.pause))
+	mux.HandleFunc("POST /internal/sandboxes/{sandboxID}/resume", s.authed(s.controlToken, s.resume))
+	mux.HandleFunc("DELETE /internal/sandboxes/{sandboxID}", s.authed(s.controlToken, s.destroy))
 	return mux
 }
 
-func (s *HTTPServer) authed(next http.HandlerFunc) http.HandlerFunc {
+func (s *HTTPServer) authed(token string, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.token == "" || r.Header.Get(AuthHeader) != s.token {
+		if token == "" || r.Header.Get(AuthHeader) != token {
 			writeHTTPError(w, http.StatusUnauthorized, "unauthorized", "invalid or missing orchestrator token")
 			return
 		}
@@ -63,6 +73,25 @@ func (s *HTTPServer) registerWorker(w http.ResponseWriter, r *http.Request) {
 
 func (s *HTTPServer) heartbeat(w http.ResponseWriter, r *http.Request) {
 	if err := s.service.Heartbeat(r.Context(), r.PathValue("workerID")); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *HTTPServer) workerState(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		State string `json:"state"`
+	}
+	if err := decodeHTTPJSON(w, r, &request); err != nil {
+		return
+	}
+	if err := s.service.ReportWorkerState(
+		r.Context(),
+		r.PathValue("workerID"),
+		r.PathValue("sandboxID"),
+		request.State,
+	); err != nil {
 		writeServiceError(w, err)
 		return
 	}
@@ -106,6 +135,43 @@ func (s *HTTPServer) releasePlacement(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *HTTPServer) provision(w http.ResponseWriter, r *http.Request) {
+	var request ProvisionRequest
+	if err := decodeHTTPJSON(w, r, &request); err != nil {
+		return
+	}
+	placement, err := s.service.Provision(r.Context(), request)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeHTTPJSON(w, http.StatusCreated, placement)
+}
+
+func (s *HTTPServer) pause(w http.ResponseWriter, r *http.Request) {
+	if err := s.service.Pause(r.Context(), r.PathValue("sandboxID")); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *HTTPServer) resume(w http.ResponseWriter, r *http.Request) {
+	if err := s.service.Resume(r.Context(), r.PathValue("sandboxID")); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *HTTPServer) destroy(w http.ResponseWriter, r *http.Request) {
+	if err := s.service.Destroy(r.Context(), r.PathValue("sandboxID")); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func decodeHTTPJSON(w http.ResponseWriter, r *http.Request, out any) error {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	decoder := json.NewDecoder(r.Body)
@@ -125,6 +191,8 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		writeHTTPError(w, http.StatusNotFound, "worker_not_found", err.Error())
 	case errors.Is(err, ErrSandboxNotFound):
 		writeHTTPError(w, http.StatusNotFound, "sandbox_not_found", err.Error())
+	case errors.Is(err, ErrInvalidState):
+		writeHTTPError(w, http.StatusConflict, "invalid_sandbox_state", err.Error())
 	default:
 		status := http.StatusInternalServerError
 		if strings.Contains(err.Error(), "invalid") ||

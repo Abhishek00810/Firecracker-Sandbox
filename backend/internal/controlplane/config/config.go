@@ -13,28 +13,35 @@ type Config struct {
 	LogLevel    string
 	LogFormat   string
 
-	SSHCommand     string
-	AgentLocalPort string
-	AgentAddr      string
-	WorkerToken    string
+	OrchestratorURL   string
+	OrchestratorToken string
+	WorkerToken       string
 }
 
 // Load reads only control-plane settings. It performs no worker host or asset
 // validation, so the control plane remains independent of Firecracker.
 func Load() (*Config, error) {
 	cfg := &Config{
-		DatabaseURL:    strings.TrimSpace(os.Getenv("DATABASE_URL")),
-		Port:           defaultString(strings.TrimSpace(os.Getenv("PORT")), "8080"),
-		LogLevel:       defaultString(strings.TrimSpace(os.Getenv("LOG_LEVEL")), "info"),
-		LogFormat:      defaultString(strings.TrimSpace(os.Getenv("LOG_FORMAT")), "json"),
-		SSHCommand:     strings.TrimSpace(os.Getenv("SSH_COMMAND")),
-		AgentLocalPort: defaultString(strings.TrimSpace(os.Getenv("AGENT_LOCAL_PORT")), "19876"),
-		AgentAddr:      defaultString(strings.TrimSpace(os.Getenv("AGENT_ADDR")), "127.0.0.1:9876"),
-		WorkerToken:    strings.TrimSpace(os.Getenv("WORKER_TOKEN")),
+		DatabaseURL:       strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		Port:              defaultString(strings.TrimSpace(os.Getenv("PORT")), "8080"),
+		LogLevel:          defaultString(strings.TrimSpace(os.Getenv("LOG_LEVEL")), "info"),
+		LogFormat:         defaultString(strings.TrimSpace(os.Getenv("LOG_FORMAT")), "json"),
+		OrchestratorURL:   strings.TrimRight(strings.TrimSpace(os.Getenv("ORCHESTRATOR_URL")), "/"),
+		OrchestratorToken: strings.TrimSpace(os.Getenv("ORCHESTRATOR_TOKEN")),
+		WorkerToken:       strings.TrimSpace(os.Getenv("WORKER_TOKEN")),
 	}
 
 	if cfg.DatabaseURL == "" {
 		return nil, errors.New("DATABASE_URL must be set")
+	}
+	if cfg.OrchestratorURL == "" {
+		return nil, errors.New("ORCHESTRATOR_URL must be set")
+	}
+	if cfg.OrchestratorToken == "" {
+		return nil, errors.New("ORCHESTRATOR_TOKEN must be set")
+	}
+	if cfg.WorkerToken == "" {
+		return nil, errors.New("WORKER_TOKEN must be set")
 	}
 
 	return cfg, nil

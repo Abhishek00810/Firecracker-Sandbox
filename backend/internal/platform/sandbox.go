@@ -70,6 +70,41 @@ func (c *Client) UpsertSandbox(ctx context.Context, sb Sandbox) {
 	}
 }
 
+// InsertSandbox creates the durable scheduling row before any worker capacity
+// is reserved or VM boot is attempted.
+func (c *Client) InsertSandbox(ctx context.Context, sb Sandbox) error {
+	metadata, err := json.Marshal(sb.Metadata)
+	if err != nil {
+		return fmt.Errorf("marshal sandbox metadata: %w", err)
+	}
+	var apiKeyID any
+	if sb.APIKeyID != "" {
+		apiKeyID = sb.APIKeyID
+	}
+	_, err = c.pool.Exec(ctx, `
+		INSERT INTO sandboxes (
+			id,user_id,api_key_id,name,state,billing_model,
+			vcpus,memory_mb,disk_gb,internet,metadata
+		)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+		sb.ID,
+		sb.UserID,
+		apiKeyID,
+		sb.Name,
+		sb.State,
+		sb.BillingModel,
+		sb.VCPUs,
+		sb.MemoryMB,
+		sb.DiskGB,
+		sb.Internet,
+		metadata,
+	)
+	if err != nil {
+		return fmt.Errorf("insert sandbox: %w", err)
+	}
+	return nil
+}
+
 func (c *Client) UpdateSandboxState(ctx context.Context, id, state string) {
 	var err error
 	switch state {

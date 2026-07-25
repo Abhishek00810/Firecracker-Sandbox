@@ -35,8 +35,15 @@ if [ ! -f "$ENV_FILE" ]; then
 	umask 077
 	{
 		printf 'ROOT_DIRECTORY=%s\n' "$WORKER_ROOT"
-		printf 'WORKER_BIND=127.0.0.1:9876\n'
+		printf 'WORKER_BIND=%s\n' "${WORKER_BIND:-127.0.0.1:9876}"
 		printf 'WORKER_TOKEN=%s\n' "$WORKER_TOKEN"
+		printf 'WORKER_ID=%s\n' "${WORKER_ID:-}"
+		printf 'WORKER_ADVERTISE_URL=%s\n' "${WORKER_ADVERTISE_URL:-}"
+		printf 'WORKER_POOL=%s\n' "${WORKER_POOL:-default}"
+		printf 'WORKER_ALLOCATABLE_VCPUS=%s\n' "${WORKER_ALLOCATABLE_VCPUS:-}"
+		printf 'WORKER_ALLOCATABLE_MEMORY_MB=%s\n' "${WORKER_ALLOCATABLE_MEMORY_MB:-}"
+		printf 'WORKER_ALLOCATABLE_DISK_GB=%s\n' "${WORKER_ALLOCATABLE_DISK_GB:-}"
+		printf 'ORCHESTRATOR_URL=%s\n' "${ORCHESTRATOR_URL:-}"
 		printf 'HOST_VALIDATION_MODE=strict\n'
 		printf 'SLOT_COUNT=%s\n' "${SLOT_COUNT:-50}"
 		printf 'MAX_CONCURRENT_PROVISIONS=%s\n' "${MAX_CONCURRENT_PROVISIONS:-8}"

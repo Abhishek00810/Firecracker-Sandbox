@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"backend/internal/agent"
 	"backend/internal/orchestrator"
 	orchestratorconfig "backend/internal/orchestrator/config"
 	"backend/internal/platform"
@@ -31,13 +32,19 @@ func main() {
 	}
 	defer db.Close()
 
-	service := orchestrator.NewService(db, cfg.HeartbeatTTL)
+	service := orchestrator.NewService(
+		db,
+		cfg.HeartbeatTTL,
+		orchestrator.WithWorkerClientFactory(func(endpoint string) orchestrator.WorkerClient {
+			return agent.NewClient(endpoint, cfg.WorkerToken)
+		}),
+	)
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,
-		Handler:           orchestrator.NewHTTPServer(service, cfg.Token).Handler(),
+		Handler:           orchestrator.NewHTTPServer(service, cfg.Token, cfg.WorkerToken).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      15 * time.Second,
+		WriteTimeout:      120 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}

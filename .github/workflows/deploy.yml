@@ -45,6 +45,7 @@ jobs:
             control_plane:
               - 'backend/cmd/control-plane/**'
               - 'backend/internal/controlplane/**'
+              - 'backend/internal/orchestrator/**'
               - 'backend/internal/agent/**'
               - 'backend/internal/plane/**'
               - 'backend/internal/platform/**'
@@ -72,6 +73,7 @@ jobs:
               - 'backend/internal/cgroup/**'
               - 'backend/internal/vmsize/**'
               - 'backend/internal/workerplane/**'
+              - 'backend/internal/orchestrator/**'
               - 'backend/internal/plane/**'
               - 'backend/go.mod'
               - 'backend/go.sum'
@@ -131,7 +133,9 @@ jobs:
             cd /opt/renderops
             docker compose config --quiet
             docker compose pull control-plane
-            docker compose up -d control-plane
+            # Include postgres so private bind/health configuration changes are
+            # actually applied. Its named volume preserves database contents.
+            docker compose up -d postgres control-plane
             docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile || true
           '
       - name: Health check

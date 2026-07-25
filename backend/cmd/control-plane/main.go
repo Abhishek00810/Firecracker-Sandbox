@@ -6,11 +6,11 @@
 package main
 
 import (
-	"backend/internal/agent"
 	"backend/internal/controlplane"
 	controlconfig "backend/internal/controlplane/config"
 	"backend/internal/handler"
 	"backend/internal/middleware"
+	"backend/internal/orchestrator"
 	"backend/internal/platform"
 	"context"
 	"encoding/json"
@@ -18,7 +18,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 )
@@ -74,31 +73,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Reach the host agent: open the SSH tunnel (host/user/key in ~/.ssh/config
-	// under the SSH_COMMAND alias) and target its local end. With no SSH_COMMAND,
-	// talk to AgentAddr directly (control plane co-located with the agent).
-	agentBase := "http://" + cfg.AgentAddr
-	if cfg.SSHCommand != "" {
-		remotePort := "9876"
-		if _, p, ok := strings.Cut(cfg.AgentAddr, ":"); ok {
-			remotePort = p
-		}
-		if err := agent.StartTunnel(context.Background(), cfg.SSHCommand, cfg.AgentLocalPort, remotePort); err != nil {
-			slog.Error("agent tunnel failed", "err", err)
-			os.Exit(1)
-		}
-		agentBase = "http://127.0.0.1:" + cfg.AgentLocalPort
-	}
-	agentClient := agent.NewClient(agentBase, cfg.WorkerToken)
-	if err := agentClient.Health(context.Background()); err != nil {
-		slog.Warn("agent not healthy at startup; create/run will fail until it is", "base", agentBase, "err", err)
+	orchestratorClient := orchestrator.NewClient(cfg.OrchestratorURL, cfg.OrchestratorToken)
+	if err := orchestratorClient.Health(context.Background()); err != nil {
+		slog.Warn("orchestrator not healthy at startup; lifecycle requests will fail until it is", "url", cfg.OrchestratorURL, "err", err)
 	} else {
-		slog.Info("agent reachable", "base", agentBase)
+		slog.Info("orchestrator reachable", "url", cfg.OrchestratorURL)
 	}
 
-	// Postgres is the source of truth for sandbox state; execution dispatches to
-	// the agent over the tunnel.
-	svc := controlplane.NewService(platformClient, agentClient)
+	svc := controlplane.NewService(platformClient, orchestratorClient, cfg.WorkerToken)
 
 	http.HandleFunc("/health", healthHandler)
 	http.HandleFunc("/session", handler.SessionHandler(svc, platformClient))

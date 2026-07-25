@@ -10,15 +10,13 @@ control plane, the SvelteKit platform, Caddy, and database backups.
 Run once on the VPS from a repository checkout:
 
 ```bash
-sudo RUNNER_USER=renderops-admin \
-  WORKER_SSH_HOST=20.228.220.165 \
-  bash ops/control-plane/setup.sh
+sudo RUNNER_USER=renderops-admin bash ops/control-plane/setup.sh
 ```
 
 Then:
 
 1. Fill in `/opt/renderops/.env`.
-2. Install the printed tunnel public key on the worker account.
+2. Set `ORCHESTRATOR_URL` to the orchestrator's private URL.
 3. Register the GitHub runner with the `control-plane` label.
 4. Re-login so Docker and deployment group membership applies.
 5. Run the `Deploy` workflow with target `control-plane`.
@@ -34,6 +32,13 @@ Copy the repository setup files and the asset bundle to the worker, then run:
 
 ```bash
 sudo WORKER_TOKEN='<same value as the control-plane VPS>' \
+  ORCHESTRATOR_URL='http://10.0.0.7:8090' \
+  WORKER_ID='worker-1' \
+  WORKER_BIND='0.0.0.0:9876' \
+  WORKER_ADVERTISE_URL='http://10.0.0.4:9876' \
+  WORKER_ALLOCATABLE_VCPUS='8' \
+  WORKER_ALLOCATABLE_MEMORY_MB='28000' \
+  WORKER_ALLOCATABLE_DISK_GB='20' \
   ASSET_BUNDLE=/path/to/renderops-assets.tar.gz \
   bash ops/worker/setup.sh
 ```
@@ -41,6 +46,8 @@ sudo WORKER_TOKEN='<same value as the control-plane VPS>' \
 The host must provide `/dev/kvm` and cgroup v2. Setup installs host networking
 tools, creates `/etc/renderops/worker.env`, and installs the systemd unit.
 Normal deployments subsequently use `ops/worker/install.sh`.
+The advertised endpoint must be reachable only over the private network from
+the control plane and orchestrator; do not expose port `9876` to the internet.
 
 ## Orchestrator server
 

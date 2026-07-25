@@ -7,9 +7,8 @@ func TestLoad(t *testing.T) {
 	t.Setenv("PORT", "")
 	t.Setenv("LOG_LEVEL", "debug")
 	t.Setenv("LOG_FORMAT", "text")
-	t.Setenv("SSH_COMMAND", " ssh worker ")
-	t.Setenv("AGENT_LOCAL_PORT", "")
-	t.Setenv("AGENT_ADDR", " worker.internal:9876 ")
+	t.Setenv("ORCHESTRATOR_URL", " http://orchestrator.internal:8090/ ")
+	t.Setenv("ORCHESTRATOR_TOKEN", " orchestration-secret ")
 	t.Setenv("WORKER_TOKEN", " worker-secret ")
 
 	cfg, err := Load()
@@ -26,14 +25,11 @@ func TestLoad(t *testing.T) {
 	if cfg.LogLevel != "debug" || cfg.LogFormat != "text" {
 		t.Fatalf("unexpected logging config: level=%q format=%q", cfg.LogLevel, cfg.LogFormat)
 	}
-	if cfg.SSHCommand != "ssh worker" {
-		t.Fatalf("unexpected SSH command %q", cfg.SSHCommand)
+	if cfg.OrchestratorURL != "http://orchestrator.internal:8090" {
+		t.Fatalf("unexpected orchestrator URL %q", cfg.OrchestratorURL)
 	}
-	if cfg.AgentLocalPort != "19876" {
-		t.Fatalf("expected default agent local port 19876, got %q", cfg.AgentLocalPort)
-	}
-	if cfg.AgentAddr != "worker.internal:9876" {
-		t.Fatalf("unexpected agent address %q", cfg.AgentAddr)
+	if cfg.OrchestratorToken != "orchestration-secret" {
+		t.Fatal("orchestrator token was not loaded")
 	}
 	if cfg.WorkerToken != "worker-secret" {
 		t.Fatal("worker token was not loaded")
@@ -42,6 +38,9 @@ func TestLoad(t *testing.T) {
 
 func TestLoadRequiresDatabaseURL(t *testing.T) {
 	t.Setenv("DATABASE_URL", "")
+	t.Setenv("ORCHESTRATOR_URL", "http://orchestrator.internal:8090")
+	t.Setenv("ORCHESTRATOR_TOKEN", "secret")
+	t.Setenv("WORKER_TOKEN", "worker-secret")
 
 	if _, err := Load(); err == nil {
 		t.Fatal("Load() succeeded without DATABASE_URL")

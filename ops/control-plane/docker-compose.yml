@@ -16,6 +16,12 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     volumes:
       - postgres-data:/var/lib/postgresql
+    # Publish Postgres on this host's PRIVATE vnet IP only (never 0.0.0.0), so the
+    # orchestrator on 10.0.0.7 can reach it over the vnet. Access is scoped down by
+    # the NSG (source 10.0.0.7/32 -> 5432) and pg_hba. Override the bind IP per host
+    # via POSTGRES_BIND_IP in /opt/renderops/.env.
+    ports:
+      - "${POSTGRES_BIND_IP:-10.0.0.5}:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U renderops -d renderops"]
       interval: 5s
@@ -30,15 +36,9 @@ services:
     environment:
       PORT: "8081"
       DATABASE_URL: postgresql://renderops:${POSTGRES_PASSWORD}@postgres:5432/renderops?sslmode=disable
+      ORCHESTRATOR_URL: ${ORCHESTRATOR_URL:?ORCHESTRATOR_URL is required}
+      ORCHESTRATOR_TOKEN: ${ORCHESTRATOR_TOKEN:?ORCHESTRATOR_TOKEN is required}
       WORKER_TOKEN: ${WORKER_TOKEN:?WORKER_TOKEN is required}
-      # The control plane opens its own SSH tunnel to the worker from inside the
-      # container (openssh-client is in the image). SSH_COMMAND reaches the
-      # bare-metal worker; the tunnel forwards AGENT_LOCAL_PORT -> AGENT_ADDR's port.
-      SSH_COMMAND: ssh -i /keys/worker_key -o UserKnownHostsFile=/keys/known_hosts -o StrictHostKeyChecking=accept-new ${WORKER_SSH_USER:-renderopsadmin}@${WORKER_SSH_HOST:?WORKER_SSH_HOST is required}
-      AGENT_ADDR: 127.0.0.1:9876
-      AGENT_LOCAL_PORT: "19876"
-    volumes:
-      - ./keys:/keys:ro
     depends_on:
       postgres:
         condition: service_healthy

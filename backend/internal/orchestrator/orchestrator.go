@@ -11,12 +11,15 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"backend/internal/plane"
 )
 
 var (
 	ErrNoCapacity      = errors.New("no healthy worker has sufficient capacity")
 	ErrWorkerNotFound  = errors.New("worker not found")
 	ErrSandboxNotFound = errors.New("sandbox not found")
+	ErrInvalidState    = errors.New("sandbox lifecycle transition is no longer valid")
 )
 
 var workerIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
@@ -41,25 +44,54 @@ type Placement struct {
 	Endpoint  string `json:"endpoint"`
 }
 
+type ProvisionRequest struct {
+	Pool string `json:"pool,omitempty"`
+	plane.CreateRequest
+}
+
+type WorkerClient interface {
+	Create(context.Context, plane.CreateRequest) (plane.CreateResponse, error)
+	Pause(context.Context, string) error
+	Resume(context.Context, string) error
+	Destroy(context.Context, string) error
+}
+
+type WorkerClientFactory func(endpoint string) WorkerClient
+
 type Store interface {
 	RegisterWorker(context.Context, WorkerRegistration, time.Time) error
 	RecordHeartbeat(context.Context, string, time.Time) error
 	ReservePlacement(context.Context, string, PlacementRequest, time.Time) (Placement, error)
 	GetPlacement(context.Context, string) (Placement, bool, error)
-	ReleasePlacement(context.Context, string) error
+	UpdatePlacementState(context.Context, string, string, []string, string) error
+	ReleasePlacement(context.Context, string, string) error
+	ReleaseWorkerPlacement(context.Context, string, string, string) error
 }
 
 type Service struct {
 	store        Store
 	heartbeatTTL time.Duration
 	now          func() time.Time
+	workerClient WorkerClientFactory
 }
 
-func NewService(store Store, heartbeatTTL time.Duration) *Service {
+type Option func(*Service)
+
+func WithWorkerClientFactory(factory WorkerClientFactory) Option {
+	return func(service *Service) {
+		service.workerClient = factory
+	}
+}
+
+func NewService(store Store, heartbeatTTL time.Duration, options ...Option) *Service {
 	if heartbeatTTL <= 0 {
 		heartbeatTTL = 30 * time.Second
 	}
-	return &Service{store: store, heartbeatTTL: heartbeatTTL, now: time.Now}
+	service := &Service{store: store, heartbeatTTL: heartbeatTTL, now: time.Now}
+	for _, option := range options {
+		option(service)
+	}
+	return service
 }
 
 func (s *Service) RegisterWorker(ctx context.Context, registration WorkerRegistration) error {
@@ -116,7 +148,143 @@ func (s *Service) Release(ctx context.Context, sandboxID string) error {
 	if strings.TrimSpace(sandboxID) == "" {
 		return errors.New("sandbox id is required")
 	}
-	return s.store.ReleasePlacement(ctx, sandboxID)
+	return s.store.ReleasePlacement(ctx, sandboxID, "")
+}
+
+// Provision reserves capacity before booting and finalizes the sandbox only
+// after the worker confirms that its guest agent is ready.
+func (s *Service) Provision(ctx context.Context, request ProvisionRequest) (Placement, error) {
+	if s.workerClient == nil {
+		return Placement{}, errors.New("worker client is not configured")
+	}
+	sandboxID := strings.TrimSpace(request.SandboxID)
+	if sandboxID == "" {
+		return Placement{}, errors.New("sandbox id is required")
+	}
+
+	placement, err := s.Place(ctx, sandboxID, PlacementRequest{Pool: request.Pool})
+	if err != nil {
+		if !errors.Is(err, ErrSandboxNotFound) {
+			if releaseErr := s.store.ReleasePlacement(ctx, sandboxID, "error"); releaseErr != nil {
+				return Placement{}, errors.Join(err, fmt.Errorf("mark unscheduled sandbox failed: %w", releaseErr))
+			}
+		}
+		return Placement{}, err
+	}
+
+	response, err := s.workerClient(placement.Endpoint).Create(ctx, request.CreateRequest)
+	if err != nil {
+		// A timeout may happen after the worker completed the boot. Destroy by the
+		// idempotency key before releasing capacity to avoid an untracked VM.
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		_ = s.workerClient(placement.Endpoint).Destroy(cleanupCtx, sandboxID)
+		cancel()
+		releaseErr := s.store.ReleasePlacement(ctx, sandboxID, "error")
+		if releaseErr != nil {
+			return Placement{}, errors.Join(
+				fmt.Errorf("provision sandbox on worker: %w", err),
+				fmt.Errorf("release failed placement: %w", releaseErr),
+			)
+		}
+		return Placement{}, fmt.Errorf("provision sandbox on worker: %w", err)
+	}
+	if response.SandboxID != sandboxID {
+		releaseErr := s.store.ReleasePlacement(ctx, sandboxID, "error")
+		mismatch := fmt.Errorf("worker returned sandbox id %q, expected %q", response.SandboxID, sandboxID)
+		if releaseErr != nil {
+			return Placement{}, errors.Join(mismatch, fmt.Errorf("release mismatched placement: %w", releaseErr))
+		}
+		return Placement{}, mismatch
+	}
+	if err := s.store.UpdatePlacementState(ctx, sandboxID, placement.WorkerID, []string{"provisioning"}, "active"); err != nil {
+		return Placement{}, fmt.Errorf("mark sandbox active: %w", err)
+	}
+	return placement, nil
+}
+
+func (s *Service) Pause(ctx context.Context, sandboxID string) error {
+	return s.workerTransition(ctx, sandboxID, []string{"active"}, "paused", func(client WorkerClient, id string) error {
+		return client.Pause(ctx, id)
+	})
+}
+
+func (s *Service) Resume(ctx context.Context, sandboxID string) error {
+	return s.workerTransition(ctx, sandboxID, []string{"paused"}, "active", func(client WorkerClient, id string) error {
+		return client.Resume(ctx, id)
+	})
+}
+
+func (s *Service) Destroy(ctx context.Context, sandboxID string) error {
+	if s.workerClient == nil {
+		return errors.New("worker client is not configured")
+	}
+	placement, ok, err := s.Placement(ctx, sandboxID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return s.store.ReleasePlacement(ctx, sandboxID, "destroyed")
+	}
+	if err := s.store.UpdatePlacementState(
+		ctx,
+		sandboxID,
+		placement.WorkerID,
+		[]string{"active", "paused", "error", "provisioning"},
+		"destroying",
+	); err != nil {
+		return err
+	}
+	if err := s.workerClient(placement.Endpoint).Destroy(ctx, sandboxID); err != nil &&
+		!strings.Contains(strings.ToLower(err.Error()), "not found") {
+		return fmt.Errorf("destroy sandbox on worker: %w", err)
+	}
+	return s.store.ReleasePlacement(ctx, sandboxID, "destroyed")
+}
+
+func (s *Service) ReportWorkerState(ctx context.Context, workerID, sandboxID, state string) error {
+	workerID = strings.TrimSpace(workerID)
+	sandboxID = strings.TrimSpace(sandboxID)
+	state = strings.TrimSpace(state)
+	if !workerIDPattern.MatchString(workerID) {
+		return fmt.Errorf("invalid worker id %q", workerID)
+	}
+	if sandboxID == "" {
+		return errors.New("sandbox id is required")
+	}
+
+	switch state {
+	case "destroyed":
+		return s.store.ReleaseWorkerPlacement(ctx, sandboxID, workerID, "destroyed")
+	case "paused":
+		return s.store.UpdatePlacementState(ctx, sandboxID, workerID, []string{"active"}, "paused")
+	case "active":
+		return s.store.UpdatePlacementState(ctx, sandboxID, workerID, []string{"paused", "provisioning"}, "active")
+	default:
+		return fmt.Errorf("invalid worker sandbox state %q", state)
+	}
+}
+
+func (s *Service) workerTransition(
+	ctx context.Context,
+	sandboxID string,
+	from []string,
+	to string,
+	operation func(WorkerClient, string) error,
+) error {
+	if s.workerClient == nil {
+		return errors.New("worker client is not configured")
+	}
+	placement, ok, err := s.Placement(ctx, sandboxID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrSandboxNotFound
+	}
+	if err := operation(s.workerClient(placement.Endpoint), sandboxID); err != nil {
+		return err
+	}
+	return s.store.UpdatePlacementState(ctx, sandboxID, placement.WorkerID, from, to)
 }
 
 func validateEndpoint(endpoint string) error {

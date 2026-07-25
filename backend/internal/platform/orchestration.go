@@ -157,7 +157,7 @@ func (c *Client) ReservePlacement(ctx context.Context, sandboxID string, request
 
 	if _, err := tx.Exec(ctx, `
 		UPDATE sandboxes
-		SET host_id=$2, updated_at=now()
+		SET host_id=$2, state='provisioning', updated_at=now()
 		WHERE id::text=$1`,
 		sandboxID,
 		placement.WorkerID,
@@ -189,7 +189,50 @@ func (c *Client) GetPlacement(ctx context.Context, sandboxID string) (orchestrat
 	return placement, true, nil
 }
 
-func (c *Client) ReleasePlacement(ctx context.Context, sandboxID string) error {
+func (c *Client) UpdatePlacementState(ctx context.Context, sandboxID, workerID string, fromStates []string, toState string) error {
+	tag, err := c.pool.Exec(ctx, `
+		UPDATE sandboxes
+		SET state=$4, updated_at=now()
+		WHERE id::text=$1
+		  AND host_id=$2
+		  AND state=ANY($3)`,
+		sandboxID,
+		workerID,
+		fromStates,
+		toState,
+	)
+	if err != nil {
+		return fmt.Errorf("update sandbox placement state: %w", err)
+	}
+	if tag.RowsAffected() > 0 {
+		return nil
+	}
+
+	var currentState string
+	var currentWorkerID *string
+	err = c.pool.QueryRow(ctx, `SELECT state, host_id FROM sandboxes WHERE id::text=$1`, sandboxID).
+		Scan(&currentState, &currentWorkerID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return orchestrator.ErrSandboxNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("read sandbox state after transition conflict: %w", err)
+	}
+	if currentState == toState && currentWorkerID != nil && *currentWorkerID == workerID {
+		return nil
+	}
+	return orchestrator.ErrInvalidState
+}
+
+func (c *Client) ReleasePlacement(ctx context.Context, sandboxID, finalState string) error {
+	return c.releasePlacement(ctx, sandboxID, "", finalState)
+}
+
+func (c *Client) ReleaseWorkerPlacement(ctx context.Context, sandboxID, workerID, finalState string) error {
+	return c.releasePlacement(ctx, sandboxID, workerID, finalState)
+}
+
+func (c *Client) releasePlacement(ctx context.Context, sandboxID, expectedWorkerID, finalState string) error {
 	tx, err := c.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("begin placement release: %w", err)
@@ -198,13 +241,14 @@ func (c *Client) ReleasePlacement(ctx context.Context, sandboxID string) error {
 
 	var workerID *string
 	var vcpus, memoryMB, diskGB int
+	var currentState string
 	err = tx.QueryRow(ctx, `
-		SELECT host_id, vcpus, memory_mb, disk_gb
+		SELECT host_id, vcpus, memory_mb, disk_gb, state
 		FROM sandboxes
 		WHERE id::text=$1
 		FOR UPDATE`,
 		sandboxID,
-	).Scan(&workerID, &vcpus, &memoryMB, &diskGB)
+	).Scan(&workerID, &vcpus, &memoryMB, &diskGB, &currentState)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return orchestrator.ErrSandboxNotFound
@@ -212,7 +256,27 @@ func (c *Client) ReleasePlacement(ctx context.Context, sandboxID string) error {
 		return fmt.Errorf("lock sandbox placement for release: %w", err)
 	}
 	if workerID == nil {
+		if expectedWorkerID != "" {
+			if currentState == finalState {
+				return tx.Commit(ctx)
+			}
+			return orchestrator.ErrInvalidState
+		}
+		if finalState != "" {
+			if _, err := tx.Exec(ctx, `
+				UPDATE sandboxes
+				SET state=$2, updated_at=now()
+				WHERE id::text=$1`,
+				sandboxID,
+				finalState,
+			); err != nil {
+				return fmt.Errorf("finalize unplaced sandbox: %w", err)
+			}
+		}
 		return tx.Commit(ctx)
+	}
+	if expectedWorkerID != "" && *workerID != expectedWorkerID {
+		return orchestrator.ErrInvalidState
 	}
 
 	if _, err := tx.Exec(ctx, `
@@ -232,9 +296,12 @@ func (c *Client) ReleasePlacement(ctx context.Context, sandboxID string) error {
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE sandboxes
-		SET host_id=NULL, updated_at=now()
+		SET host_id=NULL,
+		    state=CASE WHEN $2='' THEN state ELSE $2 END,
+		    updated_at=now()
 		WHERE id::text=$1`,
 		sandboxID,
+		finalState,
 	); err != nil {
 		return fmt.Errorf("clear sandbox placement: %w", err)
 	}

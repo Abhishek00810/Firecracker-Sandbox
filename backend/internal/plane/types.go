@@ -27,6 +27,7 @@ type SessionInfo struct {
 
 // CreateRequest is what the control plane sends to boot a sandbox on an agent.
 type CreateRequest struct {
+	SandboxID    string            `json:"sandbox_id"`
 	UserID       string            `json:"user_id"`
 	BillingModel string            `json:"billing_model"`
 	Env          map[string]string `json:"env,omitempty"`
