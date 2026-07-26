@@ -35,6 +35,10 @@ func main() {
 	service := orchestrator.NewService(
 		db,
 		cfg.HeartbeatTTL,
+		orchestrator.WithPlacementPolicy(orchestrator.PlacementPolicy{
+			CPUOvercommitRatio:    cfg.CPUOvercommitRatio,
+			MemoryOvercommitRatio: cfg.MemoryOvercommitRatio,
+		}),
 		orchestrator.WithWorkerClientFactory(func(endpoint string) orchestrator.WorkerClient {
 			return agent.NewClient(endpoint, cfg.WorkerToken)
 		}),
@@ -50,7 +54,12 @@ func main() {
 	}
 
 	go func() {
-		slog.Info("orchestrator listening", "port", cfg.Port)
+		slog.Info(
+			"orchestrator listening",
+			"port", cfg.Port,
+			"cpu_overcommit_ratio", cfg.CPUOvercommitRatio,
+			"memory_overcommit_ratio", cfg.MemoryOvercommitRatio,
+		)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("orchestrator server failed", "err", err)
 			os.Exit(1)

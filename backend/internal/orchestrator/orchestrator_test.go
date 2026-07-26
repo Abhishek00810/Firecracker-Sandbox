@@ -16,6 +16,7 @@ type fakeStore struct {
 	heartbeatAt   time.Time
 	sandboxID     string
 	request       PlacementRequest
+	policy        PlacementPolicy
 	healthyAfter  time.Time
 	placement     Placement
 	updatedFrom   []string
@@ -35,8 +36,8 @@ func (f *fakeStore) RecordHeartbeat(_ context.Context, id string, at time.Time) 
 	return f.err
 }
 
-func (f *fakeStore) ReservePlacement(_ context.Context, sandboxID string, request PlacementRequest, healthyAfter time.Time) (Placement, error) {
-	f.sandboxID, f.request, f.healthyAfter = sandboxID, request, healthyAfter
+func (f *fakeStore) ReservePlacement(_ context.Context, sandboxID string, request PlacementRequest, policy PlacementPolicy, healthyAfter time.Time) (Placement, error) {
+	f.sandboxID, f.request, f.policy, f.healthyAfter = sandboxID, request, policy, healthyAfter
 	return f.placement, f.err
 }
 
@@ -136,7 +137,14 @@ func TestPlaceUsesHeartbeatCutoff(t *testing.T) {
 		WorkerID:  "worker-1",
 		Endpoint:  "http://worker-1.internal:9876",
 	}}
-	svc := NewService(store, 45*time.Second)
+	svc := NewService(
+		store,
+		45*time.Second,
+		WithPlacementPolicy(PlacementPolicy{
+			CPUOvercommitRatio:    2,
+			MemoryOvercommitRatio: 1,
+		}),
+	)
 	now := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
 	svc.now = func() time.Time { return now }
 
@@ -149,6 +157,9 @@ func TestPlaceUsesHeartbeatCutoff(t *testing.T) {
 	}
 	if store.request.Pool != "default" {
 		t.Fatalf("unexpected pool %q", store.request.Pool)
+	}
+	if store.policy.CPUOvercommitRatio != 2 || store.policy.MemoryOvercommitRatio != 1 {
+		t.Fatalf("unexpected placement policy: %+v", store.policy)
 	}
 	wantCutoff := now.Add(-45 * time.Second)
 	if !store.healthyAfter.Equal(wantCutoff) {

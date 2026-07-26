@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -10,11 +11,13 @@ import (
 )
 
 type Config struct {
-	DatabaseURL  string
-	Port         string
-	Token        string
-	WorkerToken  string
-	HeartbeatTTL time.Duration
+	DatabaseURL           string
+	Port                  string
+	Token                 string
+	WorkerToken           string
+	HeartbeatTTL          time.Duration
+	CPUOvercommitRatio    float64
+	MemoryOvercommitRatio float64
 }
 
 func Load() (*Config, error) {
@@ -42,7 +45,31 @@ func Load() (*Config, error) {
 		ttlSeconds = value
 	}
 	cfg.HeartbeatTTL = time.Duration(ttlSeconds) * time.Second
+
+	cpuOvercommitRatio, err := overcommitRatio("ORCHESTRATOR_CPU_OVERCOMMIT_RATIO")
+	if err != nil {
+		return nil, err
+	}
+	cfg.CPUOvercommitRatio = cpuOvercommitRatio
+
+	memoryOvercommitRatio, err := overcommitRatio("ORCHESTRATOR_MEMORY_OVERCOMMIT_RATIO")
+	if err != nil {
+		return nil, err
+	}
+	cfg.MemoryOvercommitRatio = memoryOvercommitRatio
 	return cfg, nil
+}
+
+func overcommitRatio(name string) (float64, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return 1, nil
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < 1 {
+		return 0, fmt.Errorf("%s must be a finite number greater than or equal to 1", name)
+	}
+	return value, nil
 }
 
 func defaultString(value, fallback string) string {
