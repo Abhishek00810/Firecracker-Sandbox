@@ -49,6 +49,7 @@ type Placement struct {
 	SandboxID string `json:"sandbox_id"`
 	WorkerID  string `json:"worker_id"`
 	Endpoint  string `json:"endpoint"`
+	State     string `json:"state,omitempty"`
 }
 
 type ProvisionRequest struct {
@@ -71,6 +72,9 @@ type Store interface {
 	ReservePlacement(context.Context, string, PlacementRequest, PlacementPolicy, time.Time) (Placement, error)
 	GetPlacement(context.Context, string) (Placement, bool, error)
 	UpdatePlacementState(context.Context, string, string, []string, string) error
+	PausePlacement(context.Context, string, string) error
+	ReserveResume(context.Context, string, string, PlacementPolicy, time.Time) error
+	CancelResume(context.Context, string, string) error
 	ReleasePlacement(context.Context, string, string) error
 	ReleaseWorkerPlacement(context.Context, string, string, string) error
 }
@@ -232,15 +236,73 @@ func (s *Service) Provision(ctx context.Context, request ProvisionRequest) (Plac
 }
 
 func (s *Service) Pause(ctx context.Context, sandboxID string) error {
-	return s.workerTransition(ctx, sandboxID, []string{"active"}, "paused", func(client WorkerClient, id string) error {
-		return client.Pause(ctx, id)
-	})
+	if s.workerClient == nil {
+		return errors.New("worker client is not configured")
+	}
+	placement, ok, err := s.Placement(ctx, sandboxID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrSandboxNotFound
+	}
+	if err := s.workerClient(placement.Endpoint).Pause(ctx, sandboxID); err != nil {
+		return err
+	}
+	return s.store.PausePlacement(ctx, sandboxID, placement.WorkerID)
 }
 
 func (s *Service) Resume(ctx context.Context, sandboxID string) error {
-	return s.workerTransition(ctx, sandboxID, []string{"paused"}, "active", func(client WorkerClient, id string) error {
-		return client.Resume(ctx, id)
-	})
+	if s.workerClient == nil {
+		return errors.New("worker client is not configured")
+	}
+	placement, ok, err := s.Placement(ctx, sandboxID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrSandboxNotFound
+	}
+
+	healthyAfter := s.now().UTC().Add(-s.heartbeatTTL)
+	if err := s.store.ReserveResume(
+		ctx,
+		sandboxID,
+		placement.WorkerID,
+		s.placementPolicy,
+		healthyAfter,
+	); err != nil {
+		return err
+	}
+
+	client := s.workerClient(placement.Endpoint)
+	if err := client.Resume(ctx, sandboxID); err != nil {
+		// A timed-out restore may still have created a running VM. Pause it before
+		// returning the compute reservation to avoid an untracked active sandbox.
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		cleanupErr := client.Pause(cleanupCtx, sandboxID)
+		cancel()
+		if cleanupErr != nil {
+			return errors.Join(
+				fmt.Errorf("resume sandbox on worker: %w", err),
+				fmt.Errorf("resume cleanup failed; capacity remains reserved: %w", cleanupErr),
+			)
+		}
+		if cancelErr := s.store.CancelResume(ctx, sandboxID, placement.WorkerID); cancelErr != nil {
+			return errors.Join(
+				fmt.Errorf("resume sandbox on worker: %w", err),
+				fmt.Errorf("release failed resume reservation: %w", cancelErr),
+			)
+		}
+		return fmt.Errorf("resume sandbox on worker: %w", err)
+	}
+	return s.store.UpdatePlacementState(
+		ctx,
+		sandboxID,
+		placement.WorkerID,
+		[]string{"resuming"},
+		"active",
+	)
 }
 
 func (s *Service) Destroy(ctx context.Context, sandboxID string) error {
@@ -254,14 +316,18 @@ func (s *Service) Destroy(ctx context.Context, sandboxID string) error {
 	if !ok {
 		return s.store.ReleasePlacement(ctx, sandboxID, "destroyed")
 	}
-	if err := s.store.UpdatePlacementState(
-		ctx,
-		sandboxID,
-		placement.WorkerID,
-		[]string{"active", "paused", "error", "provisioning"},
-		"destroying",
-	); err != nil {
-		return err
+	// A paused sandbox has no compute reservation. Keep that state until the
+	// final release so the store knows to release only its retained disk.
+	if placement.State != "paused" {
+		if err := s.store.UpdatePlacementState(
+			ctx,
+			sandboxID,
+			placement.WorkerID,
+			[]string{"active", "error", "provisioning", "resuming"},
+			"destroying",
+		); err != nil {
+			return err
+		}
 	}
 	if err := s.workerClient(placement.Endpoint).Destroy(ctx, sandboxID); err != nil &&
 		!strings.Contains(strings.ToLower(err.Error()), "not found") {
@@ -285,35 +351,14 @@ func (s *Service) ReportWorkerState(ctx context.Context, workerID, sandboxID, st
 	case "destroyed":
 		return s.store.ReleaseWorkerPlacement(ctx, sandboxID, workerID, "destroyed")
 	case "paused":
-		return s.store.UpdatePlacementState(ctx, sandboxID, workerID, []string{"active"}, "paused")
+		return s.store.PausePlacement(ctx, sandboxID, workerID)
 	case "active":
-		return s.store.UpdatePlacementState(ctx, sandboxID, workerID, []string{"paused", "provisioning"}, "active")
+		// A paused sandbox cannot become active until Resume has atomically
+		// reacquired compute capacity and moved it to resuming.
+		return s.store.UpdatePlacementState(ctx, sandboxID, workerID, []string{"resuming", "provisioning"}, "active")
 	default:
 		return fmt.Errorf("invalid worker sandbox state %q", state)
 	}
-}
-
-func (s *Service) workerTransition(
-	ctx context.Context,
-	sandboxID string,
-	from []string,
-	to string,
-	operation func(WorkerClient, string) error,
-) error {
-	if s.workerClient == nil {
-		return errors.New("worker client is not configured")
-	}
-	placement, ok, err := s.Placement(ctx, sandboxID)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return ErrSandboxNotFound
-	}
-	if err := operation(s.workerClient(placement.Endpoint), sandboxID); err != nil {
-		return err
-	}
-	return s.store.UpdatePlacementState(ctx, sandboxID, placement.WorkerID, from, to)
 }
 
 func validateEndpoint(endpoint string) error {

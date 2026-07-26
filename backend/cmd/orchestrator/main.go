@@ -32,6 +32,14 @@ func main() {
 	}
 	defer db.Close()
 
+	reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := db.ReconcileWorkerReservations(reconcileCtx); err != nil {
+		reconcileCancel()
+		slog.Error("orchestrator reservation reconciliation failed", "err", err)
+		os.Exit(1)
+	}
+	reconcileCancel()
+
 	service := orchestrator.NewService(
 		db,
 		cfg.HeartbeatTTL,

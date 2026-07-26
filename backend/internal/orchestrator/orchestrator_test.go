@@ -10,20 +10,23 @@ import (
 )
 
 type fakeStore struct {
-	registration  WorkerRegistration
-	registeredAt  time.Time
-	heartbeatID   string
-	heartbeatAt   time.Time
-	sandboxID     string
-	request       PlacementRequest
-	policy        PlacementPolicy
-	healthyAfter  time.Time
-	placement     Placement
-	updatedFrom   []string
-	updatedState  string
-	releaseState  string
-	releaseWorker string
-	err           error
+	registration   WorkerRegistration
+	registeredAt   time.Time
+	heartbeatID    string
+	heartbeatAt    time.Time
+	sandboxID      string
+	request        PlacementRequest
+	policy         PlacementPolicy
+	healthyAfter   time.Time
+	placement      Placement
+	updatedFrom    []string
+	updatedState   string
+	paused         bool
+	resumeReserved bool
+	resumeCanceled bool
+	releaseState   string
+	releaseWorker  string
+	err            error
 }
 
 func (f *fakeStore) RegisterWorker(_ context.Context, registration WorkerRegistration, at time.Time) error {
@@ -50,6 +53,24 @@ func (f *fakeStore) UpdatePlacementState(_ context.Context, _, _ string, from []
 	return f.err
 }
 
+func (f *fakeStore) PausePlacement(_ context.Context, _, _ string) error {
+	f.paused = true
+	f.updatedState = "paused"
+	return f.err
+}
+
+func (f *fakeStore) ReserveResume(_ context.Context, _, _ string, policy PlacementPolicy, healthyAfter time.Time) error {
+	f.resumeReserved = true
+	f.policy = policy
+	f.healthyAfter = healthyAfter
+	return f.err
+}
+
+func (f *fakeStore) CancelResume(_ context.Context, _, _ string) error {
+	f.resumeCanceled = true
+	return f.err
+}
+
 func (f *fakeStore) ReleasePlacement(_ context.Context, _ string, state string) error {
 	f.releaseState = state
 	return f.err
@@ -67,6 +88,8 @@ type fakeWorkerClient struct {
 	paused    string
 	resumed   string
 	destroyed string
+	pauseErr  error
+	resumeErr error
 }
 
 func (f *fakeWorkerClient) Create(_ context.Context, request plane.CreateRequest) (plane.CreateResponse, error) {
@@ -76,12 +99,12 @@ func (f *fakeWorkerClient) Create(_ context.Context, request plane.CreateRequest
 
 func (f *fakeWorkerClient) Pause(_ context.Context, id string) error {
 	f.paused = id
-	return nil
+	return f.pauseErr
 }
 
 func (f *fakeWorkerClient) Resume(_ context.Context, id string) error {
 	f.resumed = id
-	return nil
+	return f.resumeErr
 }
 
 func (f *fakeWorkerClient) Destroy(_ context.Context, id string) error {
@@ -258,7 +281,7 @@ func TestLifecycleCommandsReachPlacedWorkerAndUpdateState(t *testing.T) {
 	if err := pauseService.Pause(context.Background(), "sandbox-1"); err != nil {
 		t.Fatal(err)
 	}
-	if pauseWorker.paused != "sandbox-1" || pauseStore.updatedState != "paused" {
+	if pauseWorker.paused != "sandbox-1" || !pauseStore.paused || pauseStore.updatedState != "paused" {
 		t.Fatalf("pause worker=%q state=%q", pauseWorker.paused, pauseStore.updatedState)
 	}
 
@@ -266,7 +289,7 @@ func TestLifecycleCommandsReachPlacedWorkerAndUpdateState(t *testing.T) {
 	if err := resumeService.Resume(context.Background(), "sandbox-1"); err != nil {
 		t.Fatal(err)
 	}
-	if resumeWorker.resumed != "sandbox-1" || resumeStore.updatedState != "active" {
+	if resumeWorker.resumed != "sandbox-1" || !resumeStore.resumeReserved || resumeStore.updatedState != "active" {
 		t.Fatalf("resume worker=%q state=%q", resumeWorker.resumed, resumeStore.updatedState)
 	}
 
@@ -283,5 +306,82 @@ func TestLifecycleCommandsReachPlacedWorkerAndUpdateState(t *testing.T) {
 			destroyStore.updatedState,
 			destroyStore.releaseState,
 		)
+	}
+}
+
+func TestResumeFailurePausesWorkerBeforeReleasingReservation(t *testing.T) {
+	store := &fakeStore{placement: Placement{
+		SandboxID: "sandbox-1",
+		WorkerID:  "worker-1",
+		Endpoint:  "http://worker-1.internal:9876",
+		State:     "paused",
+	}}
+	worker := &fakeWorkerClient{resumeErr: errors.New("restore timed out")}
+	service := NewService(
+		store,
+		time.Minute,
+		WithWorkerClientFactory(func(string) WorkerClient { return worker }),
+	)
+
+	err := service.Resume(context.Background(), "sandbox-1")
+	if err == nil {
+		t.Fatal("expected resume failure")
+	}
+	if !store.resumeReserved || !store.resumeCanceled {
+		t.Fatalf("reserved=%v canceled=%v", store.resumeReserved, store.resumeCanceled)
+	}
+	if worker.resumed != "sandbox-1" || worker.paused != "sandbox-1" {
+		t.Fatalf("resume=%q cleanup pause=%q", worker.resumed, worker.paused)
+	}
+}
+
+func TestResumeCleanupFailureKeepsReservation(t *testing.T) {
+	store := &fakeStore{placement: Placement{
+		SandboxID: "sandbox-1",
+		WorkerID:  "worker-1",
+		Endpoint:  "http://worker-1.internal:9876",
+		State:     "paused",
+	}}
+	worker := &fakeWorkerClient{
+		resumeErr: errors.New("restore timed out"),
+		pauseErr:  errors.New("worker unreachable"),
+	}
+	service := NewService(
+		store,
+		time.Minute,
+		WithWorkerClientFactory(func(string) WorkerClient { return worker }),
+	)
+
+	err := service.Resume(context.Background(), "sandbox-1")
+	if err == nil {
+		t.Fatal("expected resume failure")
+	}
+	if store.resumeCanceled {
+		t.Fatal("capacity must remain reserved when cleanup cannot confirm the VM is paused")
+	}
+}
+
+func TestDestroyPausedPlacementSkipsComputeDestroyingTransition(t *testing.T) {
+	store := &fakeStore{placement: Placement{
+		SandboxID: "sandbox-1",
+		WorkerID:  "worker-1",
+		Endpoint:  "http://worker-1.internal:9876",
+		State:     "paused",
+	}}
+	worker := &fakeWorkerClient{}
+	service := NewService(
+		store,
+		time.Minute,
+		WithWorkerClientFactory(func(string) WorkerClient { return worker }),
+	)
+
+	if err := service.Destroy(context.Background(), "sandbox-1"); err != nil {
+		t.Fatal(err)
+	}
+	if store.updatedState == "destroying" {
+		t.Fatal("paused placement must stay paused until disk-only release")
+	}
+	if store.releaseState != "destroyed" {
+		t.Fatalf("release state=%q", store.releaseState)
 	}
 }
