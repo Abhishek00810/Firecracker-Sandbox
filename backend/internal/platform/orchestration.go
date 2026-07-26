@@ -65,7 +65,13 @@ func (c *Client) RecordHeartbeat(ctx context.Context, workerID string, heartbeat
 	return nil
 }
 
-func (c *Client) ReservePlacement(ctx context.Context, sandboxID string, request orchestrator.PlacementRequest, healthyAfter time.Time) (orchestrator.Placement, error) {
+func (c *Client) ReservePlacement(
+	ctx context.Context,
+	sandboxID string,
+	request orchestrator.PlacementRequest,
+	policy orchestrator.PlacementPolicy,
+	healthyAfter time.Time,
+) (orchestrator.Placement, error) {
 	tx, err := c.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return orchestrator.Placement{}, fmt.Errorf("begin placement transaction: %w", err)
@@ -116,13 +122,13 @@ func (c *Client) ReservePlacement(ctx context.Context, sandboxID string, request
 		  AND status='active'
 		  AND NOT draining
 		  AND last_heartbeat_at >= $2
-		  AND allocatable_vcpus-reserved_vcpus >= $3
-		  AND allocatable_memory_mb-reserved_memory_mb >= $4
+		  AND FLOOR(allocatable_vcpus * $6)-reserved_vcpus >= $3
+		  AND FLOOR(allocatable_memory_mb * $7)-reserved_memory_mb >= $4
 		  AND allocatable_disk_gb-reserved_disk_gb >= $5
 		  AND max_sandboxes-reserved_sandboxes >= 1
 		ORDER BY
-		  allocatable_memory_mb-reserved_memory_mb-$4 ASC,
-		  allocatable_vcpus-reserved_vcpus-$3 ASC,
+		  FLOOR(allocatable_memory_mb * $7)-reserved_memory_mb-$4 ASC,
+		  FLOOR(allocatable_vcpus * $6)-reserved_vcpus-$3 ASC,
 		  id ASC
 		FOR UPDATE SKIP LOCKED
 		LIMIT 1`,
@@ -131,6 +137,8 @@ func (c *Client) ReservePlacement(ctx context.Context, sandboxID string, request
 		vcpus,
 		memoryMB,
 		diskGB,
+		policy.CPUOvercommitRatio,
+		policy.MemoryOvercommitRatio,
 	).Scan(&placement.WorkerID, &placement.Endpoint)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

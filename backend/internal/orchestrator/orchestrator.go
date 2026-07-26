@@ -38,6 +38,13 @@ type PlacementRequest struct {
 	Pool string `json:"pool"`
 }
 
+// PlacementPolicy is owned by the orchestrator and cannot be overridden by an
+// API caller. Workers continue to advertise their physical capacity.
+type PlacementPolicy struct {
+	CPUOvercommitRatio    float64
+	MemoryOvercommitRatio float64
+}
+
 type Placement struct {
 	SandboxID string `json:"sandbox_id"`
 	WorkerID  string `json:"worker_id"`
@@ -61,7 +68,7 @@ type WorkerClientFactory func(endpoint string) WorkerClient
 type Store interface {
 	RegisterWorker(context.Context, WorkerRegistration, time.Time) error
 	RecordHeartbeat(context.Context, string, time.Time) error
-	ReservePlacement(context.Context, string, PlacementRequest, time.Time) (Placement, error)
+	ReservePlacement(context.Context, string, PlacementRequest, PlacementPolicy, time.Time) (Placement, error)
 	GetPlacement(context.Context, string) (Placement, bool, error)
 	UpdatePlacementState(context.Context, string, string, []string, string) error
 	ReleasePlacement(context.Context, string, string) error
@@ -69,10 +76,11 @@ type Store interface {
 }
 
 type Service struct {
-	store        Store
-	heartbeatTTL time.Duration
-	now          func() time.Time
-	workerClient WorkerClientFactory
+	store           Store
+	heartbeatTTL    time.Duration
+	now             func() time.Time
+	workerClient    WorkerClientFactory
+	placementPolicy PlacementPolicy
 }
 
 type Option func(*Service)
@@ -83,11 +91,22 @@ func WithWorkerClientFactory(factory WorkerClientFactory) Option {
 	}
 }
 
+func WithPlacementPolicy(policy PlacementPolicy) Option {
+	return func(service *Service) {
+		service.placementPolicy = normalizePlacementPolicy(policy)
+	}
+}
+
 func NewService(store Store, heartbeatTTL time.Duration, options ...Option) *Service {
 	if heartbeatTTL <= 0 {
 		heartbeatTTL = 30 * time.Second
 	}
-	service := &Service{store: store, heartbeatTTL: heartbeatTTL, now: time.Now}
+	service := &Service{
+		store:           store,
+		heartbeatTTL:    heartbeatTTL,
+		now:             time.Now,
+		placementPolicy: normalizePlacementPolicy(PlacementPolicy{}),
+	}
 	for _, option := range options {
 		option(service)
 	}
@@ -134,7 +153,17 @@ func (s *Service) Place(ctx context.Context, sandboxID string, request Placement
 		request.Pool = "default"
 	}
 	healthyAfter := s.now().UTC().Add(-s.heartbeatTTL)
-	return s.store.ReservePlacement(ctx, sandboxID, request, healthyAfter)
+	return s.store.ReservePlacement(ctx, sandboxID, request, s.placementPolicy, healthyAfter)
+}
+
+func normalizePlacementPolicy(policy PlacementPolicy) PlacementPolicy {
+	if policy.CPUOvercommitRatio < 1 {
+		policy.CPUOvercommitRatio = 1
+	}
+	if policy.MemoryOvercommitRatio < 1 {
+		policy.MemoryOvercommitRatio = 1
+	}
+	return policy
 }
 
 func (s *Service) Placement(ctx context.Context, sandboxID string) (Placement, bool, error) {
