@@ -65,16 +65,33 @@ func main() {
 	mgr := h.VMManager
 	ctx := context.Background()
 
-	// Artifact store: local directory for now (an Azure Blob / R2 store slots in
-	// behind template.ArtifactStore later, reading credentials from the environment).
-	storeDir := env("TEMPLATE_STORE_DIR", filepath.Join(cfg.RootDirectory, "template-store"))
 	snapRoot := env("TEMPLATE_BUILD_DIR", filepath.Join(cfg.SnapshotDir, "build"))
-	store, err := template.NewLocalStore(storeDir)
-	if err != nil {
-		slog.Error("open local artifact store", "dir", storeDir, "err", err)
-		os.Exit(1)
+
+	// Durable store: Azure Blob when BLOB_STORAGE_ACCOUNT is set (unless overridden
+	// with TEMPLATE_STORE=local), else a local directory. Credentials come from env.
+	var baseStore template.ArtifactStore
+	if acct := env("BLOB_STORAGE_ACCOUNT", ""); acct != "" && env("TEMPLATE_STORE", "blob") != "local" {
+		bs, err := template.NewAzureBlobStore(acct, env("BLOB_SECRET_KEY", ""), env("BLOB_CONTAINER_NAME", ""))
+		if err != nil {
+			slog.Error("open azure blob store", "err", err)
+			os.Exit(1)
+		}
+		baseStore = bs
+		slog.Info("publishing to Azure Blob", "account", acct, "container", env("BLOB_CONTAINER_NAME", ""))
+	} else {
+		storeDir := env("TEMPLATE_STORE_DIR", filepath.Join(cfg.RootDirectory, "template-store"))
+		ls, err := template.NewLocalStore(storeDir)
+		if err != nil {
+			slog.Error("open local artifact store", "dir", storeDir, "err", err)
+			os.Exit(1)
+		}
+		baseStore = ls
+		slog.Info("publishing to local store", "dir", storeDir)
 	}
-	repo := template.NewStoreManifestRepository(store)
+	// Manifest + active pointer stay on the RAW store (small, human-readable JSON);
+	// large artifacts go through a gzip layer (mostly-zero seeds shrink hugely).
+	repo := template.NewStoreManifestRepository(baseStore)
+	artifactStore := template.NewCompressedStore(baseStore)
 
 	f, err := gatherFacts(cfg)
 	if err != nil {
@@ -87,12 +104,18 @@ func main() {
 		"rootfs_digest", short(f.rootfsDigest), "kernel_digest", short(f.kernelDigest))
 
 	stamp := time.Now().UTC().Format("20060102-150405")
-	npmProvision := []string{"pip3 install --no-cache-dir numpy"}
+	// Baking a package (e.g. numpy) needs the build VM to reach the internet, which the
+	// cold-boot build path does not provide yet. So standard templates are warmed-only by
+	// default (matching the current worker); set STANDARD_PROVISION once build-VM egress lands.
+	var stdProvision []string
+	if p := env("STANDARD_PROVISION", ""); p != "" {
+		stdProvision = []string{p}
+	}
 
-	// ---- standard release: nano/small/medium with numpy, activated for serving ----
+	// ---- standard release: nano/small/medium (warmed), activated for serving ----
 	if envBool("BUILD_STANDARD", true) {
 		var variants []template.BuiltVariant
-		for _, s := range standardSpecs(npmProvision) {
+		for _, s := range standardSpecs(stdProvision) {
 			slog.Info("building standard variant", "size", s.Name, "vcpus", s.VCPUs, "memory_mb", s.MemoryMB, "disk_mb", s.DiskMB)
 			bv, err := buildAndValidate(ctx, mgr, cfg, s, filepath.Join(snapRoot, "standard"))
 			if err != nil {
@@ -103,7 +126,7 @@ func main() {
 			time.Sleep(2 * time.Second) // let the previous build VM's kernel-side teardown settle
 		}
 		releaseID := "standard-" + stamp
-		m, err := template.PublishRelease(ctx, store, repo, releaseInputs(releaseID, f, variants))
+		m, err := template.PublishRelease(ctx, artifactStore, repo, releaseInputs(releaseID, f, variants))
 		if err != nil {
 			slog.Error("publish standard release", "err", err)
 			os.Exit(1)
@@ -125,7 +148,7 @@ func main() {
 			os.Exit(1)
 		}
 		releaseID := "micro-" + stamp
-		m, err := template.PublishRelease(ctx, store, repo, releaseInputs(releaseID, f, []template.BuiltVariant{bv}))
+		m, err := template.PublishRelease(ctx, artifactStore, repo, releaseInputs(releaseID, f, []template.BuiltVariant{bv}))
 		if err != nil {
 			slog.Error("publish micro release", "err", err)
 			os.Exit(1)
@@ -133,7 +156,7 @@ func main() {
 		slog.Info("micro benchmark release published (not activated)", "release_id", m.ReleaseID)
 	}
 
-	slog.Info("template builder finished", "store", storeDir)
+	slog.Info("template builder finished")
 }
 
 func releaseInputs(releaseID string, f facts, variants []template.BuiltVariant) template.ReleaseInputs {
