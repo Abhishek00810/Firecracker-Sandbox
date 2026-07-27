@@ -31,15 +31,18 @@ const (
 	VMStateDestroyed VMState = "destroyed"
 )
 
-// defaultWritableDiskGB sizes the per-VM writable upper disk when a VMConfig leaves
-// DiskGB unset. The upper layer is disk-backed (not tmpfs) so heavy installs land on
-// disk, not RAM. The size is fixed at template-build time and uniform across restores.
-const defaultWritableDiskGB = 10
+// defaultWritableDiskMB sizes the per-VM writable upper disk when a VMConfig leaves
+// both DiskMB and DiskGB unset. The upper layer is disk-backed (not tmpfs) so heavy
+// installs land on disk, not RAM. Fixed at build time, uniform across restores.
+const defaultWritableDiskMB = 10 * 1024
 
 type VMConfig struct {
 	VCPUCount  int
 	MemSizeMiB int
-	DiskGB     int // size of the per-VM writable upper disk (/dev/vdb) in GiB; 0 = default
+	// Per-VM writable upper disk (/dev/vdb) size. DiskMB wins when > 0 (allows sub-GB,
+	// e.g. the micro benchmark); otherwise DiskGB*1024; if both 0, defaultWritableDiskMB.
+	DiskMB     int
+	DiskGB     int // legacy whole-GB size; DiskMB takes precedence when set
 	Timeout    time.Duration
 	KernelPath string
 	RootfsPath string
@@ -348,13 +351,17 @@ func (f *FireCrackerManager) Create(ctx context.Context, cfg VMConfig) (*MicroVM
 	} else {
 		// OverlayFS mode: the writable upper layer lives on a per-VM disk (/dev/vdb),
 		// not tmpfs — so installs and user files land on disk, not RAM. Pre-format an
-		// empty ext4 sized by DiskGB; the guest init mounts it as the overlay upperdir.
-		diskGB := cfg.DiskGB
-		if diskGB <= 0 {
-			diskGB = defaultWritableDiskGB
+		// empty ext4 sized by DiskMB/DiskGB; the guest init mounts it as the overlay upperdir.
+		diskMB := cfg.DiskMB
+		if diskMB <= 0 {
+			if cfg.DiskGB > 0 {
+				diskMB = cfg.DiskGB * 1024
+			} else {
+				diskMB = defaultWritableDiskMB
+			}
 		}
 		writableDiskPath = filepath.Join(f.SocketDir, fmt.Sprintf("writable-%s.ext4", vmID))
-		if err := makeExt4(writableDiskPath, diskGB); err != nil {
+		if err := makeExt4(writableDiskPath, diskMB); err != nil {
 			return nil, fmt.Errorf("failed to create writable disk for VM %s: %w", vmID, err)
 		}
 		// Firecracker drops to an unprivileged user (FCUid) and must open this disk
@@ -401,11 +408,11 @@ func copyFile(src, dst string) error {
 	return err
 }
 
-// makeExt4 creates a sparse, pre-formatted ext4 image of sizeGB at path. It backs the
+// makeExt4 creates a sparse, pre-formatted ext4 image of sizeMB at path. It backs the
 // per-VM writable upper layer (/dev/vdb) for OverlayFS-mode VMs. Sparse: the file only
-// consumes the blocks actually written, not the full sizeGB up front.
-func makeExt4(path string, sizeGB int) error {
-	if out, err := exec.Command("truncate", "-s", fmt.Sprintf("%dG", sizeGB), path).CombinedOutput(); err != nil {
+// consumes the blocks actually written, not the full sizeMB up front.
+func makeExt4(path string, sizeMB int) error {
+	if out, err := exec.Command("truncate", "-s", fmt.Sprintf("%dM", sizeMB), path).CombinedOutput(); err != nil {
 		return fmt.Errorf("truncate %s: %w: %s", path, err, out)
 	}
 	// -F: operate on a regular file (not a block device). -m 0: no reserved blocks, so
@@ -919,7 +926,27 @@ func (f *FireCrackerManager) loadSnapshot(ctx context.Context, cfg VMConfig, tmp
 	return vm, nil
 }
 
+// TemplateBuildOptions controls what runs inside the build VM before it is
+// snapshotted. Warmup runs the Node+Python warm-up (best-effort). Provision runs
+// additional shell commands (e.g. "pip install numpy") and — unlike warm-up — a
+// provision failure ABORTS the build, so a template never ships missing a package
+// it claims to have.
+type TemplateBuildOptions struct {
+	Warmup    bool
+	Provision []string
+}
+
+// CreateTemplate builds a warmed (Node+Python) template with no extra provisioning.
+// This is the standard build path used by the worker's legacy startup build.
 func (f *FireCrackerManager) CreateTemplate(ctx context.Context, cfg VMConfig, snapDir string) (*SnapshotTemplate, error) {
+	return f.CreateTemplateWithProvision(ctx, cfg, snapDir, TemplateBuildOptions{Warmup: true})
+}
+
+// CreateTemplateWithProvision boots a build VM, optionally warms the runtimes and
+// runs provision commands inside it, then snapshots it into a reusable template.
+// The build VM is trusted and short-lived (no cgroup limits). Provision commands
+// run over vsock and must exit 0 or the build fails.
+func (f *FireCrackerManager) CreateTemplateWithProvision(ctx context.Context, cfg VMConfig, snapDir string, opts TemplateBuildOptions) (*SnapshotTemplate, error) {
 	if err := os.MkdirAll(snapDir, 0755); err != nil {
 		return nil, err
 	}
@@ -934,7 +961,7 @@ func (f *FireCrackerManager) CreateTemplate(ctx context.Context, cfg VMConfig, s
 		return nil, err
 	}
 
-	// Wait until guest agent is actually accepting connections check this our
+	// Wait until the guest agent is actually accepting vsock connections.
 	vsock := NewVsockClient(vm.VsockPath)
 	vsockReady := false
 	deadline := time.Now().Add(30 * time.Second)
@@ -951,57 +978,33 @@ func (f *FireCrackerManager) CreateTemplate(ctx context.Context, cfg VMConfig, s
 		return nil, fmt.Errorf("vsock never became ready for template VM")
 	}
 
-	// Attempt bridge warm-up inside the template VM, but do not fail template
-	// creation if a runtime is unhealthy. This keeps snapshot restore available
-	// while still logging runtime-specific issues for diagnosis.
-	nodeResp, err := vsock.Execute("1+1", "node", "stateless", 60)
-	if err != nil {
-		slog.Warn("template node warmup transport failed",
-			"vm_id", vm.ID,
-			"err", err,
-			"vm_console", vm.Stdout.String(),
-		)
-	} else {
-		nodeStderr := strings.TrimSpace(nodeResp.Stderr)
-		if nodeResp.ExitCode != 0 || strings.Contains(strings.ToLower(nodeStderr), "timeout") {
-			slog.Warn("template node warmup failed",
-				"vm_id", vm.ID,
-				"exit_code", nodeResp.ExitCode,
-				"stderr", nodeStderr,
-				"guest_duration_ms", int64(nodeResp.Duration*1000),
-				"vm_console", vm.Stdout.String(),
-			)
-		} else {
-			slog.Info("template node warmup succeeded",
-				"vm_id", vm.ID,
-				"guest_duration_ms", int64(nodeResp.Duration*1000),
-			)
-		}
+	if opts.Warmup {
+		f.warmupRuntimes(vm, vsock)
 	}
 
-	pyResp, err := vsock.Execute("pass", "python", "stateful", 60)
-	if err != nil {
-		slog.Warn("template python warmup transport failed",
-			"vm_id", vm.ID,
-			"err", err,
-			"vm_console", vm.Stdout.String(),
-		)
-	} else {
-		pyStderr := strings.TrimSpace(pyResp.Stderr)
-		if pyResp.ExitCode != 0 || strings.Contains(strings.ToLower(pyStderr), "timeout") {
-			slog.Warn("template python warmup failed",
-				"vm_id", vm.ID,
-				"exit_code", pyResp.ExitCode,
-				"stderr", pyStderr,
-				"guest_duration_ms", int64(pyResp.Duration*1000),
-				"vm_console", vm.Stdout.String(),
-			)
-		} else {
-			slog.Info("template python warmup succeeded",
-				"vm_id", vm.ID,
-				"guest_duration_ms", int64(pyResp.Duration*1000),
-			)
+	// Provision: run each command inside the build VM. Unlike warm-up, a failure
+	// here aborts the build — a template must not ship missing a package it declares.
+	if len(opts.Provision) > 0 {
+		conn, cerr := vsock.Connect()
+		if cerr != nil {
+			f.Destroy(ctx, vm.ID)
+			return nil, fmt.Errorf("provision: vsock connect for VM %s: %w", vm.ID, cerr)
 		}
+		for _, cmd := range opts.Provision {
+			resp, rerr := vsock.ExecOnConn(conn, cmd, 900)
+			if rerr != nil {
+				conn.Close()
+				f.Destroy(ctx, vm.ID)
+				return nil, fmt.Errorf("provision %q transport failed: %w", cmd, rerr)
+			}
+			if resp.ExitCode != 0 {
+				conn.Close()
+				f.Destroy(ctx, vm.ID)
+				return nil, fmt.Errorf("provision %q failed (exit %d): %s", cmd, resp.ExitCode, strings.TrimSpace(resp.Stderr))
+			}
+			slog.Info("template provision command ok", "vm_id", vm.ID, "cmd", cmd, "ms", int64(resp.Duration*1000))
+		}
+		conn.Close()
 	}
 
 	// Take snapshot
@@ -1042,4 +1045,33 @@ func (f *FireCrackerManager) CreateTemplate(ctx context.Context, cfg VMConfig, s
 		VsockPath:        vsockPath,
 		TapName:          tapName,
 	}, nil
+}
+
+// warmupRuntimes best-effort warms Node and Python inside a freshly booted build
+// VM so restored sandboxes start ready. Failures are logged, not fatal — a runtime
+// hiccup should not block a template (mirrors the original CreateTemplate behavior).
+func (f *FireCrackerManager) warmupRuntimes(vm *MicroVM, vsock *VsockClient) {
+	nodeResp, err := vsock.Execute("1+1", "node", "stateless", 60)
+	if err != nil {
+		slog.Warn("template node warmup transport failed", "vm_id", vm.ID, "err", err, "vm_console", vm.Stdout.String())
+	} else {
+		nodeStderr := strings.TrimSpace(nodeResp.Stderr)
+		if nodeResp.ExitCode != 0 || strings.Contains(strings.ToLower(nodeStderr), "timeout") {
+			slog.Warn("template node warmup failed", "vm_id", vm.ID, "exit_code", nodeResp.ExitCode, "stderr", nodeStderr, "guest_duration_ms", int64(nodeResp.Duration*1000), "vm_console", vm.Stdout.String())
+		} else {
+			slog.Info("template node warmup succeeded", "vm_id", vm.ID, "guest_duration_ms", int64(nodeResp.Duration*1000))
+		}
+	}
+
+	pyResp, err := vsock.Execute("pass", "python", "stateful", 60)
+	if err != nil {
+		slog.Warn("template python warmup transport failed", "vm_id", vm.ID, "err", err, "vm_console", vm.Stdout.String())
+	} else {
+		pyStderr := strings.TrimSpace(pyResp.Stderr)
+		if pyResp.ExitCode != 0 || strings.Contains(strings.ToLower(pyStderr), "timeout") {
+			slog.Warn("template python warmup failed", "vm_id", vm.ID, "exit_code", pyResp.ExitCode, "stderr", pyStderr, "guest_duration_ms", int64(pyResp.Duration*1000), "vm_console", vm.Stdout.String())
+		} else {
+			slog.Info("template python warmup succeeded", "vm_id", vm.ID, "guest_duration_ms", int64(pyResp.Duration*1000))
+		}
+	}
 }
