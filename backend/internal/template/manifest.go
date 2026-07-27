@@ -46,6 +46,12 @@ type Variant struct {
 	Snapshot     Artifact `json:"snapshot"`      // .snap  — CPU + device state
 	Memory       Artifact `json:"memory"`        // .mem   — RAM
 	WritableSeed Artifact `json:"writable_seed"` // .ext4  — golden upper disk seed
+	// Device names BAKED into the snapshot at build time. A restoring worker must
+	// reproduce them: Firecracker re-binds VsockPath on resume and the slot TAP is
+	// renamed to TapName. Both are absolute/host names, so builder and worker must
+	// share the same SocketDir convention (standardized).
+	VsockPath string `json:"vsock_path"`
+	TapName   string `json:"tap_name"`
 }
 
 // Manifest describes ONE immutable standard-template release (all sizes together).
@@ -111,6 +117,9 @@ func (m Manifest) Validate() error {
 		}
 		if v.VCPUs <= 0 || v.MemoryMB <= 0 || v.DiskMB <= 0 {
 			return fmt.Errorf("variant %q has non-positive resources", size)
+		}
+		if v.VsockPath == "" || v.TapName == "" {
+			return fmt.Errorf("variant %q missing baked device names (vsock_path/tap_name)", size)
 		}
 		for _, a := range []Artifact{v.Snapshot, v.Memory, v.WritableSeed} {
 			if a.SHA256 == "" {

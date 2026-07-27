@@ -93,15 +93,15 @@ func main() {
 	repo := template.NewStoreManifestRepository(baseStore)
 	artifactStore := template.NewCompressedStore(baseStore)
 
-	f, err := gatherFacts(cfg)
+	f, err := template.GatherHostFacts(cfg.RootfsPath, cfg.KernelPath, cfg.FirecrackerBinary, cfg.AssetsPath)
 	if err != nil {
 		slog.Error("gather host facts", "err", err)
 		os.Exit(1)
 	}
 	slog.Info("build host facts",
-		"arch", f.arch, "cpu_compat_class", f.cpuCompatClass,
-		"firecracker_version", f.firecrackerVersion,
-		"rootfs_digest", short(f.rootfsDigest), "kernel_digest", short(f.kernelDigest))
+		"arch", f.Arch, "cpu_compat_class", f.CPUCompatClass,
+		"firecracker_version", f.FirecrackerVersion,
+		"rootfs_digest", short(f.RootfsDigest), "kernel_digest", short(f.KernelDigest))
 
 	stamp := time.Now().UTC().Format("20060102-150405")
 	// Baking a package (e.g. numpy) needs the build VM to reach the internet, which the
@@ -159,16 +159,16 @@ func main() {
 	slog.Info("template builder finished")
 }
 
-func releaseInputs(releaseID string, f facts, variants []template.BuiltVariant) template.ReleaseInputs {
+func releaseInputs(releaseID string, f template.HostFacts, variants []template.BuiltVariant) template.ReleaseInputs {
 	return template.ReleaseInputs{
 		ReleaseID:          releaseID,
 		CreatedAt:          time.Now().UTC(),
-		Arch:               f.arch,
-		CPUCompatClass:     f.cpuCompatClass,
-		FirecrackerVersion: f.firecrackerVersion,
-		AssetBundleDigest:  f.assetBundleDigest,
-		RootfsDigest:       f.rootfsDigest,
-		KernelDigest:       f.kernelDigest,
+		Arch:               f.Arch,
+		CPUCompatClass:     f.CPUCompatClass,
+		FirecrackerVersion: f.FirecrackerVersion,
+		AssetBundleDigest:  f.AssetBundleDigest,
+		RootfsDigest:       f.RootfsDigest,
+		KernelDigest:       f.KernelDigest,
 		Variants:           variants,
 	}
 }

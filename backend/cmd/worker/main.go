@@ -18,7 +18,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
@@ -157,19 +156,19 @@ func main() {
 		BootArgs:   "console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on rng_core.default_quality=1024",
 	}
 
-	// Default-size template once at startup; each non-default size gets its own.
-	var template *firecracker.SnapshotTemplate
-	if tmpl, err := createTemplateWithRetry(vmManager, baseCfg, cfg.SnapshotDir, 3); err != nil {
-		slog.Warn("snapshot template creation failed, falling back to cold boot", "err", err)
-	} else {
-		template = tmpl
-		slog.Info("snapshot template ready", "snap", tmpl.SnapPath)
+	// Templates: download a prebuilt release from object storage (TEMPLATE_SOURCE=
+	// prebuilt — restore-only) or build them locally at startup (default). Fail closed
+	// on resolution failure — production must not silently cold-boot.
+	sizeTemplates, err := resolveTemplates(context.Background(), cfg, vmManager, baseCfg)
+	if err != nil {
+		slog.Error("template resolution failed", "err", err)
+		os.Exit(1)
 	}
+	defaultTemplate := sizeTemplates[vmsize.Default().Key()]
 
 	// One session pool per size (vmsize.Sizes is the single source of truth). cgroup
 	// limits are derived from the size, matching the monolith.
 	sizePools := make(map[string]*firecracker.VMPool, len(vmsize.Sizes))
-	sizeTemplates := make(map[string]*firecracker.SnapshotTemplate, len(vmsize.Sizes))
 	for _, sz := range vmsize.Sizes {
 		szCfg := baseCfg
 		szCfg.VCPUCount = sz.VCPUs
@@ -180,26 +179,9 @@ func main() {
 			CPUPeriodUS: vmsize.CgroupCPUPeriodUS,
 			MemMaxBytes: sz.CgroupMemMaxBytes(),
 		}
-		szTemplate := template
-		if !sz.IsDefault() {
-			snapSubDir := filepath.Join(cfg.SnapshotDir, sz.Name)
-			if err := os.MkdirAll(snapSubDir, 0o755); err != nil {
-				slog.Warn("could not create size snapshot dir", "size", sz.Name, "err", err)
-			} else if cfg.FCRunUID > 0 {
-				os.Chown(snapSubDir, cfg.FCRunUID, cfg.FCRunGID)
-			}
-			if tmpl, err := createTemplateWithRetry(vmManager, szCfg, snapSubDir, 3); err != nil {
-				slog.Warn("size template creation failed, falling back to cold boot", "size", sz.Name, "err", err)
-				szTemplate = nil
-			} else {
-				szTemplate = tmpl
-				slog.Info("size template ready", "size", sz.Name)
-			}
-		}
-		sizePools[sz.Key()] = firecracker.NewVMPoolWithSnapshot(0, slotCount, szCfg, vmManager, szCgroup, szTemplate, false, false)
-		sizeTemplates[sz.Key()] = szTemplate
+		sizePools[sz.Key()] = firecracker.NewVMPoolWithSnapshot(0, slotCount, szCfg, vmManager, szCgroup, sizeTemplates[sz.Key()], false, false)
 	}
-	slog.Info("worker execution engine initialized", "sizes", len(sizePools))
+	slog.Info("worker execution engine initialized", "sizes", len(sizePools), "template_source", env("TEMPLATE_SOURCE", "build"))
 
 	var onState session.StateHook
 	if orchestratorURL, workerID := os.Getenv("ORCHESTRATOR_URL"), os.Getenv("WORKER_ID"); orchestratorURL != "" && workerID != "" {
@@ -225,7 +207,7 @@ func main() {
 	// metering remains owned outside the worker.
 	sessionMgr := session.NewManager(
 		vmManager,
-		template,
+		defaultTemplate,
 		baseCfg,
 		envInt("WORKER_MAX_SESSIONS", slotCount),
 		5*time.Minute, // default idle timeout (per-session values from the request override)

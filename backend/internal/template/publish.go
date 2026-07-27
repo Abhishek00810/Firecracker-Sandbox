@@ -18,6 +18,8 @@ type BuiltVariant struct {
 	SnapshotPath     string // local path to the .snap
 	MemoryPath       string // local path to the .mem
 	WritableSeedPath string // local path to the golden writable-seed .ext4
+	VsockPath        string // vsock UDS path baked into the snapshot
+	TapName          string // TAP name baked into the snapshot
 }
 
 // ReleaseInputs is everything needed to publish one standard-template release:
@@ -77,6 +79,8 @@ func PublishRelease(ctx context.Context, store ArtifactStore, repo ManifestRepos
 			Snapshot:     snap,
 			Memory:       mem,
 			WritableSeed: seed,
+			VsockPath:    bv.VsockPath,
+			TapName:      bv.TapName,
 		}
 	}
 

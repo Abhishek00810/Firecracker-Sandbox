@@ -1,13 +1,9 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
-	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -112,6 +108,8 @@ func buildAndValidate(ctx context.Context, mgr *firecracker.FireCrackerManager, 
 		SnapshotPath:     tmpl.SnapPath,
 		MemoryPath:       tmpl.MemPath,
 		WritableSeedPath: tmpl.WritableDiskPath,
+		VsockPath:        tmpl.VsockPath,
+		TapName:          tmpl.TapName,
 	}, nil
 }
 
@@ -155,76 +153,5 @@ func validateSnapshot(ctx context.Context, mgr *firecracker.FireCrackerManager, 
 	return nil
 }
 
-// facts are the compatibility pins measured from the build host, recorded in every
-// release manifest so a worker only restores a release its host actually matches.
-type facts struct {
-	arch, cpuCompatClass, firecrackerVersion      string
-	assetBundleDigest, rootfsDigest, kernelDigest string
-}
-
-func gatherFacts(cfg *workerconfig.Config) (facts, error) {
-	var f facts
-	f.arch = runtime.GOARCH
-
-	rootfs, err := template.SHA256File(cfg.RootfsPath)
-	if err != nil {
-		return f, fmt.Errorf("hash rootfs: %w", err)
-	}
-	f.rootfsDigest = rootfs
-
-	kernel, err := template.SHA256File(cfg.KernelPath)
-	if err != nil {
-		return f, fmt.Errorf("hash kernel: %w", err)
-	}
-	f.kernelDigest = kernel
-
-	f.firecrackerVersion = firecrackerVersion(cfg.FirecrackerBinary)
-	f.cpuCompatClass = cpuCompatClass(f.arch)
-	f.assetBundleDigest = assetBundleDigest(cfg.AssetsPath)
-	return f, nil
-}
-
-// firecrackerVersion runs `firecracker --version` and returns its first line.
-func firecrackerVersion(binary string) string {
-	out, err := exec.Command(binary, "--version").Output()
-	if err != nil {
-		return "unknown"
-	}
-	line := strings.SplitN(strings.TrimSpace(string(out)), "\n", 2)[0]
-	if line == "" {
-		return "unknown"
-	}
-	return line
-}
-
-// cpuCompatClass returns a conservative CPU class: the CPU model name from
-// /proc/cpuinfo, so a release only restores on the same CPU model (Firecracker
-// bakes CPUID into snapshots). Falls back to the arch when the model is unknown.
-func cpuCompatClass(arch string) string {
-	f, err := os.Open("/proc/cpuinfo")
-	if err != nil {
-		return "arch-" + arch
-	}
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "model name") {
-			if i := strings.Index(line, ":"); i >= 0 {
-				if v := strings.TrimSpace(line[i+1:]); v != "" {
-					return v
-				}
-			}
-		}
-	}
-	return "arch-" + arch
-}
-
-// assetBundleDigest reads the installed-bundle marker written by bootstrap, if any.
-func assetBundleDigest(assetsPath string) string {
-	data, err := os.ReadFile(filepath.Join(assetsPath, ".installed-bundle"))
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(data))
-}
+// Host-facts gathering (arch, CPU class, FC version, rootfs/kernel digests) lives
+// in internal/template.GatherHostFacts — shared with the worker's compatibility check.
