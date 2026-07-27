@@ -34,6 +34,14 @@ type buildSpec struct {
 // truth) and bakes numpy into each. Disk is converted GB->MB here; CPU stays an
 // integer count.
 func standardSpecs(provision []string) []buildSpec {
+	// Validate the real artifact after restore. If we baked numpy, assert it imports;
+	// otherwise just confirm the runtimes survived the restore (no internet needed).
+	validate := []string{"python3 --version", "node --version"}
+	for _, p := range provision {
+		if strings.Contains(p, "numpy") {
+			validate = []string{"python3 -c 'import numpy'"}
+		}
+	}
 	specs := make([]buildSpec, 0, len(vmsize.Sizes))
 	for _, sz := range vmsize.Sizes {
 		specs = append(specs, buildSpec{
@@ -43,7 +51,7 @@ func standardSpecs(provision []string) []buildSpec {
 			DiskMB:    sz.DiskGB * 1024,
 			Warmup:    true,
 			Provision: provision,
-			Validate:  []string{"python3 -c 'import numpy'"},
+			Validate:  validate,
 		})
 	}
 	return specs

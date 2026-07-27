@@ -950,6 +950,13 @@ func (f *FireCrackerManager) CreateTemplateWithProvision(ctx context.Context, cf
 	if err := os.MkdirAll(snapDir, 0755); err != nil {
 		return nil, err
 	}
+	// Firecracker drops to FCUid and writes the snapshot files itself, so the dir it
+	// writes into must be owned by that user (the backend runs as root and made it).
+	if f.FCUid > 0 {
+		if err := os.Chown(snapDir, f.FCUid, f.FCGid); err != nil {
+			return nil, fmt.Errorf("chown snapshot dir %s: %w", snapDir, err)
+		}
+	}
 
 	// Boot a normal VM
 	vm, err := f.Create(ctx, cfg)
