@@ -4,7 +4,6 @@
 package main
 
 import (
-	"backend/internal/bootstrap"
 	"backend/internal/cgroup"
 	"backend/internal/executor/firecracker"
 	"backend/internal/orchestrator"
@@ -12,7 +11,7 @@ import (
 	"backend/internal/session"
 	"backend/internal/vmsize"
 	"backend/internal/worker"
-	workerconfig "backend/internal/workerplane/config"
+	"backend/internal/workerplane/host"
 	"context"
 	"log/slog"
 	"net"
@@ -20,7 +19,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"syscall"
 	"time"
@@ -136,54 +134,17 @@ func createTemplateWithRetry(mgr *firecracker.FireCrackerManager, cfg firecracke
 func main() {
 	setupLogger()
 
-	cfg, err := workerconfig.Load()
+	// Shared host bring-up (unpack+validate assets, provision networking/user,
+	// cgroup init, Firecracker manager). Identical to before — just extracted so
+	// the template-builder can reuse the exact same host readiness.
+	h, err := host.Init()
 	if err != nil {
-		slog.Error("worker startup validation failed", "err", err)
+		slog.Error("worker startup failed", "err", err)
 		os.Exit(1)
 	}
-	for _, warning := range cfg.Warnings {
-		slog.Warn("startup warning", "message", warning)
-	}
-
-	slotCount := envInt("SLOT_COUNT", 50)
-	maxProvisions := envInt("MAX_CONCURRENT_PROVISIONS", runtime.NumCPU())
-
-	// Self-bootstrap: make THIS host able to run VMs with no external setup. The
-	// control plane only shipped the binary + asset bundle; the agent does the
-	// rest to itself, idempotently, before serving — unpack + verify assets, then
-	// provision the fcvm user, network slots, and nftables. In warn mode (dev on a
-	// non-KVM box) a failure is logged instead of fatal.
-	bootstrapStep := func(stage string, err error) {
-		if err == nil {
-			return
-		}
-		if cfg.HostValidationMode == "warn" {
-			slog.Warn("bootstrap step skipped", "stage", stage, "err", err)
-			return
-		}
-		slog.Error("bootstrap failed", "stage", stage, "err", err)
-		os.Exit(1)
-	}
-	bootstrapStep("assets", bootstrap.EnsureAssets(cfg.RootDirectory))
-	bootstrapStep("assets-validate", cfg.ValidateAssets())
-	if uid, gid, perr := bootstrap.Provision(bootstrap.ProvisionParams{
-		Root:        cfg.RootDirectory,
-		SlotCount:   slotCount,
-		SocketDir:   cfg.SocketDir,
-		SnapshotDir: cfg.SnapshotDir,
-		AssetsDir:   cfg.AssetsPath,
-	}); perr != nil {
-		bootstrapStep("provision", perr)
-	} else {
-		cfg.FCRunUID, cfg.FCRunGID = uid, gid
-		slog.Info("host provisioned", "fc_uid", uid, "fc_gid", gid, "slots", slotCount)
-	}
-
-	if err := cgroup.Init(); err != nil {
-		slog.Warn("cgroup init failed, limits will not be enforced", "err", err)
-	}
-
-	vmManager := firecracker.NewFirecrackerManager(cfg.SocketDir, cfg.AssetsPath, cfg.FirecrackerBinary, slotCount, maxProvisions, cfg.FCRunUID, cfg.FCRunGID)
+	cfg := h.Config
+	vmManager := h.VMManager
+	slotCount := h.SlotCount
 
 	baseCfg := firecracker.VMConfig{
 		VCPUCount:  1,
