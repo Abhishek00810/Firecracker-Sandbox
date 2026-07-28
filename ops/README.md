@@ -72,6 +72,10 @@ an authorized deployment public key. Use workflow targets `worker-1` or
 `orchestrator/` owns the standalone private Compose service used for worker
 registration, heartbeat, capacity reservation, and sandbox placement.
 
+The deploy workflow records the immutable orchestrator image tag in the
+server's protected `.env`. Subsequent health checks and manual Compose restarts
+therefore use the exact deployed image instead of implicitly pulling `latest`.
+
 After Docker is installed, create a temporary repository runner token in
 GitHub and prepare the dedicated server:
 

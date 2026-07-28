@@ -145,10 +145,13 @@ func main() {
 	vmManager := h.VMManager
 	slotCount := h.SlotCount
 
+	// Base config derives from the DEFAULT size (vmsize.Default) so the default-size
+	// template is actually built at that shape — not a hardcoded 256MB/10GB.
+	def := vmsize.Default()
 	baseCfg := firecracker.VMConfig{
-		VCPUCount:  1,
-		MemSizeMiB: 256,
-		DiskGB:     10,
+		VCPUCount:  def.VCPUs,
+		MemSizeMiB: def.MemoryMB,
+		DiskGB:     def.DiskGB,
 		Timeout:    30 * time.Second,
 		KernelPath: cfg.KernelPath,
 		RootfsPath: cfg.RootfsPath,
