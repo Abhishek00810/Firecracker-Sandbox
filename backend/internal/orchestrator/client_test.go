@@ -88,3 +88,28 @@ func TestClientReportsWorkerLifecycleState(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestClientMarksWorkerDraining(t *testing.T) {
+	client := NewClient("http://orchestrator.internal:8090", "secret")
+	client.http.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodPost || r.URL.Path != "/internal/workers/worker-1/draining" {
+			t.Fatalf("request=%s %s", r.Method, r.URL.Path)
+		}
+		var request map[string]bool
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if !request["draining"] {
+			t.Fatal("expected draining=true")
+		}
+		return &http.Response{
+			StatusCode: http.StatusNoContent,
+			Body:       io.NopCloser(bytes.NewReader(nil)),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	if err := client.SetWorkerDraining(context.Background(), "worker-1", true); err != nil {
+		t.Fatal(err)
+	}
+}

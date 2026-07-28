@@ -155,3 +155,4 @@ Storage and Backup Questions.xlsx
 
 # compiled binaries (built per-deploy, never committed)
 backend/renderops-control-plane
+backend/template-builder

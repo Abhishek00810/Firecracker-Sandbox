@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -23,7 +24,7 @@ const pauseTTL = 7 * 24 * time.Hour
 // StateHook is called on every session lifecycle transition — manual (endpoint) AND
 // automatic (reaper idle-pause, on-demand resume, TTL destroy) — so an external store
 // (the sandboxes DB) can stay in sync. state is "active" | "paused" | "destroyed".
-type StateHook func(sessionID, userID, state string)
+type StateHook func(sessionID, userID, state string) error
 
 // MeterSample is one accrual interval's RAW resource-time for a sandbox (no cost).
 type MeterSample struct {
@@ -51,6 +52,7 @@ type Manager struct {
 	sizeTemplates map[string]*firecracker.SnapshotTemplate // keyed by vmsize.Key — per-size baked device names (for pause/resume)
 	pauseDir      string                                   // disk-backed dir for per-session pause snapshots (NOT /dev/shm)
 	manifestPath  string                                   // recovery manifest of paused sessions
+	manifestMu    sync.Mutex                               // serializes concurrent pause manifest rewrites
 	createLocksMu sync.Mutex
 	createLocks   map[string]*createLock
 }
@@ -139,12 +141,14 @@ func (m *Manager) meterTicker() {
 	}
 }
 
-// notifyState fires the state hook (if set) so the DB reflects a transition. Best-effort:
-// the hook itself is expected to be async and non-blocking.
-func (m *Manager) notifyState(sess *Session, state string) {
+// notifyState persists a lifecycle transition before the worker acknowledges it.
+func (m *Manager) notifyState(sess *Session, state string) error {
 	if m.onState != nil && sess != nil {
-		m.onState(sess.ID, sess.UserID, state)
+		if err := m.onState(sess.ID, sess.UserID, state); err != nil {
+			return fmt.Errorf("report session %s state %s: %w", sess.ID, state, err)
+		}
 	}
+	return nil
 }
 
 // recoverPaused rebuilds the store's paused sessions from the on-disk manifest after a
@@ -239,6 +243,9 @@ func (m *Manager) cleanupOrphanedDisks() {
 
 // persistManifest rewrites the recovery manifest from the current set of paused sessions.
 func (m *Manager) persistManifest() {
+	m.manifestMu.Lock()
+	defer m.manifestMu.Unlock()
+
 	var paused []*Session
 	for _, s := range m.store.All() {
 		if s.State == StatePaused {
@@ -463,7 +470,9 @@ func (m *Manager) Destroy(ctx context.Context, sessionID string) error {
 	if sess.State == StatePaused {
 		m.cleanupPausedFiles(sess)
 		m.persistManifest()
-		m.notifyState(sess, "destroyed")
+		if err := m.notifyState(sess, "destroyed"); err != nil {
+			return err
+		}
 		slog.Info("paused session destroyed", "session_id", sessionID)
 		return nil
 	}
@@ -486,7 +495,9 @@ func (m *Manager) Destroy(ctx context.Context, sessionID string) error {
 		}
 	}
 
-	m.notifyState(sess, "destroyed")
+	if err := m.notifyState(sess, "destroyed"); err != nil {
+		return err
+	}
 	slog.Info("session destroyed", "session_id", sessionID)
 	return nil
 }
@@ -506,6 +517,9 @@ func (m *Manager) Pause(ctx context.Context, sessionID string) error {
 
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
+	if sess.State == StatePaused {
+		return m.notifyState(sess, "paused")
+	}
 	if sess.State != StateActive || sess.VM == nil {
 		return nil
 	}
@@ -575,7 +589,9 @@ func (m *Manager) Pause(ctx context.Context, sessionID string) error {
 	sess.Cgroup = nil
 
 	m.persistManifest()
-	m.notifyState(sess, "paused")
+	if err := m.notifyState(sess, "paused"); err != nil {
+		return err
+	}
 	slog.Info("session paused", "session_id", sessionID, "ms", time.Since(t0).Milliseconds())
 	return nil
 }
@@ -591,7 +607,7 @@ func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
 	if sess.State == StateActive {
-		return nil
+		return m.notifyState(sess, "active")
 	}
 
 	t0 := time.Now()
@@ -683,7 +699,9 @@ func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 	sess.MemPath = ""
 
 	m.persistManifest()
-	m.notifyState(sess, "active")
+	if err := m.notifyState(sess, "active"); err != nil {
+		return err
+	}
 	// Per-phase timing (cumulative ms from t0) to locate slow resumes, esp. cold restore
 	// after a process restart. connect_ms - preconnect_ms is the vsock CONNECT wait.
 	slog.Info("session resumed", "session_id", sessionID, "vm_id", vm.ID,
@@ -713,16 +731,70 @@ func (m *Manager) cleanupPausedFiles(sess *Session) {
 	os.RemoveAll(filepath.Join(m.pauseDir, sess.ID))
 }
 
-// PauseAllActive snapshots every active session to disk (best-effort) so a deploy or
-// restart preserves user state instead of destroying it. Called on SIGTERM.
-func (m *Manager) PauseAllActive(ctx context.Context) {
+// PauseAllActive snapshots active sessions with bounded concurrency. It returns
+// every failure so a drain controller can refuse a destructive scale-in.
+func (m *Manager) PauseAllActive(ctx context.Context, concurrency int) error {
+	if concurrency < 1 {
+		concurrency = 1
+	}
+
+	var sessionIDs []string
 	for _, sess := range m.store.All() {
 		if sess.State == StateActive {
-			if err := m.Pause(ctx, sess.ID); err != nil {
-				slog.Error("graceful pause failed", "session_id", sess.ID, "err", err)
-			}
+			sessionIDs = append(sessionIDs, sess.ID)
 		}
 	}
+	if len(sessionIDs) == 0 {
+		return nil
+	}
+	if concurrency > len(sessionIDs) {
+		concurrency = len(sessionIDs)
+	}
+
+	jobs := make(chan string)
+	failures := make(chan error, len(sessionIDs))
+	var workers sync.WaitGroup
+	for range concurrency {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case sessionID, ok := <-jobs:
+					if !ok {
+						return
+					}
+					if err := m.Pause(ctx, sessionID); err != nil {
+						slog.Error("graceful pause failed", "session_id", sessionID, "err", err)
+						failures <- fmt.Errorf("pause session %s: %w", sessionID, err)
+					}
+				}
+			}
+		}()
+	}
+
+schedule:
+	for _, sessionID := range sessionIDs {
+		select {
+		case jobs <- sessionID:
+		case <-ctx.Done():
+			break schedule
+		}
+	}
+	close(jobs)
+	workers.Wait()
+	close(failures)
+
+	var result []error
+	for err := range failures {
+		result = append(result, err)
+	}
+	if err := ctx.Err(); err != nil {
+		result = append(result, fmt.Errorf("graceful pause deadline: %w", err))
+	}
+	return errors.Join(result...)
 }
 
 func (m *Manager) GetSession(id string) (*Session, bool) {

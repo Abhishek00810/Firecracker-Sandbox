@@ -14,6 +14,8 @@ type fakeStore struct {
 	registeredAt   time.Time
 	heartbeatID    string
 	heartbeatAt    time.Time
+	drainingID     string
+	draining       bool
 	sandboxID      string
 	request        PlacementRequest
 	policy         PlacementPolicy
@@ -36,6 +38,11 @@ func (f *fakeStore) RegisterWorker(_ context.Context, registration WorkerRegistr
 
 func (f *fakeStore) RecordHeartbeat(_ context.Context, id string, at time.Time) error {
 	f.heartbeatID, f.heartbeatAt = id, at
+	return f.err
+}
+
+func (f *fakeStore) SetWorkerDraining(_ context.Context, id string, draining bool) error {
+	f.drainingID, f.draining = id, draining
 	return f.err
 }
 
@@ -151,6 +158,18 @@ func TestRegisterWorkerRejectsInvalidCapacity(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected invalid capacity error")
+	}
+}
+
+func TestSetWorkerDrainingUpdatesStore(t *testing.T) {
+	store := &fakeStore{}
+	svc := NewService(store, 30*time.Second)
+
+	if err := svc.SetWorkerDraining(context.Background(), "worker-1", true); err != nil {
+		t.Fatal(err)
+	}
+	if store.drainingID != "worker-1" || !store.draining {
+		t.Fatalf("worker=%q draining=%v", store.drainingID, store.draining)
 	}
 }
 

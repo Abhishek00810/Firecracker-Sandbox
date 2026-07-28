@@ -51,6 +51,27 @@ func TestHTTPServerRegistersWorker(t *testing.T) {
 	}
 }
 
+func TestHTTPServerMarksWorkerDraining(t *testing.T) {
+	store := &fakeStore{}
+	server := NewHTTPServer(NewService(store, time.Minute), "control-secret", "worker-secret")
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/internal/workers/worker-1/draining",
+		bytes.NewBufferString(`{"draining":true}`),
+	)
+	req.Header.Set(AuthHeader, "worker-secret")
+	res := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(res, req)
+
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
+	}
+	if store.drainingID != "worker-1" || !store.draining {
+		t.Fatalf("worker=%q draining=%v", store.drainingID, store.draining)
+	}
+}
+
 func TestHTTPServerMapsNoCapacity(t *testing.T) {
 	store := &fakeStore{err: ErrNoCapacity}
 	server := NewHTTPServer(NewService(store, time.Minute), "control-secret", "worker-secret")

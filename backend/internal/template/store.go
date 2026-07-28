@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -56,8 +57,14 @@ var _ ArtifactStore = (*LocalStore)(nil)
 // resolve maps an object key to an absolute path under root, rejecting any key
 // that would escape root (defense against a malformed key doing path traversal).
 func (s *LocalStore) resolve(key string) (string, error) {
-	clean := filepath.Clean("/" + strings.TrimPrefix(key, "/")) // force key to be root-relative
-	full := filepath.Join(s.root, clean)
+	if key == "" || strings.HasPrefix(key, "/") {
+		return "", fmt.Errorf("invalid object key %q", key)
+	}
+	clean := path.Clean(key)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("key %q escapes store root", key)
+	}
+	full := filepath.Join(s.root, filepath.FromSlash(clean))
 	if full != s.root && !strings.HasPrefix(full, s.root+string(os.PathSeparator)) {
 		return "", fmt.Errorf("key %q escapes store root", key)
 	}

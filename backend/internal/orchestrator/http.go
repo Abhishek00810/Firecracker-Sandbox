@@ -28,6 +28,7 @@ func (s *HTTPServer) Handler() http.Handler {
 	mux.HandleFunc("GET /health", s.health)
 	mux.HandleFunc("PUT /internal/workers/{workerID}", s.authed(s.workerToken, s.registerWorker))
 	mux.HandleFunc("POST /internal/workers/{workerID}/heartbeat", s.authed(s.workerToken, s.heartbeat))
+	mux.HandleFunc("POST /internal/workers/{workerID}/draining", s.authed(s.workerToken, s.setWorkerDraining))
 	mux.HandleFunc("POST /internal/workers/{workerID}/sandboxes/{sandboxID}/state", s.authed(s.workerToken, s.workerState))
 	mux.HandleFunc("POST /internal/placements", s.authed(s.controlToken, s.place))
 	mux.HandleFunc("GET /internal/placements/{sandboxID}", s.authed(s.controlToken, s.getPlacement))
@@ -73,6 +74,24 @@ func (s *HTTPServer) registerWorker(w http.ResponseWriter, r *http.Request) {
 
 func (s *HTTPServer) heartbeat(w http.ResponseWriter, r *http.Request) {
 	if err := s.service.Heartbeat(r.Context(), r.PathValue("workerID")); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *HTTPServer) setWorkerDraining(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Draining bool `json:"draining"`
+	}
+	if err := decodeHTTPJSON(w, r, &request); err != nil {
+		return
+	}
+	if err := s.service.SetWorkerDraining(
+		r.Context(),
+		r.PathValue("workerID"),
+		request.Draining,
+	); err != nil {
 		writeServiceError(w, err)
 		return
 	}

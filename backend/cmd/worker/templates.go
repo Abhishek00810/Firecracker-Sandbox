@@ -116,6 +116,9 @@ func loadPrebuiltTemplates(ctx context.Context, cfg *workerconfig.Config) (map[s
 	if err := template.NewCompatibilityValidator().Compatible(m, facts); err != nil {
 		return nil, err
 	}
+	if err := validateStandardRelease(m); err != nil {
+		return nil, err
+	}
 
 	out := make(map[string]*firecracker.SnapshotTemplate, len(m.Variants))
 	for size, v := range m.Variants {
@@ -134,6 +137,31 @@ func loadPrebuiltTemplates(ctx context.Context, cfg *workerconfig.Config) (map[s
 		slog.Info("prebuilt template cached", "release", releaseID, "size", size)
 	}
 	return out, nil
+}
+
+// validateStandardRelease prevents a malformed or accidentally activated partial
+// release from degrading into cold boots for missing sizes.
+func validateStandardRelease(m template.Manifest) error {
+	for _, sz := range vmsize.Sizes {
+		v, ok := m.Variant(sz.Name)
+		if !ok {
+			return fmt.Errorf("prebuilt release %s is missing required size %q", m.ReleaseID, sz.Name)
+		}
+		if v.VCPUs != sz.VCPUs || v.MemoryMB != sz.MemoryMB || v.DiskMB != sz.DiskGB*1024 {
+			return fmt.Errorf(
+				"prebuilt release %s size %q resources are %d vCPU/%d MB/%d MB; expected %d vCPU/%d MB/%d MB",
+				m.ReleaseID,
+				sz.Name,
+				v.VCPUs,
+				v.MemoryMB,
+				v.DiskMB,
+				sz.VCPUs,
+				sz.MemoryMB,
+				sz.DiskGB*1024,
+			)
+		}
+	}
+	return nil
 }
 
 // blobStoreFromEnv builds the Azure Blob artifact store from BLOB_* env vars.
