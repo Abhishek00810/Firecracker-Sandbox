@@ -16,7 +16,7 @@ type Size struct {
 // Sizes is the canonical menu. The first entry is the default (used when a request omits
 // resources). The default size is served from a warm snapshot template; others cold-boot.
 var Sizes = []Size{
-	{Name: "nano", VCPUs: 1, MemoryMB: 128, DiskGB: 1},
+	{Name: "nano", VCPUs: 1, MemoryMB: 256, DiskGB: 1},
 	{Name: "small", VCPUs: 2, MemoryMB: 512, DiskGB: 10},
 	{Name: "medium", VCPUs: 2, MemoryMB: 1024, DiskGB: 20},
 }
