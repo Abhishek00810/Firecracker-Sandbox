@@ -19,7 +19,7 @@ on:
         description: "Which server to deploy"
         default: "all"
         type: choice
-        options: [all, control-plane, orchestrator, worker]
+        options: [all, control-plane, orchestrator, worker, worker-1, worker-2]
 
 concurrency:
   group: deploy-${{ github.ref }}
@@ -71,6 +71,7 @@ jobs:
               - 'backend/internal/worker/**'
               - 'backend/internal/bootstrap/**'
               - 'backend/internal/cgroup/**'
+              - 'backend/internal/template/**'
               - 'backend/internal/vmsize/**'
               - 'backend/internal/workerplane/**'
               - 'backend/internal/orchestrator/**'
@@ -222,15 +223,16 @@ jobs:
           docker compose logs --tail=40 orchestrator || true
           exit 1
 
-  # ---- WORKER: build binary on GitHub -> SSH key -> bare-metal host ----
+  # ---- WORKERS: build once -> rolling SSH deploy across bare-metal hosts ----
 
-  deploy-worker:
+  build-worker:
     needs: changes
     if: >-
-      github.event_name == 'workflow_dispatch' && (inputs.target == 'all' || inputs.target == 'worker')
+      github.event_name == 'workflow_dispatch' && (inputs.target == 'all' || inputs.target == 'worker' || inputs.target == 'worker-1' || inputs.target == 'worker-2')
       || github.event_name == 'push' && needs.changes.outputs.worker == 'true'
     runs-on: ubuntu-latest
-    environment: production
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -239,9 +241,63 @@ jobs:
       - name: Build worker (linux/amd64)
         working-directory: backend
         run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/renderops-worker ./cmd/worker
-      - name: Deploy to bare-metal host
-        run: bash ops/worker/install.sh /tmp/renderops-worker
+      - name: Upload worker binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: renderops-worker-${{ github.sha }}
+          path: /tmp/renderops-worker
+          if-no-files-found: error
+          retention-days: 1
+
+  deploy-worker-1:
+    needs: build-worker
+    if: >-
+      github.event_name == 'push'
+      || github.event_name == 'workflow_dispatch' && (inputs.target == 'all' || inputs.target == 'worker' || inputs.target == 'worker-1')
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download worker binary
+        uses: actions/download-artifact@v4
+        with:
+          name: renderops-worker-${{ github.sha }}
+          path: /tmp/renderops-worker-artifact
+      - name: Deploy worker 1
+        run: bash ops/worker/install.sh /tmp/renderops-worker-artifact/renderops-worker
         env:
           SSH_KEY: ${{ secrets.WORKER_SSH_KEY }}
           SSH_HOST: ${{ secrets.WORKER_HOST }}
           SSH_USER: ${{ secrets.WORKER_USER }}
+
+  # Wait for worker 1's health check before touching worker 2. A manual
+  # worker-2-only dispatch is allowed to bypass the intentionally skipped first job.
+  deploy-worker-2:
+    needs: [build-worker, deploy-worker-1]
+    if: >-
+      always()
+      && needs.build-worker.result == 'success'
+      && (needs.deploy-worker-1.result == 'success' || needs.deploy-worker-1.result == 'skipped')
+      && (
+        github.event_name == 'push'
+        || github.event_name == 'workflow_dispatch' && (inputs.target == 'all' || inputs.target == 'worker' || inputs.target == 'worker-2')
+      )
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download worker binary
+        uses: actions/download-artifact@v4
+        with:
+          name: renderops-worker-${{ github.sha }}
+          path: /tmp/renderops-worker-artifact
+      - name: Deploy worker 2
+        run: bash ops/worker/install.sh /tmp/renderops-worker-artifact/renderops-worker
+        env:
+          SSH_KEY: ${{ secrets.WORKER_2_SSH_KEY }}
+          SSH_HOST: ${{ secrets.WORKER_2_HOST }}
+          SSH_USER: ${{ secrets.WORKER_2_USER }}

@@ -49,6 +49,24 @@ Normal deployments subsequently use `ops/worker/install.sh`.
 The advertised endpoint must be reachable only over the private network from
 the control plane and orchestrator; do not expose port `9876` to the internet.
 
+The deploy workflow builds one worker binary and rolls it across both workers,
+waiting for worker 1 to become healthy before restarting worker 2. Configure
+these GitHub Actions secrets in the `production` environment:
+
+```text
+WORKER_SSH_KEY
+WORKER_HOST
+WORKER_USER
+
+WORKER_2_SSH_KEY
+WORKER_2_HOST
+WORKER_2_USER
+```
+
+Each worker needs a distinct `WORKER_ID`, private `WORKER_ADVERTISE_URL`, and
+an authorized deployment public key. Use workflow targets `worker-1` or
+`worker-2` for a single host, and `worker` for the rolling two-host deployment.
+
 ## Orchestrator server
 
 `orchestrator/` owns the standalone private Compose service used for worker

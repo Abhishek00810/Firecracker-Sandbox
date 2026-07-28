@@ -53,7 +53,7 @@ systemctl restart renderops-worker
 REMOTE
 
 echo "==> health check (allow time for snapshot template warmup)"
-for i in $(seq 1 20); do
+for i in $(seq 1 "${WORKER_HEALTH_ATTEMPTS:-150}"); do
   if $SSH "curl -fsS -m 4 ${HEALTH_URL} >/dev/null 2>&1"; then
     echo "    worker healthy after $((i*2))s"
     exit 0
