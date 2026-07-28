@@ -205,7 +205,14 @@ jobs:
           flock /opt/renderops-orchestrator/.deploy.lock bash -euc '
             cp ops/orchestrator/docker-compose.yml /opt/renderops-orchestrator/docker-compose.yml
             cd /opt/renderops-orchestrator
-            export ORCHESTRATOR_IMAGE="${{ env.ORCHESTRATOR_IMAGE }}:${{ github.sha }}"
+            image="${{ env.ORCHESTRATOR_IMAGE }}:${{ github.sha }}"
+            test -f .env
+            if grep -q "^ORCHESTRATOR_IMAGE=" .env; then
+              sed -i "s|^ORCHESTRATOR_IMAGE=.*|ORCHESTRATOR_IMAGE=${image}|" .env
+            else
+              printf "\nORCHESTRATOR_IMAGE=%s\n" "${image}" >> .env
+            fi
+            export ORCHESTRATOR_IMAGE="${image}"
             docker compose config --quiet
             docker compose pull orchestrator
             docker compose up -d orchestrator
