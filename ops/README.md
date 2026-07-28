@@ -75,6 +75,8 @@ registration, heartbeat, capacity reservation, and sandbox placement.
 The deploy workflow records the immutable orchestrator image tag in the
 server's protected `.env`. Subsequent health checks and manual Compose restarts
 therefore use the exact deployed image instead of implicitly pulling `latest`.
+The file is writable only by root and the deployment group because CI owns this
+non-secret image pointer alongside the server-managed secrets.
 
 After Docker is installed, create a temporary repository runner token in
 GitHub and prepare the dedicated server:

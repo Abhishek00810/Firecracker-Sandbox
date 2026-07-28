@@ -31,11 +31,11 @@ install -d -o root -g "$DEPLOY_GROUP" -m 0770 "$APP_DIR"
 install -m 0660 -o root -g "$DEPLOY_GROUP" "$SCRIPT_DIR/docker-compose.yml" "$APP_DIR/docker-compose.yml"
 
 if [ ! -f "$APP_DIR/.env" ]; then
-	install -m 0640 -o root -g "$DEPLOY_GROUP" "$SCRIPT_DIR/.env.example" "$APP_DIR/.env"
+	install -m 0660 -o root -g "$DEPLOY_GROUP" "$SCRIPT_DIR/.env.example" "$APP_DIR/.env"
 	echo "created $APP_DIR/.env; populate its private database URL, bind IP, and token"
 else
 	chown root:"$DEPLOY_GROUP" "$APP_DIR/.env"
-	chmod 0640 "$APP_DIR/.env"
+	chmod 0660 "$APP_DIR/.env"
 	echo "preserved existing $APP_DIR/.env"
 fi
 

@@ -45,6 +45,7 @@ jobs:
             control_plane:
               - 'backend/cmd/control-plane/**'
               - 'backend/internal/controlplane/**'
+              - 'backend/internal/handler/**'
               - 'backend/internal/orchestrator/**'
               - 'backend/internal/agent/**'
               - 'backend/internal/plane/**'
@@ -52,6 +53,7 @@ jobs:
               - 'backend/internal/middleware/**'
               - 'backend/internal/policy/**'
               - 'backend/internal/billing/**'
+              - 'backend/internal/vmsize/**'
               - 'backend/Dockerfile.controlplane'
               - 'backend/go.mod'
               - 'backend/go.sum'
@@ -207,6 +209,7 @@ jobs:
             cd /opt/renderops-orchestrator
             image="${{ env.ORCHESTRATOR_IMAGE }}:${{ github.sha }}"
             test -f .env
+            test -w .env
             if grep -q "^ORCHESTRATOR_IMAGE=" .env; then
               sed -i "s|^ORCHESTRATOR_IMAGE=.*|ORCHESTRATOR_IMAGE=${image}|" .env
             else
