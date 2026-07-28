@@ -186,20 +186,10 @@ func main() {
 	var onState session.StateHook
 	if orchestratorURL, workerID := os.Getenv("ORCHESTRATOR_URL"), os.Getenv("WORKER_ID"); orchestratorURL != "" && workerID != "" {
 		orchestrationClient := orchestrator.NewClient(orchestratorURL, os.Getenv("WORKER_TOKEN"))
-		onState = func(sandboxID, _ string, state string) {
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				defer cancel()
-				if err := orchestrationClient.ReportWorkerState(ctx, workerID, sandboxID, state); err != nil {
-					slog.Warn(
-						"report worker sandbox state failed",
-						"worker_id", workerID,
-						"sandbox_id", sandboxID,
-						"state", state,
-						"err", err,
-					)
-				}
-			}()
+		onState = func(sandboxID, _ string, state string) error {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			return orchestrationClient.ReportWorkerState(ctx, workerID, sandboxID, state)
 		}
 	}
 
@@ -226,7 +216,8 @@ func main() {
 	if token == "" {
 		slog.Warn("WORKER_TOKEN not set — worker API is UNAUTHENTICATED (dev only)")
 	}
-	srv := &http.Server{Addr: bind, Handler: worker.NewServer(sessionMgr, token, slotCount).Handler()}
+	workerServer := worker.NewServer(sessionMgr, token, slotCount)
+	srv := &http.Server{Addr: bind, Handler: workerServer.Handler()}
 	listener, err := net.Listen("tcp", bind)
 	if err != nil {
 		slog.Error("worker listen failed", "addr", bind, "err", err)
@@ -248,9 +239,37 @@ func main() {
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 	slog.Info("worker shutting down")
+
+	// Close every admission path before snapshotting. The local gate handles a
+	// placement request already in flight while the durable orchestrator flag
+	// removes this worker from subsequent placement queries.
+	workerServer.BeginDrain()
 	stopRegistration()
+	if orchestratorURL, workerID := os.Getenv("ORCHESTRATOR_URL"), os.Getenv("WORKER_ID"); orchestratorURL != "" && workerID != "" {
+		drainCtx, drainCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := orchestrator.NewClient(orchestratorURL, os.Getenv("WORKER_TOKEN")).
+			SetWorkerDraining(drainCtx, workerID, true)
+		drainCancel()
+		if err != nil {
+			slog.Error("mark worker draining failed", "worker_id", workerID, "err", err)
+		}
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	srv.Shutdown(ctx)
+	if err := srv.Shutdown(ctx); err != nil {
+		slog.Error("worker HTTP shutdown failed", "err", err)
+	}
+	cancel()
+
+	pauseTimeout := time.Duration(envInt("SHUTDOWN_GRACE_PERIOD_SECONDS", 300)) * time.Second
+	pauseCtx, pauseCancel := context.WithTimeout(context.Background(), pauseTimeout)
+	if err := sessionMgr.PauseAllActive(
+		pauseCtx,
+		envInt("SHUTDOWN_PAUSE_CONCURRENCY", 4),
+	); err != nil {
+		slog.Error("worker drained with unpaused sessions", "err", err)
+	}
+	pauseCancel()
+
 	sessionMgr.Shutdown(context.Background())
 }

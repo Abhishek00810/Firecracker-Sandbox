@@ -69,6 +69,7 @@ type WorkerClientFactory func(endpoint string) WorkerClient
 type Store interface {
 	RegisterWorker(context.Context, WorkerRegistration, time.Time) error
 	RecordHeartbeat(context.Context, string, time.Time) error
+	SetWorkerDraining(context.Context, string, bool) error
 	ReservePlacement(context.Context, string, PlacementRequest, PlacementPolicy, time.Time) (Placement, error)
 	GetPlacement(context.Context, string) (Placement, bool, error)
 	UpdatePlacementState(context.Context, string, string, []string, string) error
@@ -145,6 +146,14 @@ func (s *Service) Heartbeat(ctx context.Context, workerID string) error {
 		return fmt.Errorf("invalid worker id %q", workerID)
 	}
 	return s.store.RecordHeartbeat(ctx, workerID, s.now().UTC())
+}
+
+func (s *Service) SetWorkerDraining(ctx context.Context, workerID string, draining bool) error {
+	workerID = strings.TrimSpace(workerID)
+	if !workerIDPattern.MatchString(workerID) {
+		return fmt.Errorf("invalid worker id %q", workerID)
+	}
+	return s.store.SetWorkerDraining(ctx, workerID, draining)
 }
 
 func (s *Service) Place(ctx context.Context, sandboxID string, request PlacementRequest) (Placement, error) {

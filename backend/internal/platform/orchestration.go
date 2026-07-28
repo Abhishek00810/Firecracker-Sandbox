@@ -76,7 +76,8 @@ func (c *Client) RegisterWorker(ctx context.Context, worker orchestrator.WorkerR
 		ON CONFLICT (id) DO UPDATE SET
 			endpoint=EXCLUDED.endpoint,
 			pool=EXCLUDED.pool,
-			status=CASE WHEN worker_hosts.draining THEN 'draining' ELSE 'active' END,
+			status='active',
+			draining=false,
 			allocatable_vcpus=EXCLUDED.allocatable_vcpus,
 			allocatable_memory_mb=EXCLUDED.allocatable_memory_mb,
 			allocatable_disk_gb=EXCLUDED.allocatable_disk_gb,
@@ -110,6 +111,25 @@ func (c *Client) RecordHeartbeat(ctx context.Context, workerID string, heartbeat
 	)
 	if err != nil {
 		return fmt.Errorf("record worker heartbeat: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return orchestrator.ErrWorkerNotFound
+	}
+	return nil
+}
+
+func (c *Client) SetWorkerDraining(ctx context.Context, workerID string, draining bool) error {
+	tag, err := c.pool.Exec(ctx, `
+		UPDATE worker_hosts
+		SET draining=$2,
+		    status=CASE WHEN $2 THEN 'draining' ELSE 'active' END,
+		    updated_at=now()
+		WHERE id=$1`,
+		workerID,
+		draining,
+	)
+	if err != nil {
+		return fmt.Errorf("set worker %s draining=%t: %w", workerID, draining, err)
 	}
 	if tag.RowsAffected() == 0 {
 		return orchestrator.ErrWorkerNotFound

@@ -121,7 +121,18 @@ func (m Manifest) Validate() error {
 		if v.VsockPath == "" || v.TapName == "" {
 			return fmt.Errorf("variant %q missing baked device names (vsock_path/tap_name)", size)
 		}
-		for _, a := range []Artifact{v.Snapshot, v.Memory, v.WritableSeed} {
+		for _, pair := range []struct {
+			want string
+			got  Artifact
+		}{
+			{ArtifactSnapshot, v.Snapshot},
+			{ArtifactMemory, v.Memory},
+			{ArtifactWritableSeed, v.WritableSeed},
+		} {
+			a := pair.got
+			if a.Name != pair.want {
+				return fmt.Errorf("variant %q artifact name %q != expected %q", size, a.Name, pair.want)
+			}
 			if a.SHA256 == "" {
 				return fmt.Errorf("variant %q artifact %q missing sha256", size, a.Name)
 			}

@@ -57,6 +57,16 @@ func (c *Client) Heartbeat(ctx context.Context, workerID string) error {
 	return c.do(ctx, http.MethodPost, "/internal/workers/"+workerID+"/heartbeat", nil, nil)
 }
 
+func (c *Client) SetWorkerDraining(ctx context.Context, workerID string, draining bool) error {
+	return c.do(
+		ctx,
+		http.MethodPost,
+		"/internal/workers/"+workerID+"/draining",
+		map[string]bool{"draining": draining},
+		nil,
+	)
+}
+
 func (c *Client) ReportWorkerState(ctx context.Context, workerID, sandboxID, state string) error {
 	return c.do(
 		ctx,

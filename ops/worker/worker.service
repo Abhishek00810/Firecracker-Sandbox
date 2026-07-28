@@ -17,6 +17,10 @@ ExecStart=/opt/renderops/renderops-worker
 EnvironmentFile=/etc/renderops/worker.env
 Restart=always
 RestartSec=3
+# SIGTERM starts worker draining and snapshots active sandboxes. Give the
+# bounded pause workers enough time before systemd escalates to SIGKILL.
+KillSignal=SIGTERM
+TimeoutStopSec=6min
 LimitNOFILE=65536
 
 [Install]

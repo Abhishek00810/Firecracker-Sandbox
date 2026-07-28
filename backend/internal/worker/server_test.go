@@ -93,3 +93,26 @@ func TestCreateRequiresSandboxID(t *testing.T) {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }
+
+func TestDrainingWorkerRejectsNewSandboxes(t *testing.T) {
+	service := &fakeSessionService{}
+	server := NewServer(service, "worker-secret", 10)
+	server.BeginDrain()
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/worker/sandbox",
+		bytes.NewBufferString(`{"sandbox_id":"sandbox-1"}`),
+	)
+	request.Header.Set("X-Worker-Token", "worker-secret")
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if service.createdID != "" {
+		t.Fatalf("draining worker created sandbox %q", service.createdID)
+	}
+}

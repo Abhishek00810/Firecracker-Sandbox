@@ -75,7 +75,13 @@ func (c *DiskCache) Ensure(ctx context.Context, m Manifest, size string) (Cached
 	}
 	cv := c.cachedVariant(m.ReleaseID, size)
 	if c.Has(m.ReleaseID, size) {
-		return cv, nil // immutable, already cached
+		if err := verifyCachedVariant(cv, v); err == nil {
+			return cv, nil
+		}
+		// A marker alone is not proof after a crash, manual deletion, or disk
+		// corruption. Remove it first so this entry cannot be served while it is
+		// repaired from the immutable artifact store below.
+		_ = os.Remove(filepath.Join(c.Path(m.ReleaseID, size), cacheReadyMarker))
 	}
 
 	dir := c.Path(m.ReleaseID, size)
@@ -103,6 +109,33 @@ func (c *DiskCache) Ensure(ctx context.Context, m Manifest, size string) (Cached
 		return CachedVariant{}, fmt.Errorf("write cache marker: %w", err)
 	}
 	return cv, nil
+}
+
+func verifyCachedVariant(cv CachedVariant, v Variant) error {
+	for _, pair := range []struct {
+		path     string
+		artifact Artifact
+	}{
+		{cv.SnapshotPath, v.Snapshot},
+		{cv.MemoryPath, v.Memory},
+		{cv.WritableSeedPath, v.WritableSeed},
+	} {
+		info, err := os.Stat(pair.path)
+		if err != nil {
+			return err
+		}
+		if info.Size() != pair.artifact.Bytes {
+			return fmt.Errorf("%s has size %d, expected %d", pair.path, info.Size(), pair.artifact.Bytes)
+		}
+		sum, err := SHA256File(pair.path)
+		if err != nil {
+			return err
+		}
+		if sum != pair.artifact.SHA256 {
+			return fmt.Errorf("%s checksum mismatch", pair.path)
+		}
+	}
+	return nil
 }
 
 // fetchVerify downloads key to a temp file (hashing the decompressed stream),

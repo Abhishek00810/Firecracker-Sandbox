@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"backend/internal/plane"
@@ -16,12 +17,19 @@ type Server struct {
 	svc      session.Service
 	token    string
 	maxSlots int
+	draining atomic.Bool
 }
 
 // NewServer builds a worker HTTP server. token is the internal shared secret the
 // control plane must present (empty disables the check — dev only).
 func NewServer(svc session.Service, token string, maxSlots int) *Server {
 	return &Server{svc: svc, token: token, maxSlots: maxSlots}
+}
+
+// BeginDrain immediately rejects new sandbox creates while allowing lifecycle
+// operations for existing sandboxes to finish during graceful shutdown.
+func (s *Server) BeginDrain() {
+	s.draining.Store(true)
 }
 
 // Handler returns the worker API mux.
@@ -46,10 +54,18 @@ func (s *Server) authed(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "role": "worker"})
+	status := "ok"
+	if s.draining.Load() {
+		status = "draining"
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": status, "role": "worker"})
 }
 
 func (s *Server) capacity(w http.ResponseWriter, _ *http.Request) {
+	if s.draining.Load() {
+		writeJSON(w, http.StatusOK, plane.Capacity{FreeSlots: 0, MaxSlots: s.maxSlots})
+		return
+	}
 	// Placeholder: report the configured max; live free-slot accounting comes with
 	// the scheduler. Good enough for the control plane to know a worker exists.
 	writeJSON(w, http.StatusOK, plane.Capacity{FreeSlots: s.maxSlots, MaxSlots: s.maxSlots})
@@ -58,6 +74,10 @@ func (s *Server) capacity(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeErr(w, http.StatusMethodNotAllowed, "method_not_allowed", "use POST")
+		return
+	}
+	if s.draining.Load() {
+		writeErr(w, http.StatusServiceUnavailable, "worker_draining", "worker is draining")
 		return
 	}
 	var req plane.CreateRequest

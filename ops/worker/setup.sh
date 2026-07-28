@@ -47,6 +47,14 @@ if [ ! -f "$ENV_FILE" ]; then
 		printf 'HOST_VALIDATION_MODE=strict\n'
 		printf 'SLOT_COUNT=%s\n' "${SLOT_COUNT:-50}"
 		printf 'MAX_CONCURRENT_PROVISIONS=%s\n' "${MAX_CONCURRENT_PROVISIONS:-8}"
+		printf 'TEMPLATE_SOURCE=%s\n' "${TEMPLATE_SOURCE:-build}"
+		printf 'TEMPLATE_CACHE_DIR=%s\n' "${TEMPLATE_CACHE_DIR:-$WORKER_ROOT/template-cache}"
+		printf 'DEFAULT_TEMPLATE_RELEASE=%s\n' "${DEFAULT_TEMPLATE_RELEASE:-}"
+		printf 'BLOB_STORAGE_ACCOUNT=%s\n' "${BLOB_STORAGE_ACCOUNT:-}"
+		printf 'BLOB_CONTAINER_NAME=%s\n' "${BLOB_CONTAINER_NAME:-}"
+		printf 'BLOB_SECRET_KEY=%s\n' "${BLOB_SECRET_KEY:-}"
+		printf 'SHUTDOWN_GRACE_PERIOD_SECONDS=%s\n' "${SHUTDOWN_GRACE_PERIOD_SECONDS:-300}"
+		printf 'SHUTDOWN_PAUSE_CONCURRENCY=%s\n' "${SHUTDOWN_PAUSE_CONCURRENCY:-4}"
 	} > "$ENV_FILE"
 else
 	echo "preserved existing $ENV_FILE"
