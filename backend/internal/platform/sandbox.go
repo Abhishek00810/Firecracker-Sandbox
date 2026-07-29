@@ -59,7 +59,7 @@ func (c *Client) ListSandboxes(ctx context.Context, userID string) ([]SandboxLis
 }
 
 func (c *Client) UpsertSandbox(ctx context.Context, sb Sandbox) {
-	metadata, _ := json.Marshal(sb.Metadata)
+	metadata, _ := marshalSandboxMetadata(sb.Metadata)
 	var apiKeyID any
 	if sb.APIKeyID != "" {
 		apiKeyID = sb.APIKeyID
@@ -70,10 +70,43 @@ func (c *Client) UpsertSandbox(ctx context.Context, sb Sandbox) {
 	}
 }
 
+// UpdateSandboxDetails enriches the durable row created by the control plane.
+// It deliberately does not update lifecycle or resource fields, which are owned
+// by the control-plane/orchestrator provisioning transaction.
+func (c *Client) UpdateSandboxDetails(ctx context.Context, sb Sandbox) error {
+	metadata, err := marshalSandboxMetadata(sb.Metadata)
+	if err != nil {
+		return fmt.Errorf("marshal sandbox metadata: %w", err)
+	}
+	var apiKeyID any
+	if sb.APIKeyID != "" {
+		apiKeyID = sb.APIKeyID
+	}
+	tag, err := c.pool.Exec(ctx, `
+		UPDATE sandboxes
+		SET api_key_id=$2,
+		    name=$3,
+		    metadata=$4,
+		    updated_at=now()
+		WHERE id::text=$1`,
+		sb.ID,
+		apiKeyID,
+		sb.Name,
+		metadata,
+	)
+	if err != nil {
+		return fmt.Errorf("update sandbox details: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("update sandbox details: sandbox %s not found", sb.ID)
+	}
+	return nil
+}
+
 // InsertSandbox creates the durable scheduling row before any worker capacity
 // is reserved or VM boot is attempted.
 func (c *Client) InsertSandbox(ctx context.Context, sb Sandbox) error {
-	metadata, err := json.Marshal(sb.Metadata)
+	metadata, err := marshalSandboxMetadata(sb.Metadata)
 	if err != nil {
 		return fmt.Errorf("marshal sandbox metadata: %w", err)
 	}
@@ -103,6 +136,13 @@ func (c *Client) InsertSandbox(ctx context.Context, sb Sandbox) error {
 		return fmt.Errorf("insert sandbox: %w", err)
 	}
 	return nil
+}
+
+func marshalSandboxMetadata(metadata map[string]any) ([]byte, error) {
+	if metadata == nil {
+		return []byte("{}"), nil
+	}
+	return json.Marshal(metadata)
 }
 
 func (c *Client) UpdateSandboxState(ctx context.Context, id, state string) {

@@ -208,14 +208,27 @@ jobs:
             cp ops/orchestrator/docker-compose.yml /opt/renderops-orchestrator/docker-compose.yml
             cd /opt/renderops-orchestrator
             image="${{ env.ORCHESTRATOR_IMAGE }}:${{ github.sha }}"
+            cpu_overcommit="${{ vars.ORCHESTRATOR_CPU_OVERCOMMIT_RATIO || '4' }}"
             test -f .env
             test -w .env
+            case "${cpu_overcommit}" in
+              ''|*[!0-9.]*|*.*.*)
+                echo "invalid ORCHESTRATOR_CPU_OVERCOMMIT_RATIO: ${cpu_overcommit}" >&2
+                exit 1
+                ;;
+            esac
             if grep -q "^ORCHESTRATOR_IMAGE=" .env; then
               sed -i "s|^ORCHESTRATOR_IMAGE=.*|ORCHESTRATOR_IMAGE=${image}|" .env
             else
               printf "\nORCHESTRATOR_IMAGE=%s\n" "${image}" >> .env
             fi
+            if grep -q "^ORCHESTRATOR_CPU_OVERCOMMIT_RATIO=" .env; then
+              sed -i "s|^ORCHESTRATOR_CPU_OVERCOMMIT_RATIO=.*|ORCHESTRATOR_CPU_OVERCOMMIT_RATIO=${cpu_overcommit}|" .env
+            else
+              printf "ORCHESTRATOR_CPU_OVERCOMMIT_RATIO=%s\n" "${cpu_overcommit}" >> .env
+            fi
             export ORCHESTRATOR_IMAGE="${image}"
+            export ORCHESTRATOR_CPU_OVERCOMMIT_RATIO="${cpu_overcommit}"
             docker compose config --quiet
             docker compose pull orchestrator
             docker compose up -d orchestrator
@@ -281,6 +294,9 @@ jobs:
           SSH_KEY: ${{ secrets.WORKER_SSH_KEY }}
           SSH_HOST: ${{ secrets.WORKER_HOST }}
           SSH_USER: ${{ secrets.WORKER_USER }}
+          # worker-1 advertises 8 physical vCPUs; nano is 1 vCPU, so 4x = 32.
+          WORKER_SLOT_COUNT: ${{ vars.WORKER_1_SLOT_COUNT || '32' }}
+          WORKER_MAX_SESSIONS: ${{ vars.WORKER_1_MAX_SESSIONS || '32' }}
 
   # Wait for worker 1's health check before touching worker 2. A manual
   # worker-2-only dispatch is allowed to bypass the intentionally skipped first job.
@@ -311,3 +327,6 @@ jobs:
           SSH_KEY: ${{ secrets.WORKER_2_SSH_KEY }}
           SSH_HOST: ${{ secrets.WORKER_2_HOST }}
           SSH_USER: ${{ secrets.WORKER_2_USER }}
+          # worker-2 advertises 48 physical vCPUs; nano is 1 vCPU, so 4x = 192.
+          WORKER_SLOT_COUNT: ${{ vars.WORKER_2_SLOT_COUNT || '192' }}
+          WORKER_MAX_SESSIONS: ${{ vars.WORKER_2_MAX_SESSIONS || '192' }}

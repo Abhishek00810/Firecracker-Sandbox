@@ -33,14 +33,6 @@ func billRuntimeAsync(logger platform.UsageLogger, sandboxID string, ratePerSec 
 	}()
 }
 
-func upsertSandboxAsync(w platform.UsageLogger, sb platform.Sandbox) {
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
-		defer cancel()
-		w.UpsertSandbox(ctx, sb)
-	}()
-}
-
 // recordRunAsync writes the run-history summary (sandbox_runs) and its output lines
 // (sandbox_logs, tagged with the run id) so the dashboard can list runs and, per run,
 // show its stdout/stderr. Best-effort, off the request path.

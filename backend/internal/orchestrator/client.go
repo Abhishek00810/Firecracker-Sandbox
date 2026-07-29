@@ -108,7 +108,18 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		var apiError map[string]string
 		if json.Unmarshal(raw, &apiError) == nil && apiError["error"] != "" {
-			return fmt.Errorf("orchestrator %s: %s", apiError["code"], apiError["error"])
+			switch apiError["code"] {
+			case "no_capacity":
+				return fmt.Errorf("%w: %s", ErrNoCapacity, apiError["error"])
+			case "sandbox_not_found":
+				return fmt.Errorf("%w: %s", ErrSandboxNotFound, apiError["error"])
+			case "worker_not_found":
+				return fmt.Errorf("%w: %s", ErrWorkerNotFound, apiError["error"])
+			case "invalid_state", "invalid_sandbox_state":
+				return fmt.Errorf("%w: %s", ErrInvalidState, apiError["error"])
+			default:
+				return fmt.Errorf("orchestrator %s: %s", apiError["code"], apiError["error"])
+			}
 		}
 		return fmt.Errorf("orchestrator returned %d: %s", response.StatusCode, string(raw))
 	}

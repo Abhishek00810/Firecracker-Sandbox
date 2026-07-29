@@ -65,6 +65,29 @@ func (c *Client) ReconcileWorkerReservations(ctx context.Context) error {
 	return nil
 }
 
+// FailStaleUnplacedSandboxes closes scheduling rows left behind when the
+// control plane failed before the orchestrator reserved a worker. Rows with a
+// host assignment are intentionally excluded because their worker must be
+// reconciled before capacity can be released safely.
+func (c *Client) FailStaleUnplacedSandboxes(ctx context.Context, olderThan time.Duration) (int64, error) {
+	if olderThan <= 0 {
+		return 0, fmt.Errorf("stale scheduling threshold must be positive")
+	}
+	tag, err := c.pool.Exec(ctx, `
+		UPDATE sandboxes
+		SET state='error',
+		    updated_at=now()
+		WHERE state='scheduling'
+		  AND host_id IS NULL
+		  AND updated_at < $1`,
+		time.Now().UTC().Add(-olderThan),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("fail stale unplaced sandboxes: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 func (c *Client) RegisterWorker(ctx context.Context, worker orchestrator.WorkerRegistration, heartbeatAt time.Time) error {
 	_, err := c.pool.Exec(ctx, `
 		INSERT INTO worker_hosts (

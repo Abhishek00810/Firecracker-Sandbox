@@ -4,12 +4,32 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"testing"
 
 	"backend/internal/plane"
 )
+
+func TestClientPreservesNoCapacityError(t *testing.T) {
+	client := NewClient("http://orchestrator.internal:8090", "secret")
+	client.http.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		payload := []byte(`{"code":"no_capacity","error":"no healthy worker has sufficient capacity"}`)
+		return &http.Response{
+			StatusCode: http.StatusServiceUnavailable,
+			Body:       io.NopCloser(bytes.NewReader(payload)),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	_, err := client.Provision(context.Background(), ProvisionRequest{
+		CreateRequest: plane.CreateRequest{SandboxID: "sandbox-1"},
+	})
+	if !errors.Is(err, ErrNoCapacity) {
+		t.Fatalf("error=%v want ErrNoCapacity", err)
+	}
+}
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 

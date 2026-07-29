@@ -66,6 +66,9 @@ WORKER_2_USER
 Each worker needs a distinct `WORKER_ID`, private `WORKER_ADVERTISE_URL`, and
 an authorized deployment public key. Use workflow targets `worker-1` or
 `worker-2` for a single host, and `worker` for the rolling two-host deployment.
+The workflow also sets each host's network-slot and maximum-session capacity:
+32 on the 8-vCPU worker and 192 on the 48-vCPU worker, matching the current
+4x CPU overcommit policy for 1-vCPU nano sandboxes.
 
 ## Orchestrator server
 

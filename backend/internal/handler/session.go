@@ -2,8 +2,10 @@ package handler
 
 import (
 	"context"
+	"errors"
 
 	"backend/internal/middleware"
+	"backend/internal/orchestrator"
 	"backend/internal/plane"
 	"backend/internal/platform"
 	"encoding/json"
@@ -90,8 +92,36 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 			sess, err := mgr.Create(r.Context(), auth.TenantID, auth.Billing.Model, createReq.Env, size.VCPUs, size.MemoryMB, size.DiskGB, internet, idleTimeout, maxLifetime)
 			if err != nil {
 				slog.Error("failed to create session", "err", err)
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				status := http.StatusInternalServerError
+				code := "provision_failed"
+				if errors.Is(err, orchestrator.ErrNoCapacity) {
+					status = http.StatusServiceUnavailable
+					code = "no_capacity"
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				json.NewEncoder(w).Encode(APIError{
+					Status:    "error",
+					Code:      code,
+					Message:   err.Error(),
+					RequestID: requestID,
+				})
 				return
+			}
+
+			// The control plane already owns the durable lifecycle row. Enrich
+			// dashboard fields without allowing this write to overwrite state.
+			name := createReq.Name
+			if name == "" {
+				name = "sandbox"
+			}
+			if err := usageLogger.UpdateSandboxDetails(r.Context(), platform.Sandbox{
+				ID:       sess.ID,
+				APIKeyID: auth.APIKeyID,
+				Name:     name,
+				Metadata: createReq.Metadata,
+			}); err != nil {
+				slog.Warn("sandbox details update failed", "sandbox_id", sess.ID, "err", err)
 			}
 
 			w.Header().Set("Content-Type", "application/json")
@@ -127,25 +157,6 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 				DurationMs:    0,
 				ExitCode:      0,
 				CostUSD:       0.0,
-			})
-
-			// Register the sandbox in the DB (the dashboard's source of truth for listing).
-			name := createReq.Name
-			if name == "" {
-				name = "sandbox"
-			}
-			upsertSandboxAsync(usageLogger, platform.Sandbox{
-				ID:           sess.ID,
-				UserID:       auth.TenantID,
-				APIKeyID:     auth.APIKeyID,
-				Name:         name,
-				State:        "active",
-				BillingModel: auth.Billing.Model,
-				VCPUs:        size.VCPUs,
-				MemoryMB:     size.MemoryMB,
-				DiskGB:       size.DiskGB,
-				Internet:     internet,
-				Metadata:     createReq.Metadata,
 			})
 
 		// POST /session/:id/run — execute code in session

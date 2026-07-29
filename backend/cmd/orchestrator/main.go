@@ -18,6 +18,11 @@ import (
 	"backend/internal/platform"
 )
 
+const (
+	staleSchedulingThreshold = 5 * time.Minute
+	staleSchedulingInterval  = time.Minute
+)
+
 func main() {
 	cfg, err := orchestratorconfig.Load()
 	if err != nil {
@@ -39,6 +44,14 @@ func main() {
 		os.Exit(1)
 	}
 	reconcileCancel()
+
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if count, err := db.FailStaleUnplacedSandboxes(cleanupCtx, staleSchedulingThreshold); err != nil {
+		slog.Warn("initial stale scheduling cleanup failed", "err", err)
+	} else if count > 0 {
+		slog.Info("marked stale unplaced sandboxes as error", "count", count)
+	}
+	cleanupCancel()
 
 	service := orchestrator.NewService(
 		db,
@@ -74,9 +87,31 @@ func main() {
 		}
 	}()
 
+	cleanupStop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(staleSchedulingInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				count, err := db.FailStaleUnplacedSandboxes(ctx, staleSchedulingThreshold)
+				cancel()
+				if err != nil {
+					slog.Warn("stale scheduling cleanup failed", "err", err)
+				} else if count > 0 {
+					slog.Info("marked stale unplaced sandboxes as error", "count", count)
+				}
+			case <-cleanupStop:
+				return
+			}
+		}
+	}()
+
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
+	close(cleanupStop)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

@@ -66,9 +66,12 @@ func (s *Server) capacity(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, plane.Capacity{FreeSlots: 0, MaxSlots: s.maxSlots})
 		return
 	}
-	// Placeholder: report the configured max; live free-slot accounting comes with
-	// the scheduler. Good enough for the control plane to know a worker exists.
-	writeJSON(w, http.StatusOK, plane.Capacity{FreeSlots: s.maxSlots, MaxSlots: s.maxSlots})
+	used := s.svc.Stats()["total_sessions"]
+	free := s.maxSlots - used
+	if free < 0 {
+		free = 0
+	}
+	writeJSON(w, http.StatusOK, plane.Capacity{FreeSlots: free, MaxSlots: s.maxSlots})
 }
 
 func (s *Server) create(w http.ResponseWriter, r *http.Request) {

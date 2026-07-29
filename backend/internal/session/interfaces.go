@@ -16,4 +16,5 @@ type Service interface {
 	Resume(ctx context.Context, sessionID string) error
 	Destroy(ctx context.Context, sessionID string) error
 	GetSession(id string) (*Session, bool)
+	Stats() map[string]int
 }

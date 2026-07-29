@@ -4,6 +4,7 @@ import (
 	"backend/internal/billing"
 	"backend/internal/handler"
 	"backend/internal/middleware"
+	"backend/internal/orchestrator"
 	"backend/internal/plane"
 	"backend/internal/platform"
 	"bytes"
@@ -56,6 +57,39 @@ func TestSessionCreateAcceptsBetterAuthSession(t *testing.T) {
 	}
 	if resp.Tenant == nil || resp.Tenant.TenantID != "better-auth-user" {
 		t.Fatalf("unexpected tenant payload: %+v", resp.Tenant)
+	}
+}
+
+func TestSessionCreateReturnsServiceUnavailableWhenCapacityIsExhausted(t *testing.T) {
+	server := newTestServer(t, testDeps{
+		resolver: &fakePlatformService{
+			record: platform.KeyRecord{
+				ID:         "key-1",
+				UserID:     "tenant-1",
+				IsActive:   true,
+				BalanceUSD: 10,
+			},
+		},
+		sessionSvc: &fakeSessionService{
+			sessions:  map[string]*plane.SessionInfo{},
+			createErr: orchestrator.ErrNoCapacity,
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/session", nil)
+	req.Header.Set("Authorization", "Bearer ro_live_test-key")
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var response handler.APIError
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != "no_capacity" {
+		t.Fatalf("code=%q want no_capacity", response.Code)
 	}
 }
 
@@ -384,7 +418,10 @@ func (f *fakePlatformService) InsertUsageLog(ctx context.Context, log platform.U
 	}
 }
 
-func (f *fakePlatformService) UpsertSandbox(ctx context.Context, sb platform.Sandbox)        {}
+func (f *fakePlatformService) UpsertSandbox(ctx context.Context, sb platform.Sandbox) {}
+func (f *fakePlatformService) UpdateSandboxDetails(ctx context.Context, sb platform.Sandbox) error {
+	return nil
+}
 func (f *fakePlatformService) UpdateSandboxState(ctx context.Context, id, state string)      {}
 func (f *fakePlatformService) InsertSandboxLog(ctx context.Context, l platform.SandboxLog)   {}
 func (f *fakePlatformService) InsertSandboxRun(ctx context.Context, run platform.SandboxRun) {}
@@ -399,8 +436,9 @@ func (f *fakePlatformService) GetProfile(userID string) (platform.Profile, error
 }
 
 type fakeSessionService struct {
-	mu       sync.Mutex
-	sessions map[string]*plane.SessionInfo
+	mu        sync.Mutex
+	sessions  map[string]*plane.SessionInfo
+	createErr error
 }
 
 func newFakeSessionService() *fakeSessionService {
@@ -423,6 +461,9 @@ func (f *fakeSessionService) Exec(ctx context.Context, sessionID, command string
 func (f *fakeSessionService) Create(ctx context.Context, userID, billingModel string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*plane.SessionInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.createErr != nil {
+		return nil, f.createErr
+	}
 
 	id := fmt.Sprintf("sess-%d", len(f.sessions)+1)
 	sess := &plane.SessionInfo{

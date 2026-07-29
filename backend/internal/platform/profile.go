@@ -131,7 +131,10 @@ func (c *Client) BillSandboxRuntime(ctx context.Context, sandboxID string, rateP
 	if _, err = tx.Exec(ctx, `
 		UPDATE sandboxes
 		SET metadata = jsonb_set(
-		      COALESCE(metadata, '{}'::jsonb),
+		      CASE
+		        WHEN jsonb_typeof(metadata) = 'object' THEN metadata
+		        ELSE '{}'::jsonb
+		      END,
 		      '{last_billed_at}',
 		      to_jsonb($2::text),
 		      true

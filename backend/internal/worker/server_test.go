@@ -51,6 +51,13 @@ func (f *fakeSessionService) Destroy(context.Context, string) error { return nil
 func (f *fakeSessionService) GetSession(string) (*session.Session, bool) {
 	return f.session, f.session != nil
 }
+func (f *fakeSessionService) Stats() map[string]int {
+	count := 0
+	if f.session != nil {
+		count = 1
+	}
+	return map[string]int{"active_sessions": count, "total_sessions": count}
+}
 
 func TestCreateUsesControlPlaneSandboxID(t *testing.T) {
 	service := &fakeSessionService{}
@@ -114,5 +121,29 @@ func TestDrainingWorkerRejectsNewSandboxes(t *testing.T) {
 	}
 	if service.createdID != "" {
 		t.Fatalf("draining worker created sandbox %q", service.createdID)
+	}
+}
+
+func TestCapacityReportsLiveFreeSlots(t *testing.T) {
+	service := &fakeSessionService{session: &session.Session{ID: "sandbox-1"}}
+	server := NewServer(service, "worker-secret", 10)
+	request := httptest.NewRequest(http.MethodGet, "/worker/capacity", nil)
+	request.Header.Set("X-Worker-Token", "worker-secret")
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var capacity struct {
+		FreeSlots int `json:"free_slots"`
+		MaxSlots  int `json:"max_slots"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&capacity); err != nil {
+		t.Fatal(err)
+	}
+	if capacity.FreeSlots != 9 || capacity.MaxSlots != 10 {
+		t.Fatalf("capacity=%+v", capacity)
 	}
 }

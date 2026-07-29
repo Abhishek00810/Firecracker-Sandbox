@@ -802,7 +802,16 @@ func (m *Manager) GetSession(id string) (*Session, bool) {
 }
 
 func (m *Manager) Stats() map[string]int {
-	return map[string]int{"active_sessions": m.store.Count()}
+	active := 0
+	for _, sess := range m.store.All() {
+		if sess.State == StateActive {
+			active++
+		}
+	}
+	return map[string]int{
+		"active_sessions": active,
+		"total_sessions":  m.store.Count(),
+	}
 }
 
 // reaper runs every minute: it PAUSES idle active sessions (freeing RAM/slot while

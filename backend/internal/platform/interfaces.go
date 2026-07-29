@@ -13,6 +13,7 @@ type SessionResolver interface {
 type UsageLogger interface {
 	InsertUsageLog(ctx context.Context, log UsageLog)
 	UpsertSandbox(ctx context.Context, sb Sandbox)
+	UpdateSandboxDetails(ctx context.Context, sb Sandbox) error
 	UpdateSandboxState(ctx context.Context, id, state string)
 	InsertSandboxLog(ctx context.Context, l SandboxLog)
 	InsertSandboxRun(ctx context.Context, run SandboxRun)
