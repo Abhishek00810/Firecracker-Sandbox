@@ -211,8 +211,9 @@ jobs:
             cpu_overcommit="${{ vars.ORCHESTRATOR_CPU_OVERCOMMIT_RATIO || '4' }}"
             test -f .env
             test -w .env
+            test -n "${cpu_overcommit}"
             case "${cpu_overcommit}" in
-              ''|*[!0-9.]*|*.*.*)
+              *[!0-9.]*|*.*.*)
                 echo "invalid ORCHESTRATOR_CPU_OVERCOMMIT_RATIO: ${cpu_overcommit}" >&2
                 exit 1
                 ;;
