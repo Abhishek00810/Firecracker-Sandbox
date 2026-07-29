@@ -206,6 +206,8 @@ func writeServiceError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrNoCapacity):
 		writeHTTPError(w, http.StatusServiceUnavailable, "no_capacity", err.Error())
+	case errors.Is(err, ErrPlacementBusy):
+		writeHTTPError(w, http.StatusServiceUnavailable, "scheduler_busy", err.Error())
 	case errors.Is(err, ErrWorkerNotFound):
 		writeHTTPError(w, http.StatusNotFound, "worker_not_found", err.Error())
 	case errors.Is(err, ErrSandboxNotFound):

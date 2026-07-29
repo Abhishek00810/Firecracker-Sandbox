@@ -111,6 +111,8 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 			switch apiError["code"] {
 			case "no_capacity":
 				return fmt.Errorf("%w: %s", ErrNoCapacity, apiError["error"])
+			case "scheduler_busy":
+				return fmt.Errorf("%w: %s", ErrPlacementBusy, apiError["error"])
 			case "sandbox_not_found":
 				return fmt.Errorf("%w: %s", ErrSandboxNotFound, apiError["error"])
 			case "worker_not_found":

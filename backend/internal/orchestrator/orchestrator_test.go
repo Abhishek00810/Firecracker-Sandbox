@@ -28,6 +28,8 @@ type fakeStore struct {
 	resumeCanceled bool
 	releaseState   string
 	releaseWorker  string
+	reserveErrors  []error
+	reserveCalls   int
 	err            error
 }
 
@@ -48,6 +50,12 @@ func (f *fakeStore) SetWorkerDraining(_ context.Context, id string, draining boo
 
 func (f *fakeStore) ReservePlacement(_ context.Context, sandboxID string, request PlacementRequest, policy PlacementPolicy, healthyAfter time.Time) (Placement, error) {
 	f.sandboxID, f.request, f.policy, f.healthyAfter = sandboxID, request, policy, healthyAfter
+	f.reserveCalls++
+	if len(f.reserveErrors) > 0 {
+		err := f.reserveErrors[0]
+		f.reserveErrors = f.reserveErrors[1:]
+		return f.placement, err
+	}
 	return f.placement, f.err
 }
 
@@ -214,6 +222,51 @@ func TestPlacePropagatesNoCapacity(t *testing.T) {
 	_, err := svc.Place(context.Background(), "sandbox-1", PlacementRequest{})
 	if !errors.Is(err, ErrNoCapacity) {
 		t.Fatalf("error=%v want ErrNoCapacity", err)
+	}
+}
+
+func TestPlaceRetriesTemporaryContention(t *testing.T) {
+	store := &fakeStore{
+		placement: Placement{SandboxID: "sandbox-1", WorkerID: "worker-1"},
+		reserveErrors: []error{
+			ErrPlacementBusy,
+			ErrPlacementBusy,
+			nil,
+		},
+	}
+	svc := NewService(store, 30*time.Second)
+	var waits []time.Duration
+	svc.waitForRetry = func(_ context.Context, ceiling time.Duration) error {
+		waits = append(waits, ceiling)
+		return nil
+	}
+
+	placement, err := svc.Place(context.Background(), "sandbox-1", PlacementRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if placement.WorkerID != "worker-1" {
+		t.Fatalf("worker=%q", placement.WorkerID)
+	}
+	if store.reserveCalls != 3 {
+		t.Fatalf("reserve calls=%d want=3", store.reserveCalls)
+	}
+	if len(waits) != 2 || waits[0] != 5*time.Millisecond || waits[1] != 10*time.Millisecond {
+		t.Fatalf("wait ceilings=%v", waits)
+	}
+}
+
+func TestPlaceBoundsPersistentContention(t *testing.T) {
+	store := &fakeStore{err: ErrPlacementBusy}
+	svc := NewService(store, 30*time.Second)
+	svc.waitForRetry = func(_ context.Context, _ time.Duration) error { return nil }
+
+	_, err := svc.Place(context.Background(), "sandbox-1", PlacementRequest{})
+	if !errors.Is(err, ErrPlacementBusy) {
+		t.Fatalf("error=%v want ErrPlacementBusy", err)
+	}
+	if store.reserveCalls != maxPlacementAttempts {
+		t.Fatalf("reserve calls=%d want=%d", store.reserveCalls, maxPlacementAttempts)
 	}
 }
 

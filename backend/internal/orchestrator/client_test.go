@@ -31,6 +31,25 @@ func TestClientPreservesNoCapacityError(t *testing.T) {
 	}
 }
 
+func TestClientPreservesSchedulerBusyError(t *testing.T) {
+	client := NewClient("http://orchestrator.internal:8090", "secret")
+	client.http.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		payload := []byte(`{"code":"scheduler_busy","error":"worker placement is temporarily contended"}`)
+		return &http.Response{
+			StatusCode: http.StatusServiceUnavailable,
+			Body:       io.NopCloser(bytes.NewReader(payload)),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	_, err := client.Provision(context.Background(), ProvisionRequest{
+		CreateRequest: plane.CreateRequest{SandboxID: "sandbox-1"},
+	})
+	if !errors.Is(err, ErrPlacementBusy) {
+		t.Fatalf("error=%v want ErrPlacementBusy", err)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {

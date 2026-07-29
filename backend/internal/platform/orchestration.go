@@ -240,6 +240,33 @@ func (c *Client) ReservePlacement(
 	).Scan(&placement.WorkerID, &placement.Endpoint)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
+			var feasibleWorkerExists bool
+			if err := tx.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1
+					FROM worker_hosts
+					WHERE pool=$1
+					  AND status='active'
+					  AND NOT draining
+					  AND last_heartbeat_at >= $2
+					  AND FLOOR(allocatable_vcpus * $6)-reserved_vcpus >= $3
+					  AND FLOOR(allocatable_memory_mb * $7)-reserved_memory_mb >= $4
+					  AND allocatable_disk_gb-reserved_disk_gb >= $5
+					  AND max_sandboxes-reserved_sandboxes >= 1
+				)`,
+				request.Pool,
+				healthyAfter,
+				vcpus,
+				memoryMB,
+				diskGB,
+				policy.CPUOvercommitRatio,
+				policy.MemoryOvercommitRatio,
+			).Scan(&feasibleWorkerExists); err != nil {
+				return orchestrator.Placement{}, fmt.Errorf("check placement contention: %w", err)
+			}
+			if feasibleWorkerExists {
+				return orchestrator.Placement{}, orchestrator.ErrPlacementBusy
+			}
 			return orchestrator.Placement{}, orchestrator.ErrNoCapacity
 		}
 		return orchestrator.Placement{}, fmt.Errorf("select worker for placement: %w", err)

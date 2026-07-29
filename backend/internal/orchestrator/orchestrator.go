@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"net/url"
 	"regexp"
 	"strings"
@@ -17,12 +18,19 @@ import (
 
 var (
 	ErrNoCapacity      = errors.New("no healthy worker has sufficient capacity")
+	ErrPlacementBusy   = errors.New("worker placement is temporarily contended")
 	ErrWorkerNotFound  = errors.New("worker not found")
 	ErrSandboxNotFound = errors.New("sandbox not found")
 	ErrInvalidState    = errors.New("sandbox lifecycle transition is no longer valid")
 )
 
 var workerIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+const (
+	maxPlacementAttempts  = 9
+	initialContentionWait = 5 * time.Millisecond
+	maxContentionWait     = 100 * time.Millisecond
+)
 
 type WorkerRegistration struct {
 	ID                  string `json:"id"`
@@ -86,6 +94,7 @@ type Service struct {
 	now             func() time.Time
 	workerClient    WorkerClientFactory
 	placementPolicy PlacementPolicy
+	waitForRetry    func(context.Context, time.Duration) error
 }
 
 type Option func(*Service)
@@ -111,6 +120,7 @@ func NewService(store Store, heartbeatTTL time.Duration, options ...Option) *Ser
 		heartbeatTTL:    heartbeatTTL,
 		now:             time.Now,
 		placementPolicy: normalizePlacementPolicy(PlacementPolicy{}),
+		waitForRetry:    waitWithJitter,
 	}
 	for _, option := range options {
 		option(service)
@@ -166,7 +176,39 @@ func (s *Service) Place(ctx context.Context, sandboxID string, request Placement
 		request.Pool = "default"
 	}
 	healthyAfter := s.now().UTC().Add(-s.heartbeatTTL)
-	return s.store.ReservePlacement(ctx, sandboxID, request, s.placementPolicy, healthyAfter)
+	for attempt := 0; attempt < maxPlacementAttempts; attempt++ {
+		placement, err := s.store.ReservePlacement(ctx, sandboxID, request, s.placementPolicy, healthyAfter)
+		if !errors.Is(err, ErrPlacementBusy) {
+			return placement, err
+		}
+		if attempt == maxPlacementAttempts-1 {
+			return Placement{}, ErrPlacementBusy
+		}
+		if err := s.waitForRetry(ctx, contentionWait(attempt)); err != nil {
+			return Placement{}, err
+		}
+	}
+	return Placement{}, ErrPlacementBusy
+}
+
+func contentionWait(attempt int) time.Duration {
+	wait := initialContentionWait << attempt
+	if wait > maxContentionWait {
+		return maxContentionWait
+	}
+	return wait
+}
+
+func waitWithJitter(ctx context.Context, ceiling time.Duration) error {
+	wait := time.Duration(rand.Int63n(int64(ceiling) + 1))
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func normalizePlacementPolicy(policy PlacementPolicy) PlacementPolicy {

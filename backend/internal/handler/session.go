@@ -97,6 +97,9 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 				if errors.Is(err, orchestrator.ErrNoCapacity) {
 					status = http.StatusServiceUnavailable
 					code = "no_capacity"
+				} else if errors.Is(err, orchestrator.ErrPlacementBusy) {
+					status = http.StatusServiceUnavailable
+					code = "scheduler_busy"
 				}
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(status)
