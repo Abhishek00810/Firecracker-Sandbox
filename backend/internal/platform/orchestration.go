@@ -199,17 +199,20 @@ func (c *Client) ReservePlacement(
 			  AND NOT draining
 			  AND last_heartbeat_at >= $2
 			  AND capacity_reported_at >= $2
-			  AND FLOOR(allocatable_vcpus*$6)-reported_vcpus >= $3
-			  AND FLOOR(allocatable_memory_mb*$7)-reported_memory_mb >= $4
-			  AND allocatable_disk_gb-reported_disk_gb >= $5
-			  AND max_sandboxes-reported_sandboxes >= 1
+			  -- Reported usage is a stale-tolerant ranking hint, never a hard
+			  -- admission gate. Only exclude workers whose static shape cannot
+			  -- ever satisfy this request; the worker makes the atomic decision.
+			  AND FLOOR(allocatable_vcpus*$6) >= $3
+			  AND FLOOR(allocatable_memory_mb*$7) >= $4
+			  AND allocatable_disk_gb >= $5
+			  AND max_sandboxes >= 1
 			  AND NOT (id = ANY($8::text[]))
 			ORDER BY random()
 			LIMIT $9
 		)
 		SELECT id, endpoint
 		FROM sampled
-		ORDER BY GREATEST(cpu_score,memory_score), id
+		ORDER BY GREATEST(cpu_score,memory_score), random()
 		LIMIT 1`,
 		request.Pool,
 		healthyAfter,
