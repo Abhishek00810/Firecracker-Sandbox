@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"backend/internal/plane"
 )
 
 type Client struct {
@@ -53,8 +55,8 @@ func (c *Client) RegisterWorker(ctx context.Context, registration WorkerRegistra
 	return c.do(ctx, http.MethodPut, "/internal/workers/"+registration.ID, registration, nil)
 }
 
-func (c *Client) Heartbeat(ctx context.Context, workerID string) error {
-	return c.do(ctx, http.MethodPost, "/internal/workers/"+workerID+"/heartbeat", nil, nil)
+func (c *Client) Heartbeat(ctx context.Context, workerID string, capacity plane.Capacity) error {
+	return c.do(ctx, http.MethodPost, "/internal/workers/"+workerID+"/heartbeat", capacity, nil)
 }
 
 func (c *Client) SetWorkerDraining(ctx context.Context, workerID string, draining bool) error {

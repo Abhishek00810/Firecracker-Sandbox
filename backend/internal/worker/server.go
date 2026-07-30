@@ -2,6 +2,7 @@ package worker
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -14,16 +15,23 @@ import (
 // Server serves the worker HTTP API backed by a session.Service (the execution
 // engine). The control plane calls it; users never reach it directly.
 type Server struct {
-	svc      session.Service
-	token    string
-	maxSlots int
-	draining atomic.Bool
+	svc       session.Service
+	token     string
+	maxSlots  int
+	admission *Admission
+	draining  atomic.Bool
 }
 
 // NewServer builds a worker HTTP server. token is the internal shared secret the
 // control plane must present (empty disables the check — dev only).
 func NewServer(svc session.Service, token string, maxSlots int) *Server {
 	return &Server{svc: svc, token: token, maxSlots: maxSlots}
+}
+
+func NewServerWithAdmission(svc session.Service, token string, admission *Admission) *Server {
+	return &Server{
+		svc: svc, token: token, maxSlots: admission.Capacity().MaxSlots, admission: admission,
+	}
 }
 
 // BeginDrain immediately rejects new sandbox creates while allowing lifecycle
@@ -62,6 +70,14 @@ func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) capacity(w http.ResponseWriter, _ *http.Request) {
+	if s.admission != nil {
+		capacity := s.admission.Capacity()
+		if s.draining.Load() {
+			capacity.FreeSlots = 0
+		}
+		writeJSON(w, http.StatusOK, capacity)
+		return
+	}
 	if s.draining.Load() {
 		writeJSON(w, http.StatusOK, plane.Capacity{FreeSlots: 0, MaxSlots: s.maxSlots})
 		return
@@ -92,10 +108,23 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad_request", "sandbox_id is required")
 		return
 	}
+	if s.admission != nil {
+		if err := s.admission.ReserveCreate(req); err != nil {
+			if errors.Is(err, plane.ErrNoCapacity) {
+				writeErr(w, http.StatusTooManyRequests, "no_capacity", err.Error())
+			} else {
+				writeErr(w, http.StatusConflict, "reservation_conflict", err.Error())
+			}
+			return
+		}
+	}
 	sess, err := s.svc.CreateWithID(r.Context(), req.SandboxID, req.UserID, req.BillingModel, req.Env,
 		req.VCPUs, req.MemoryMB, req.DiskGB, req.Internet,
 		secs(req.IdleTimeoutS), secs(req.MaxLifetimeS))
 	if err != nil {
+		if s.admission != nil {
+			s.admission.Release(req.SandboxID)
+		}
 		writeErr(w, http.StatusInternalServerError, "create_failed", err.Error())
 		return
 	}
@@ -139,15 +168,39 @@ func (s *Server) sandboxOp(w http.ResponseWriter, r *http.Request) {
 		s.writeResult(w, res, err)
 
 	case op == "pause" && r.Method == http.MethodPost:
-		s.writeStatus(w, s.svc.Pause(r.Context(), id))
+		err := s.svc.Pause(r.Context(), id)
+		if err == nil && s.admission != nil {
+			s.admission.MarkPaused(id)
+		}
+		s.writeStatus(w, err)
 
 	case op == "resume" && r.Method == http.MethodPost:
-		s.writeStatus(w, s.svc.Resume(r.Context(), id))
+		if s.admission != nil {
+			if err := s.admission.ReserveResume(id); err != nil {
+				if errors.Is(err, plane.ErrNoCapacity) {
+					writeErr(w, http.StatusTooManyRequests, "no_capacity", err.Error())
+				} else {
+					writeErr(w, http.StatusConflict, "reservation_conflict", err.Error())
+				}
+				return
+			}
+		}
+		err := s.svc.Resume(r.Context(), id)
+		if err != nil && s.admission != nil {
+			s.admission.MarkPaused(id)
+		}
+		s.writeStatus(w, err)
 
 	case op == "" && r.Method == http.MethodDelete:
 		if err := s.svc.Destroy(r.Context(), id); err != nil {
+			if s.admission != nil && strings.Contains(strings.ToLower(err.Error()), "not found") {
+				s.admission.Release(id)
+			}
 			s.writeStatus(w, err)
 			return
+		}
+		if s.admission != nil {
+			s.admission.Release(id)
 		}
 		w.WriteHeader(http.StatusNoContent)
 

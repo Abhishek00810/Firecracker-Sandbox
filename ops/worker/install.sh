@@ -9,7 +9,7 @@
 #
 # Usage: install-worker.sh <local-binary-path>
 # Env:   SSH_KEY (private key contents), SSH_HOST, SSH_USER
-#        WORKER_SLOT_COUNT, WORKER_MAX_SESSIONS (optional non-secret capacity)
+#        WORKER_SLOT_COUNT, WORKER_MAX_SESSIONS, WORKER_*_OVERCOMMIT_RATIO
 #        CONTROL_PLANE_INTERNAL_URL (internal raw-usage ingestion endpoint)
 set -euo pipefail
 
@@ -44,7 +44,7 @@ $SCP "$UNIT"   "${SSH_USER}@${SSH_HOST}:/tmp/renderops-worker.service.new"
 
 echo "==> installing (idempotent) and restarting"
 # shellcheck disable=SC2087
-$SSH "sudo WORKER_SLOT_COUNT='${WORKER_SLOT_COUNT:-}' WORKER_MAX_SESSIONS='${WORKER_MAX_SESSIONS:-}' bash -s" <<'REMOTE'
+$SSH "sudo WORKER_SLOT_COUNT='${WORKER_SLOT_COUNT:-}' WORKER_MAX_SESSIONS='${WORKER_MAX_SESSIONS:-}' WORKER_CPU_OVERCOMMIT_RATIO='${WORKER_CPU_OVERCOMMIT_RATIO:-}' WORKER_MEMORY_OVERCOMMIT_RATIO='${WORKER_MEMORY_OVERCOMMIT_RATIO:-}' CONTROL_PLANE_INTERNAL_URL='${CONTROL_PLANE_INTERNAL_URL:-}' bash -s" <<'REMOTE'
 set -euo pipefail
 # Preconditions from the one-time host setup — fail clearly if missing.
 if [ ! -f /etc/renderops/worker.env ]; then
@@ -72,6 +72,8 @@ set_env_value() {
 # network provisioning and advertised max sessions change together on restart.
 set_env_value SLOT_COUNT "$WORKER_SLOT_COUNT"
 set_env_value WORKER_MAX_SESSIONS "$WORKER_MAX_SESSIONS"
+set_env_value WORKER_CPU_OVERCOMMIT_RATIO "$WORKER_CPU_OVERCOMMIT_RATIO"
+set_env_value WORKER_MEMORY_OVERCOMMIT_RATIO "$WORKER_MEMORY_OVERCOMMIT_RATIO"
 set_env_value CONTROL_PLANE_INTERNAL_URL "${CONTROL_PLANE_INTERNAL_URL:-}"
 
 install -D -m 0755 /tmp/renderops-worker.new /opt/renderops/renderops-worker

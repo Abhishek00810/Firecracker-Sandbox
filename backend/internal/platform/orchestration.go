@@ -7,63 +7,16 @@ import (
 	"time"
 
 	"backend/internal/orchestrator"
+	"backend/internal/plane"
 
 	"github.com/jackc/pgx/v5"
 )
 
 var _ orchestrator.Store = (*Client)(nil)
 
-// ReconcileWorkerReservations rebuilds cached host counters from durable
-// sandbox placement state. The table locks make the repair safe against
-// concurrent placement changes and also upgrade rows written by older versions
-// that kept paused compute reserved.
-func (c *Client) ReconcileWorkerReservations(ctx context.Context) error {
-	tx, err := c.pool.BeginTx(ctx, pgx.TxOptions{})
-	if err != nil {
-		return fmt.Errorf("begin worker reservation reconciliation: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	if _, err := tx.Exec(ctx, `LOCK TABLE sandboxes IN SHARE MODE`); err != nil {
-		return fmt.Errorf("lock sandboxes for reservation reconciliation: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `LOCK TABLE worker_hosts IN SHARE ROW EXCLUSIVE MODE`); err != nil {
-		return fmt.Errorf("lock workers for reservation reconciliation: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `
-		UPDATE worker_hosts w
-		SET reserved_vcpus=COALESCE((
-		        SELECT SUM(s.vcpus)::integer
-		        FROM sandboxes s
-		        WHERE s.host_id=w.id
-		          AND s.state IN ('provisioning','active','resuming','destroying')
-		    ),0),
-		    reserved_memory_mb=COALESCE((
-		        SELECT SUM(s.memory_mb)::integer
-		        FROM sandboxes s
-		        WHERE s.host_id=w.id
-		          AND s.state IN ('provisioning','active','resuming','destroying')
-		    ),0),
-		    reserved_disk_gb=COALESCE((
-		        SELECT SUM(s.disk_gb)::integer
-		        FROM sandboxes s
-		        WHERE s.host_id=w.id
-		          AND s.state IN ('provisioning','active','paused','resuming','destroying')
-		    ),0),
-		    reserved_sandboxes=COALESCE((
-		        SELECT COUNT(*)::integer
-		        FROM sandboxes s
-		        WHERE s.host_id=w.id
-		          AND s.state IN ('provisioning','active','paused','resuming','destroying')
-		    ),0),
-		    updated_at=now()`); err != nil {
-		return fmt.Errorf("reconcile worker reservations: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit worker reservation reconciliation: %w", err)
-	}
-	return nil
-}
+// bestOfKSampleSize bounds scheduler work while avoiding the load imbalance of
+// selecting a single random worker. This follows the best-of-K pattern with K=3.
+const bestOfKSampleSize = 3
 
 // FailStaleUnplacedSandboxes closes scheduling rows left behind when the
 // control plane failed before the orchestrator reserved a worker. Rows with a
@@ -122,15 +75,29 @@ func (c *Client) RegisterWorker(ctx context.Context, worker orchestrator.WorkerR
 	return nil
 }
 
-func (c *Client) RecordHeartbeat(ctx context.Context, workerID string, heartbeatAt time.Time) error {
+func (c *Client) RecordHeartbeat(
+	ctx context.Context,
+	workerID string,
+	capacity plane.Capacity,
+	heartbeatAt time.Time,
+) error {
 	tag, err := c.pool.Exec(ctx, `
 		UPDATE worker_hosts
 		SET last_heartbeat_at=$2,
+		    reported_vcpus=$3,
+		    reported_memory_mb=$4,
+		    reported_disk_gb=$5,
+		    reported_sandboxes=$6,
+		    capacity_reported_at=$2,
 		    status=CASE WHEN draining THEN 'draining' ELSE 'active' END,
 		    updated_at=now()
 		WHERE id=$1`,
 		workerID,
 		heartbeatAt,
+		capacity.ReservedVCPUs,
+		capacity.ReservedMemoryMB,
+		capacity.ReservedDiskGB,
+		capacity.ReservedSandboxes,
 	)
 	if err != nil {
 		return fmt.Errorf("record worker heartbeat: %w", err)
@@ -179,7 +146,7 @@ func (c *Client) ReservePlacement(
 	if err := tx.QueryRow(ctx, `
 		SELECT host_id, vcpus, memory_mb, disk_gb, state
 		FROM sandboxes
-		WHERE id::text=$1
+		WHERE id=$1::uuid
 		FOR UPDATE`,
 		sandboxID,
 	).Scan(&existingWorkerID, &vcpus, &memoryMB, &diskGB, &currentState); err != nil {
@@ -193,6 +160,12 @@ func (c *Client) ReservePlacement(
 	}
 
 	if existingWorkerID != nil {
+		if currentState == "provisioning" || currentState == "resuming" || currentState == "destroying" {
+			return orchestrator.Placement{}, orchestrator.ErrPlacementBusy
+		}
+		if currentState != "active" {
+			return orchestrator.Placement{}, orchestrator.ErrInvalidState
+		}
 		var placement orchestrator.Placement
 		placement.SandboxID = sandboxID
 		placement.WorkerID = *existingWorkerID
@@ -214,21 +187,29 @@ func (c *Client) ReservePlacement(
 	placement.SandboxID = sandboxID
 	placement.State = "provisioning"
 	err = tx.QueryRow(ctx, `
+		WITH sampled AS (
+			SELECT id, endpoint,
+			       (reported_vcpus+$3)::double precision /
+			         GREATEST(1, FLOOR(allocatable_vcpus*$6)) AS cpu_score,
+			       (reported_memory_mb+$4)::double precision /
+			         GREATEST(1, FLOOR(allocatable_memory_mb*$7)) AS memory_score
+			FROM worker_hosts
+			WHERE pool=$1
+			  AND status='active'
+			  AND NOT draining
+			  AND last_heartbeat_at >= $2
+			  AND capacity_reported_at >= $2
+			  AND FLOOR(allocatable_vcpus*$6)-reported_vcpus >= $3
+			  AND FLOOR(allocatable_memory_mb*$7)-reported_memory_mb >= $4
+			  AND allocatable_disk_gb-reported_disk_gb >= $5
+			  AND max_sandboxes-reported_sandboxes >= 1
+			  AND NOT (id = ANY($8::text[]))
+			ORDER BY random()
+			LIMIT $9
+		)
 		SELECT id, endpoint
-		FROM worker_hosts
-		WHERE pool=$1
-		  AND status='active'
-		  AND NOT draining
-		  AND last_heartbeat_at >= $2
-		  AND FLOOR(allocatable_vcpus * $6)-reserved_vcpus >= $3
-		  AND FLOOR(allocatable_memory_mb * $7)-reserved_memory_mb >= $4
-		  AND allocatable_disk_gb-reserved_disk_gb >= $5
-		  AND max_sandboxes-reserved_sandboxes >= 1
-		ORDER BY
-		  FLOOR(allocatable_memory_mb * $7)-reserved_memory_mb-$4 ASC,
-		  FLOOR(allocatable_vcpus * $6)-reserved_vcpus-$3 ASC,
-		  id ASC
-		FOR UPDATE SKIP LOCKED
+		FROM sampled
+		ORDER BY GREATEST(cpu_score,memory_score), id
 		LIMIT 1`,
 		request.Pool,
 		healthyAfter,
@@ -237,61 +218,20 @@ func (c *Client) ReservePlacement(
 		diskGB,
 		policy.CPUOvercommitRatio,
 		policy.MemoryOvercommitRatio,
+		request.ExcludedWorkerIDs,
+		bestOfKSampleSize,
 	).Scan(&placement.WorkerID, &placement.Endpoint)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			var feasibleWorkerExists bool
-			if err := tx.QueryRow(ctx, `
-				SELECT EXISTS (
-					SELECT 1
-					FROM worker_hosts
-					WHERE pool=$1
-					  AND status='active'
-					  AND NOT draining
-					  AND last_heartbeat_at >= $2
-					  AND FLOOR(allocatable_vcpus * $6)-reserved_vcpus >= $3
-					  AND FLOOR(allocatable_memory_mb * $7)-reserved_memory_mb >= $4
-					  AND allocatable_disk_gb-reserved_disk_gb >= $5
-					  AND max_sandboxes-reserved_sandboxes >= 1
-				)`,
-				request.Pool,
-				healthyAfter,
-				vcpus,
-				memoryMB,
-				diskGB,
-				policy.CPUOvercommitRatio,
-				policy.MemoryOvercommitRatio,
-			).Scan(&feasibleWorkerExists); err != nil {
-				return orchestrator.Placement{}, fmt.Errorf("check placement contention: %w", err)
-			}
-			if feasibleWorkerExists {
-				return orchestrator.Placement{}, orchestrator.ErrPlacementBusy
-			}
 			return orchestrator.Placement{}, orchestrator.ErrNoCapacity
 		}
 		return orchestrator.Placement{}, fmt.Errorf("select worker for placement: %w", err)
 	}
 
 	if _, err := tx.Exec(ctx, `
-		UPDATE worker_hosts
-		SET reserved_vcpus=reserved_vcpus+$2,
-		    reserved_memory_mb=reserved_memory_mb+$3,
-		    reserved_disk_gb=reserved_disk_gb+$4,
-		    reserved_sandboxes=reserved_sandboxes+1,
-		    updated_at=now()
-		WHERE id=$1`,
-		placement.WorkerID,
-		vcpus,
-		memoryMB,
-		diskGB,
-	); err != nil {
-		return orchestrator.Placement{}, fmt.Errorf("reserve worker capacity: %w", err)
-	}
-
-	if _, err := tx.Exec(ctx, `
 		UPDATE sandboxes
 		SET host_id=$2, state='provisioning', updated_at=now()
-		WHERE id::text=$1`,
+		WHERE id=$1::uuid`,
 		sandboxID,
 		placement.WorkerID,
 	); err != nil {
@@ -310,7 +250,7 @@ func (c *Client) GetPlacement(ctx context.Context, sandboxID string) (orchestrat
 		SELECT s.id::text, w.id, w.endpoint, s.state
 		FROM sandboxes s
 		JOIN worker_hosts w ON w.id=s.host_id
-		WHERE s.id::text=$1`,
+		WHERE s.id=$1::uuid`,
 		sandboxID,
 	).Scan(&placement.SandboxID, &placement.WorkerID, &placement.Endpoint, &placement.State)
 	if err != nil {
@@ -328,7 +268,7 @@ func (c *Client) UpdatePlacementState(ctx context.Context, sandboxID, workerID s
 		SET state=$4,
 		    paused_at=CASE WHEN $4='active' THEN NULL ELSE paused_at END,
 		    updated_at=now()
-		WHERE id::text=$1
+		WHERE id=$1::uuid
 		  AND host_id=$2
 		  AND state=ANY($3)`,
 		sandboxID,
@@ -345,7 +285,7 @@ func (c *Client) UpdatePlacementState(ctx context.Context, sandboxID, workerID s
 
 	var currentState string
 	var currentWorkerID *string
-	err = c.pool.QueryRow(ctx, `SELECT state, host_id FROM sandboxes WHERE id::text=$1`, sandboxID).
+	err = c.pool.QueryRow(ctx, `SELECT state, host_id FROM sandboxes WHERE id=$1::uuid`, sandboxID).
 		Scan(&currentState, &currentWorkerID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return orchestrator.ErrSandboxNotFound
@@ -359,9 +299,8 @@ func (c *Client) UpdatePlacementState(ctx context.Context, sandboxID, workerID s
 	return orchestrator.ErrInvalidState
 }
 
-// PausePlacement releases only active compute capacity. The writable disk and
-// host placement remain reserved because paused artifacts are currently local
-// to that worker.
+// PausePlacement persists lifecycle state. The worker atomically releases
+// compute while retaining its local writable disk reservation.
 func (c *Client) PausePlacement(ctx context.Context, sandboxID, workerID string) error {
 	tx, err := c.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -375,7 +314,7 @@ func (c *Client) PausePlacement(ctx context.Context, sandboxID, workerID string)
 	err = tx.QueryRow(ctx, `
 		SELECT host_id, state, vcpus, memory_mb
 		FROM sandboxes
-		WHERE id::text=$1
+		WHERE id=$1::uuid
 		FOR UPDATE`,
 		sandboxID,
 	).Scan(&currentWorkerID, &currentState, &vcpus, &memoryMB)
@@ -395,26 +334,10 @@ func (c *Client) PausePlacement(ctx context.Context, sandboxID, workerID string)
 		return orchestrator.ErrInvalidState
 	}
 
-	tag, err := tx.Exec(ctx, `
-		UPDATE worker_hosts
-		SET reserved_vcpus=GREATEST(0,reserved_vcpus-$2),
-		    reserved_memory_mb=GREATEST(0,reserved_memory_mb-$3),
-		    updated_at=now()
-		WHERE id=$1`,
-		workerID,
-		vcpus,
-		memoryMB,
-	)
-	if err != nil {
-		return fmt.Errorf("release paused sandbox compute: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return orchestrator.ErrWorkerNotFound
-	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE sandboxes
 		SET state='paused', paused_at=now(), updated_at=now()
-		WHERE id::text=$1`,
+		WHERE id=$1::uuid`,
 		sandboxID,
 	); err != nil {
 		return fmt.Errorf("mark sandbox paused: %w", err)
@@ -425,9 +348,8 @@ func (c *Client) PausePlacement(ctx context.Context, sandboxID, workerID string)
 	return nil
 }
 
-// ReserveResume reacquires compute capacity on the sandbox's existing worker.
-// Disk and the worker session record are not incremented because the paused
-// sandbox retained both reservations.
+// ReserveResume claims the durable lifecycle transition on the sandbox's
+// existing healthy worker. Worker-local admission is the final capacity check.
 func (c *Client) ReserveResume(
 	ctx context.Context,
 	sandboxID, workerID string,
@@ -446,7 +368,7 @@ func (c *Client) ReserveResume(
 	err = tx.QueryRow(ctx, `
 		SELECT host_id, state, vcpus, memory_mb
 		FROM sandboxes
-		WHERE id::text=$1
+		WHERE id=$1::uuid
 		FOR UPDATE`,
 		sandboxID,
 	).Scan(&currentWorkerID, &currentState, &vcpus, &memoryMB)
@@ -466,34 +388,28 @@ func (c *Client) ReserveResume(
 		return orchestrator.ErrInvalidState
 	}
 
-	tag, err := tx.Exec(ctx, `
-		UPDATE worker_hosts
-		SET reserved_vcpus=reserved_vcpus+$2,
-		    reserved_memory_mb=reserved_memory_mb+$3,
-		    updated_at=now()
-		WHERE id=$1
-		  AND status='active'
-		  AND NOT draining
-		  AND last_heartbeat_at >= $4
-		  AND FLOOR(allocatable_vcpus * $5)-reserved_vcpus >= $2
-		  AND FLOOR(allocatable_memory_mb * $6)-reserved_memory_mb >= $3`,
+	var workerReady bool
+	err = tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM worker_hosts
+			WHERE id=$1
+			  AND status='active'
+			  AND NOT draining
+			  AND last_heartbeat_at >= $2
+		)`,
 		workerID,
-		vcpus,
-		memoryMB,
 		healthyAfter,
-		policy.CPUOvercommitRatio,
-		policy.MemoryOvercommitRatio,
-	)
+	).Scan(&workerReady)
 	if err != nil {
-		return fmt.Errorf("reserve resume compute: %w", err)
+		return fmt.Errorf("check worker for resume: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
+	if !workerReady {
 		return orchestrator.ErrNoCapacity
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE sandboxes
 		SET state='resuming', updated_at=now()
-		WHERE id::text=$1`,
+		WHERE id=$1::uuid`,
 		sandboxID,
 	); err != nil {
 		return fmt.Errorf("mark sandbox resuming: %w", err)
@@ -519,7 +435,7 @@ func (c *Client) CancelResume(ctx context.Context, sandboxID, workerID string) e
 	err = tx.QueryRow(ctx, `
 		SELECT host_id, state, vcpus, memory_mb
 		FROM sandboxes
-		WHERE id::text=$1
+		WHERE id=$1::uuid
 		FOR UPDATE`,
 		sandboxID,
 	).Scan(&currentWorkerID, &currentState, &vcpus, &memoryMB)
@@ -539,26 +455,10 @@ func (c *Client) CancelResume(ctx context.Context, sandboxID, workerID string) e
 		return orchestrator.ErrInvalidState
 	}
 
-	tag, err := tx.Exec(ctx, `
-		UPDATE worker_hosts
-		SET reserved_vcpus=GREATEST(0,reserved_vcpus-$2),
-		    reserved_memory_mb=GREATEST(0,reserved_memory_mb-$3),
-		    updated_at=now()
-		WHERE id=$1`,
-		workerID,
-		vcpus,
-		memoryMB,
-	)
-	if err != nil {
-		return fmt.Errorf("release failed resume compute: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return orchestrator.ErrWorkerNotFound
-	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE sandboxes
 		SET state='paused', updated_at=now()
-		WHERE id::text=$1`,
+		WHERE id=$1::uuid`,
 		sandboxID,
 	); err != nil {
 		return fmt.Errorf("restore paused state after resume failure: %w", err)
@@ -590,7 +490,7 @@ func (c *Client) releasePlacement(ctx context.Context, sandboxID, expectedWorker
 	err = tx.QueryRow(ctx, `
 		SELECT host_id, vcpus, memory_mb, disk_gb, state
 		FROM sandboxes
-		WHERE id::text=$1
+		WHERE id=$1::uuid
 		FOR UPDATE`,
 		sandboxID,
 	).Scan(&workerID, &vcpus, &memoryMB, &diskGB, &currentState)
@@ -611,7 +511,7 @@ func (c *Client) releasePlacement(ctx context.Context, sandboxID, expectedWorker
 			if _, err := tx.Exec(ctx, `
 				UPDATE sandboxes
 				SET state=$2, updated_at=now()
-				WHERE id::text=$1`,
+				WHERE id=$1::uuid`,
 				sandboxID,
 				finalState,
 			); err != nil {
@@ -624,37 +524,12 @@ func (c *Client) releasePlacement(ctx context.Context, sandboxID, expectedWorker
 		return orchestrator.ErrInvalidState
 	}
 
-	computeReserved := currentState == "provisioning" ||
-		currentState == "active" ||
-		currentState == "resuming" ||
-		currentState == "destroying"
-	computeVCPUs, computeMemoryMB := 0, 0
-	if computeReserved {
-		computeVCPUs = vcpus
-		computeMemoryMB = memoryMB
-	}
-
-	if _, err := tx.Exec(ctx, `
-		UPDATE worker_hosts
-		SET reserved_vcpus=GREATEST(0,reserved_vcpus-$2),
-		    reserved_memory_mb=GREATEST(0,reserved_memory_mb-$3),
-		    reserved_disk_gb=GREATEST(0,reserved_disk_gb-$4),
-		    reserved_sandboxes=GREATEST(0,reserved_sandboxes-1),
-		    updated_at=now()
-		WHERE id=$1`,
-		*workerID,
-		computeVCPUs,
-		computeMemoryMB,
-		diskGB,
-	); err != nil {
-		return fmt.Errorf("release worker capacity: %w", err)
-	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE sandboxes
 		SET host_id=NULL,
 		    state=CASE WHEN $2='' THEN state ELSE $2 END,
 		    updated_at=now()
-		WHERE id::text=$1`,
+		WHERE id=$1::uuid`,
 		sandboxID,
 		finalState,
 	); err != nil {

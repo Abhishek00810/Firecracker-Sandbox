@@ -251,46 +251,45 @@ func (p *VMPool) Acquire(ctx context.Context) (*PooledVM, bool, error) {
 
 func (p *VMPool) Release(vm *PooledVM) {
 	// Destroy the used VM — its rootfs may have been modified during execution.
-	// Never return a dirty VM to the pool.
-	go func() {
-		start := time.Now()
-		ctx := context.Background()
+	// Never return a dirty VM to the pool. Teardown is synchronous so callers do
+	// not advertise released capacity before Firecracker and its network slot are
+	// actually gone.
+	start := time.Now()
+	ctx := context.Background()
 
-		p.mu.Lock()
-		delete(p.vmMap, vm.VM.ID)
-		remaining := len(p.vmMap)
-		p.mu.Unlock()
+	p.mu.Lock()
+	delete(p.vmMap, vm.VM.ID)
+	remaining := len(p.vmMap)
+	p.mu.Unlock()
 
-		if err := p.manager.Destroy(ctx, vm.VM.ID); err != nil {
-			slog.Error("failed to destroy VM", "vm_id", vm.VM.ID, "err", err)
+	if err := p.manager.Destroy(ctx, vm.VM.ID); err != nil {
+		slog.Error("failed to destroy VM", "vm_id", vm.VM.ID, "err", err)
+	}
+	if vm.Cgroup != nil {
+		if err := vm.Cgroup.Destroy(); err != nil {
+			slog.Error("failed to destroy cgroup", "vm_id", vm.VM.ID, "err", err)
 		}
-		if vm.Cgroup != nil {
-			if err := vm.Cgroup.Destroy(); err != nil {
-				slog.Error("failed to destroy cgroup", "vm_id", vm.VM.ID, "err", err)
-			}
-		}
+	}
 
-		// Only replenish if the pool has dropped below the warm minimum.
-		// Burst VMs (above minSize) are intentionally not replaced — the pool
-		// shrinks back to steady state naturally after traffic subsides.
-		if remaining < p.minSize {
-			if err := p.addVM(); err != nil {
-				slog.Error("failed to replenish pool after releasing VM", "vm_id", vm.VM.ID, "err", err)
-				return
-			}
-			slog.Info("pool release replenished",
-				"vm_id", vm.VM.ID,
-				"duration_ms", time.Since(start).Milliseconds(),
-			)
-		} else {
-			slog.Info("pool release complete, no replenish needed",
-				"vm_id", vm.VM.ID,
-				"remaining", remaining,
-				"min_size", p.minSize,
-				"duration_ms", time.Since(start).Milliseconds(),
-			)
+	// Only replenish if the pool has dropped below the warm minimum.
+	// Burst VMs (above minSize) are intentionally not replaced.
+	if remaining < p.minSize {
+		if err := p.addVM(); err != nil {
+			slog.Error("failed to replenish pool after releasing VM", "vm_id", vm.VM.ID, "err", err)
+			return
 		}
-	}()
+		slog.Info("pool release replenished",
+			"vm_id", vm.VM.ID,
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
+	} else {
+		slog.Info("pool release complete, no replenish needed",
+			"vm_id", vm.VM.ID,
+			"remaining", remaining,
+			"min_size", p.minSize,
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
+	}
 }
 
 // Forget removes a VM from the pool's accounting WITHOUT destroying it. Used by

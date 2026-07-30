@@ -48,7 +48,16 @@ func envInt(key string, def int) int {
 	return def
 }
 
-func startOrchestratorRegistration(ctx context.Context, slotCount int) {
+func envFloat(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.ParseFloat(v, 64); err == nil && n >= 1 {
+			return n
+		}
+	}
+	return def
+}
+
+func startOrchestratorRegistration(ctx context.Context, slotCount int, capacity func() plane.Capacity) {
 	baseURL := os.Getenv("ORCHESTRATOR_URL")
 	if baseURL == "" {
 		slog.Warn("ORCHESTRATOR_URL not set; worker registration and heartbeat are disabled")
@@ -88,8 +97,12 @@ func startOrchestratorRegistration(ctx context.Context, slotCount int) {
 				} else {
 					registered = true
 					slog.Info("worker registered", "worker_id", registration.ID, "endpoint", registration.Endpoint)
+					if err := client.Heartbeat(ctx, registration.ID, capacity()); err != nil {
+						registered = false
+						slog.Warn("initial worker heartbeat failed", "worker_id", registration.ID, "err", err)
+					}
 				}
-			} else if err := client.Heartbeat(ctx, registration.ID); err != nil {
+			} else if err := client.Heartbeat(ctx, registration.ID, capacity()); err != nil {
 				registered = false
 				slog.Warn("worker heartbeat failed; registration will be retried", "worker_id", registration.ID, "err", err)
 			}
@@ -187,10 +200,27 @@ func main() {
 	}
 	slog.Info("worker execution engine initialized", "sizes", len(sizePools), "template_source", env("TEMPLATE_SOURCE", "build"))
 
+	admission := worker.NewAdmission(
+		envInt("WORKER_ALLOCATABLE_VCPUS", 0),
+		envInt("WORKER_ALLOCATABLE_MEMORY_MB", 0),
+		envInt("WORKER_ALLOCATABLE_DISK_GB", 0),
+		envInt("WORKER_MAX_SESSIONS", slotCount),
+		envFloat("WORKER_CPU_OVERCOMMIT_RATIO", 4),
+		envFloat("WORKER_MEMORY_OVERCOMMIT_RATIO", 1),
+	)
+
 	var onState session.StateHook
 	if orchestratorURL, workerID := os.Getenv("ORCHESTRATOR_URL"), os.Getenv("WORKER_ID"); orchestratorURL != "" && workerID != "" {
 		orchestrationClient := orchestrator.NewClient(orchestratorURL, os.Getenv("WORKER_TOKEN"))
 		onState = func(sandboxID, _ string, state string) error {
+			switch state {
+			case "active":
+				admission.MarkActive(sandboxID)
+			case "paused":
+				admission.MarkPaused(sandboxID)
+			case "destroyed":
+				admission.Release(sandboxID)
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			return orchestrationClient.ReportWorkerState(ctx, workerID, sandboxID, state)
@@ -231,6 +261,15 @@ func main() {
 		onState,
 		onMeter,
 	)
+	for _, recovered := range sessionMgr.Sessions() {
+		admission.Restore(
+			recovered.ID,
+			recovered.VCPUs,
+			recovered.MemoryMB,
+			recovered.DiskGB,
+			recovered.State == session.StatePaused,
+		)
+	}
 
 	bind := os.Getenv("WORKER_BIND")
 	if bind == "" {
@@ -240,7 +279,7 @@ func main() {
 	if token == "" {
 		slog.Warn("WORKER_TOKEN not set — worker API is UNAUTHENTICATED (dev only)")
 	}
-	workerServer := worker.NewServer(sessionMgr, token, slotCount)
+	workerServer := worker.NewServerWithAdmission(sessionMgr, token, admission)
 	srv := &http.Server{Addr: bind, Handler: workerServer.Handler()}
 	listener, err := net.Listen("tcp", bind)
 	if err != nil {
@@ -257,7 +296,7 @@ func main() {
 	}()
 
 	registrationCtx, stopRegistration := context.WithCancel(context.Background())
-	startOrchestratorRegistration(registrationCtx, slotCount)
+	startOrchestratorRegistration(registrationCtx, slotCount, admission.Capacity)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)

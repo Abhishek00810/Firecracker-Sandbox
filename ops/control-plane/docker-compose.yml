@@ -71,6 +71,16 @@ services:
         condition: service_healthy
     networks: [internal]
 
+  platform-migrate:
+    image: ghcr.io/renderops-ai/platform-migrate:latest
+    profiles: ["tools"]
+    environment:
+      DATABASE_URL: postgresql://renderops:${POSTGRES_PASSWORD}@postgres:5432/renderops?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [internal]
+
   caddy:
     image: caddy:2.10-alpine
     restart: unless-stopped

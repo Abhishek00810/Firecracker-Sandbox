@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+
+	"backend/internal/plane"
 )
 
 const AuthHeader = "X-Orchestrator-Token"
@@ -73,7 +75,11 @@ func (s *HTTPServer) registerWorker(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *HTTPServer) heartbeat(w http.ResponseWriter, r *http.Request) {
-	if err := s.service.Heartbeat(r.Context(), r.PathValue("workerID")); err != nil {
+	var capacity plane.Capacity
+	if err := decodeHTTPJSON(w, r, &capacity); err != nil {
+		return
+	}
+	if err := s.service.Heartbeat(r.Context(), r.PathValue("workerID"), capacity); err != nil {
 		writeServiceError(w, err)
 		return
 	}

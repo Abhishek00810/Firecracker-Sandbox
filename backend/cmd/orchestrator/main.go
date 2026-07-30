@@ -37,14 +37,6 @@ func main() {
 	}
 	defer db.Close()
 
-	reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	if err := db.ReconcileWorkerReservations(reconcileCtx); err != nil {
-		reconcileCancel()
-		slog.Error("orchestrator reservation reconciliation failed", "err", err)
-		os.Exit(1)
-	}
-	reconcileCancel()
-
 	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	if count, err := db.FailStaleUnplacedSandboxes(cleanupCtx, staleSchedulingThreshold); err != nil {
 		slog.Warn("initial stale scheduling cleanup failed", "err", err)

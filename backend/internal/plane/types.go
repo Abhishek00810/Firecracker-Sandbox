@@ -1,6 +1,11 @@
 package plane
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+var ErrNoCapacity = errors.New("worker has insufficient capacity")
 
 // SessionInfo is the plane-neutral view of a sandbox session — everything the
 // control plane may know about one. Host-side runtime state (VM handles,
@@ -72,10 +77,18 @@ type ExecResult struct {
 	TerminationReason string  `json:"termination_reason,omitempty"`
 }
 
-// Capacity reports an agent's free capacity (for the control-plane scheduler).
+// Capacity is the worker-authoritative resource snapshot published to the
+// orchestrator. Allocatable values include configured overcommit.
 type Capacity struct {
-	FreeSlots int `json:"free_slots"`
-	MaxSlots  int `json:"max_slots"`
+	FreeSlots           int `json:"free_slots"`
+	MaxSlots            int `json:"max_slots"`
+	AllocatableVCPUs    int `json:"allocatable_vcpus"`
+	AllocatableMemoryMB int `json:"allocatable_memory_mb"`
+	AllocatableDiskGB   int `json:"allocatable_disk_gb"`
+	ReservedVCPUs       int `json:"reserved_vcpus"`
+	ReservedMemoryMB    int `json:"reserved_memory_mb"`
+	ReservedDiskGB      int `json:"reserved_disk_gb"`
+	ReservedSandboxes   int `json:"reserved_sandboxes"`
 }
 
 // ErrorResponse is a structured agent error.

@@ -51,6 +51,34 @@ func TestHTTPServerRegistersWorker(t *testing.T) {
 	}
 }
 
+func TestHTTPServerRecordsWorkerCapacityHeartbeat(t *testing.T) {
+	store := &fakeStore{}
+	server := NewHTTPServer(NewService(store, time.Minute), "control-secret", "worker-secret")
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/internal/workers/worker-1/heartbeat",
+		bytes.NewBufferString(`{
+			"reserved_vcpus":7,
+			"reserved_memory_mb":896,
+			"reserved_disk_gb":12,
+			"reserved_sandboxes":7
+		}`),
+	)
+	req.Header.Set(AuthHeader, "worker-secret")
+	res := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(res, req)
+
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
+	}
+	if store.heartbeatID != "worker-1" ||
+		store.heartbeat.ReservedVCPUs != 7 ||
+		store.heartbeat.ReservedSandboxes != 7 {
+		t.Fatalf("heartbeat id=%q capacity=%+v", store.heartbeatID, store.heartbeat)
+	}
+}
+
 func TestHTTPServerMarksWorkerDraining(t *testing.T) {
 	store := &fakeStore{}
 	server := NewHTTPServer(NewService(store, time.Minute), "control-secret", "worker-secret")

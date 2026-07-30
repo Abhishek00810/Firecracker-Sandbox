@@ -97,6 +97,9 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var e plane.ErrorResponse
 		if json.Unmarshal(raw, &e) == nil && e.Error != "" {
+			if e.Code == "no_capacity" {
+				return fmt.Errorf("%w: %s", plane.ErrNoCapacity, e.Error)
+			}
 			return fmt.Errorf("agent %s: %s", e.Code, e.Error)
 		}
 		return fmt.Errorf("agent returned %d: %s", resp.StatusCode, string(raw))

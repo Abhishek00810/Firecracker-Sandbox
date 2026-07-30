@@ -43,7 +43,8 @@ type WorkerRegistration struct {
 }
 
 type PlacementRequest struct {
-	Pool string `json:"pool"`
+	Pool              string   `json:"pool"`
+	ExcludedWorkerIDs []string `json:"-"`
 }
 
 // PlacementPolicy is owned by the orchestrator and cannot be overridden by an
@@ -76,7 +77,7 @@ type WorkerClientFactory func(endpoint string) WorkerClient
 
 type Store interface {
 	RegisterWorker(context.Context, WorkerRegistration, time.Time) error
-	RecordHeartbeat(context.Context, string, time.Time) error
+	RecordHeartbeat(context.Context, string, plane.Capacity, time.Time) error
 	SetWorkerDraining(context.Context, string, bool) error
 	ReservePlacement(context.Context, string, PlacementRequest, PlacementPolicy, time.Time) (Placement, error)
 	GetPlacement(context.Context, string) (Placement, bool, error)
@@ -150,12 +151,12 @@ func (s *Service) RegisterWorker(ctx context.Context, registration WorkerRegistr
 	return s.store.RegisterWorker(ctx, registration, s.now().UTC())
 }
 
-func (s *Service) Heartbeat(ctx context.Context, workerID string) error {
+func (s *Service) Heartbeat(ctx context.Context, workerID string, capacity plane.Capacity) error {
 	workerID = strings.TrimSpace(workerID)
 	if !workerIDPattern.MatchString(workerID) {
 		return fmt.Errorf("invalid worker id %q", workerID)
 	}
-	return s.store.RecordHeartbeat(ctx, workerID, s.now().UTC())
+	return s.store.RecordHeartbeat(ctx, workerID, capacity, s.now().UTC())
 }
 
 func (s *Service) SetWorkerDraining(ctx context.Context, workerID string, draining bool) error {
@@ -246,32 +247,52 @@ func (s *Service) Provision(ctx context.Context, request ProvisionRequest) (Plac
 		return Placement{}, errors.New("sandbox id is required")
 	}
 
-	placement, err := s.Place(ctx, sandboxID, PlacementRequest{Pool: request.Pool})
-	if err != nil {
-		if !errors.Is(err, ErrSandboxNotFound) {
-			if releaseErr := s.store.ReleasePlacement(ctx, sandboxID, "error"); releaseErr != nil {
-				return Placement{}, errors.Join(err, fmt.Errorf("mark unscheduled sandbox failed: %w", releaseErr))
+	var placement Placement
+	var response plane.CreateResponse
+	excludedWorkerIDs := make([]string, 0, 3)
+	for {
+		var err error
+		placement, err = s.Place(ctx, sandboxID, PlacementRequest{
+			Pool: request.Pool, ExcludedWorkerIDs: excludedWorkerIDs,
+		})
+		if err != nil {
+			if !errors.Is(err, ErrSandboxNotFound) {
+				if releaseErr := s.store.ReleasePlacement(ctx, sandboxID, "error"); releaseErr != nil {
+					return Placement{}, errors.Join(err, fmt.Errorf("mark unscheduled sandbox failed: %w", releaseErr))
+				}
 			}
+			return Placement{}, err
 		}
-		return Placement{}, err
+		if placement.State == "active" {
+			return placement, nil
+		}
+
+		response, err = s.workerClient(placement.Endpoint).Create(ctx, request.CreateRequest)
+		if !errors.Is(err, plane.ErrNoCapacity) {
+			if err == nil {
+				break
+			}
+			// A timeout may happen after the worker completed the boot. Destroy by
+			// idempotency key before releasing the durable placement.
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			_ = s.workerClient(placement.Endpoint).Destroy(cleanupCtx, sandboxID)
+			cancel()
+			releaseErr := s.store.ReleasePlacement(ctx, sandboxID, "error")
+			if releaseErr != nil {
+				return Placement{}, errors.Join(
+					fmt.Errorf("provision sandbox on worker: %w", err),
+					fmt.Errorf("release failed placement: %w", releaseErr),
+				)
+			}
+			return Placement{}, fmt.Errorf("provision sandbox on worker: %w", err)
+		}
+
+		excludedWorkerIDs = append(excludedWorkerIDs, placement.WorkerID)
+		if releaseErr := s.store.ReleasePlacement(ctx, sandboxID, "scheduling"); releaseErr != nil {
+			return Placement{}, errors.Join(err, fmt.Errorf("release rejected placement: %w", releaseErr))
+		}
 	}
 
-	response, err := s.workerClient(placement.Endpoint).Create(ctx, request.CreateRequest)
-	if err != nil {
-		// A timeout may happen after the worker completed the boot. Destroy by the
-		// idempotency key before releasing capacity to avoid an untracked VM.
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-		_ = s.workerClient(placement.Endpoint).Destroy(cleanupCtx, sandboxID)
-		cancel()
-		releaseErr := s.store.ReleasePlacement(ctx, sandboxID, "error")
-		if releaseErr != nil {
-			return Placement{}, errors.Join(
-				fmt.Errorf("provision sandbox on worker: %w", err),
-				fmt.Errorf("release failed placement: %w", releaseErr),
-			)
-		}
-		return Placement{}, fmt.Errorf("provision sandbox on worker: %w", err)
-	}
 	if response.SandboxID != sandboxID {
 		releaseErr := s.store.ReleasePlacement(ctx, sandboxID, "error")
 		mismatch := fmt.Errorf("worker returned sandbox id %q, expected %q", response.SandboxID, sandboxID)

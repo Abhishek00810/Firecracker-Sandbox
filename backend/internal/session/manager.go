@@ -850,6 +850,12 @@ func (m *Manager) GetSession(id string) (*Session, bool) {
 	return m.store.Get(id)
 }
 
+// Sessions returns a point-in-time view used to rebuild worker-local admission
+// state after a process restart.
+func (m *Manager) Sessions() []*Session {
+	return m.store.All()
+}
+
 func (m *Manager) Stats() map[string]int {
 	active := 0
 	for _, sess := range m.store.All() {

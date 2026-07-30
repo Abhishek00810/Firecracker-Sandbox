@@ -13,6 +13,7 @@ type fakeStore struct {
 	registration   WorkerRegistration
 	registeredAt   time.Time
 	heartbeatID    string
+	heartbeat      plane.Capacity
 	heartbeatAt    time.Time
 	drainingID     string
 	draining       bool
@@ -21,6 +22,7 @@ type fakeStore struct {
 	policy         PlacementPolicy
 	healthyAfter   time.Time
 	placement      Placement
+	placements     []Placement
 	updatedFrom    []string
 	updatedState   string
 	paused         bool
@@ -38,8 +40,8 @@ func (f *fakeStore) RegisterWorker(_ context.Context, registration WorkerRegistr
 	return f.err
 }
 
-func (f *fakeStore) RecordHeartbeat(_ context.Context, id string, at time.Time) error {
-	f.heartbeatID, f.heartbeatAt = id, at
+func (f *fakeStore) RecordHeartbeat(_ context.Context, id string, capacity plane.Capacity, at time.Time) error {
+	f.heartbeatID, f.heartbeat, f.heartbeatAt = id, capacity, at
 	return f.err
 }
 
@@ -51,6 +53,11 @@ func (f *fakeStore) SetWorkerDraining(_ context.Context, id string, draining boo
 func (f *fakeStore) ReservePlacement(_ context.Context, sandboxID string, request PlacementRequest, policy PlacementPolicy, healthyAfter time.Time) (Placement, error) {
 	f.sandboxID, f.request, f.policy, f.healthyAfter = sandboxID, request, policy, healthyAfter
 	f.reserveCalls++
+	if len(f.placements) > 0 {
+		placement := f.placements[0]
+		f.placements = f.placements[1:]
+		return placement, nil
+	}
 	if len(f.reserveErrors) > 0 {
 		err := f.reserveErrors[0]
 		f.reserveErrors = f.reserveErrors[1:]
@@ -318,6 +325,40 @@ func TestProvisionFailureReleasesCapacityAndMarksError(t *testing.T) {
 	}
 	if store.releaseState != "error" {
 		t.Fatalf("release state=%q want error", store.releaseState)
+	}
+}
+
+func TestProvisionRetriesAnotherWorkerAfterLocalNoCapacity(t *testing.T) {
+	store := &fakeStore{placements: []Placement{
+		{SandboxID: "sandbox-1", WorkerID: "worker-1", Endpoint: "http://worker-1:9876"},
+		{SandboxID: "sandbox-1", WorkerID: "worker-2", Endpoint: "http://worker-2:9876"},
+	}}
+	workers := map[string]*fakeWorkerClient{
+		"http://worker-1:9876": {createErr: plane.ErrNoCapacity},
+		"http://worker-2:9876": {response: plane.CreateResponse{SandboxID: "sandbox-1"}},
+	}
+	service := NewService(
+		store,
+		time.Minute,
+		WithWorkerClientFactory(func(endpoint string) WorkerClient { return workers[endpoint] }),
+	)
+
+	placement, err := service.Provision(context.Background(), ProvisionRequest{
+		CreateRequest: plane.CreateRequest{
+			SandboxID: "sandbox-1", VCPUs: 1, MemoryMB: 128, DiskGB: 1,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if placement.WorkerID != "worker-2" {
+		t.Fatalf("worker=%q want worker-2", placement.WorkerID)
+	}
+	if store.reserveCalls != 2 {
+		t.Fatalf("placement attempts=%d want=2", store.reserveCalls)
+	}
+	if len(store.request.ExcludedWorkerIDs) != 1 || store.request.ExcludedWorkerIDs[0] != "worker-1" {
+		t.Fatalf("excluded workers=%v", store.request.ExcludedWorkerIDs)
 	}
 }
 

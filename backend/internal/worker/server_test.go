@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"backend/internal/executor"
+	"backend/internal/plane"
 	"backend/internal/session"
 )
 
@@ -145,5 +146,37 @@ func TestCapacityReportsLiveFreeSlots(t *testing.T) {
 	}
 	if capacity.FreeSlots != 9 || capacity.MaxSlots != 10 {
 		t.Fatalf("capacity=%+v", capacity)
+	}
+}
+
+func TestCreateRejectsBeforeSessionWhenLocalCapacityIsFull(t *testing.T) {
+	service := &fakeSessionService{}
+	admission := NewAdmission(1, 128, 1, 1, 1, 1)
+	if err := admission.ReserveCreate(plane.CreateRequest{
+		SandboxID: "existing", VCPUs: 1, MemoryMB: 128, DiskGB: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := NewServerWithAdmission(service, "worker-secret", admission)
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/worker/sandbox",
+		bytes.NewBufferString(`{
+			"sandbox_id":"rejected",
+			"vcpus":1,
+			"memory_mb":128,
+			"disk_gb":1
+		}`),
+	)
+	request.Header.Set("X-Worker-Token", "worker-secret")
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if service.createdID != "" {
+		t.Fatalf("session create was called for %q", service.createdID)
 	}
 }
