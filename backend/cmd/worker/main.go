@@ -6,6 +6,7 @@ package main
 import (
 	"backend/internal/cgroup"
 	"backend/internal/executor/firecracker"
+	"backend/internal/metering"
 	"backend/internal/orchestrator"
 	"backend/internal/plane"
 	"backend/internal/session"
@@ -196,8 +197,28 @@ func main() {
 		}
 	}
 
+	var usageReporter *metering.Reporter
+	var onMeter session.MeterHook
+	if controlPlaneURL, workerID := os.Getenv("CONTROL_PLANE_INTERNAL_URL"), os.Getenv("WORKER_ID"); controlPlaneURL != "" && workerID != "" {
+		usageReporter = metering.NewReporter(
+			metering.NewClient(controlPlaneURL, os.Getenv("WORKER_TOKEN")),
+			workerID,
+		)
+		onMeter = func(sample session.MeterSample) {
+			usageReporter.Record(metering.Sample{
+				SandboxID:     sample.SandboxID,
+				Bucket:        sample.Bucket.Format(time.RFC3339),
+				VCPUSeconds:   sample.VCPUSeconds,
+				RAMGBSeconds:  sample.RAMGBSeconds,
+				DiskGBSeconds: sample.DiskGBSeconds,
+			})
+		}
+	} else {
+		slog.Warn("CONTROL_PLANE_INTERNAL_URL or WORKER_ID not set; raw usage reporting is disabled")
+	}
+
 	// The worker never accesses the DB. Lifecycle events go to the orchestrator;
-	// metering remains owned outside the worker.
+	// raw usage goes to the control plane's authenticated metering endpoint.
 	sessionMgr := session.NewManager(
 		vmManager,
 		defaultTemplate,
@@ -208,7 +229,7 @@ func main() {
 		sizePools,
 		sizeTemplates,
 		onState,
-		nil, // onMeter — control plane meters
+		onMeter,
 	)
 
 	bind := os.Getenv("WORKER_BIND")
@@ -275,4 +296,11 @@ func main() {
 	pauseCancel()
 
 	sessionMgr.Shutdown(context.Background())
+	if usageReporter != nil {
+		flushCtx, flushCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		if err := usageReporter.Shutdown(flushCtx); err != nil {
+			slog.Error("usage reporter shutdown failed", "err", err)
+		}
+		flushCancel()
+	}
 }

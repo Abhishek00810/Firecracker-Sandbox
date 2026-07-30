@@ -10,6 +10,7 @@
 # Usage: install-worker.sh <local-binary-path>
 # Env:   SSH_KEY (private key contents), SSH_HOST, SSH_USER
 #        WORKER_SLOT_COUNT, WORKER_MAX_SESSIONS (optional non-secret capacity)
+#        CONTROL_PLANE_INTERNAL_URL (internal raw-usage ingestion endpoint)
 set -euo pipefail
 
 BINARY="${1:?usage: install-worker.sh <binary>}"
@@ -71,6 +72,7 @@ set_env_value() {
 # network provisioning and advertised max sessions change together on restart.
 set_env_value SLOT_COUNT "$WORKER_SLOT_COUNT"
 set_env_value WORKER_MAX_SESSIONS "$WORKER_MAX_SESSIONS"
+set_env_value CONTROL_PLANE_INTERNAL_URL "${CONTROL_PLANE_INTERNAL_URL:-}"
 
 install -D -m 0755 /tmp/renderops-worker.new /opt/renderops/renderops-worker
 install -D -m 0644 /tmp/renderops-worker.service.new /etc/systemd/system/renderops-worker.service

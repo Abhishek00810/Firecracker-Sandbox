@@ -31,6 +31,7 @@ type MeterSample struct {
 	UserID        string
 	SandboxID     string
 	BillingModel  string
+	Bucket        time.Time
 	VCPUSeconds   float64
 	RAMGBSeconds  float64
 	DiskGBSeconds float64
@@ -55,6 +56,9 @@ type Manager struct {
 	manifestMu    sync.Mutex                               // serializes concurrent pause manifest rewrites
 	createLocksMu sync.Mutex
 	createLocks   map[string]*createLock
+	meterMu       sync.Mutex
+	meterLast     map[string]time.Time
+	meterTotals   map[string]MeterSample
 }
 
 type createLock struct {
@@ -88,6 +92,8 @@ func NewManager(
 		pauseDir:      filepath.Join(vmManager.SocketDir, "pause"),
 		manifestPath:  filepath.Join(vmManager.SocketDir, "paused-sessions.json"),
 		createLocks:   make(map[string]*createLock),
+		meterLast:     make(map[string]time.Time),
+		meterTotals:   make(map[string]MeterSample),
 	}
 	if err := os.MkdirAll(m.pauseDir, 0o755); err != nil {
 		slog.Error("failed to create pause snapshot dir", "dir", m.pauseDir, "err", err)
@@ -98,6 +104,9 @@ func NewManager(
 		os.Chown(m.pauseDir, vmManager.FCUid, vmManager.FCGid)
 	}
 	m.recoverPaused()
+	for _, sess := range m.store.All() {
+		m.meterLast[sess.ID] = time.Now()
+	}
 	m.cleanupOrphanedDisks()
 	go m.reaper()
 	if onMeter != nil {
@@ -114,31 +123,63 @@ func (m *Manager) meterTicker() {
 	const interval = time.Minute
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	last := time.Now()
 	for range ticker.C {
 		now := time.Now()
-		elapsed := now.Sub(last).Seconds()
-		last = now
-		if elapsed <= 0 {
-			continue
-		}
 		for _, sess := range m.store.All() {
-			if sess.UserID == "" {
-				continue // can't attribute — skip (avoids orphaned meter rows)
-			}
-			sample := MeterSample{
-				UserID:        sess.UserID,
-				SandboxID:     sess.ID,
-				BillingModel:  sess.BillingModel,
-				DiskGBSeconds: float64(sess.DiskGB) * elapsed, // disk billed while alive (active + paused)
-			}
-			if sess.State == StateActive {
-				sample.VCPUSeconds = float64(sess.VCPUs) * elapsed
-				sample.RAMGBSeconds = (float64(sess.MemoryMB) / 1024.0) * elapsed
-			}
-			m.onMeter(sample)
+			sess.mu.Lock()
+			m.meterSession(sess, sess.State, now)
+			sess.mu.Unlock()
 		}
 	}
+}
+
+// meterSession records cumulative usage for the current UTC minute. Re-emitting
+// the same bucket is safe because ingestion persists the maximum observed total.
+// Callers that already hold sess.mu may call this directly.
+func (m *Manager) meterSession(sess *Session, state SessionState, now time.Time) {
+	if m.onMeter == nil || sess == nil || sess.UserID == "" {
+		return
+	}
+	m.meterMu.Lock()
+	last, ok := m.meterLast[sess.ID]
+	if !ok {
+		last = sess.CreatedAt
+		if last.IsZero() || last.After(now) {
+			last = now
+		}
+	}
+	elapsed := now.Sub(last).Seconds()
+	m.meterLast[sess.ID] = now
+	if elapsed <= 0 {
+		m.meterMu.Unlock()
+		return
+	}
+
+	bucket := now.UTC().Truncate(time.Minute)
+	total := m.meterTotals[sess.ID]
+	if !total.Bucket.Equal(bucket) {
+		total = MeterSample{
+			UserID:       sess.UserID,
+			SandboxID:    sess.ID,
+			BillingModel: sess.BillingModel,
+			Bucket:       bucket,
+		}
+	}
+	total.DiskGBSeconds += float64(sess.DiskGB) * elapsed
+	if state == StateActive {
+		total.VCPUSeconds += float64(sess.VCPUs) * elapsed
+		total.RAMGBSeconds += (float64(sess.MemoryMB) / 1024.0) * elapsed
+	}
+	m.meterTotals[sess.ID] = total
+	m.meterMu.Unlock()
+	m.onMeter(total)
+}
+
+func (m *Manager) forgetMeter(sessionID string) {
+	m.meterMu.Lock()
+	delete(m.meterLast, sessionID)
+	delete(m.meterTotals, sessionID)
+	m.meterMu.Unlock()
 }
 
 // notifyState persists a lifecycle transition before the worker acknowledges it.
@@ -328,6 +369,9 @@ func (m *Manager) CreateWithID(ctx context.Context, sandboxID, userID, billingMo
 		pool.Release(pvm)
 		return nil, err
 	}
+	m.meterMu.Lock()
+	m.meterLast[sess.ID] = sess.CreatedAt
+	m.meterMu.Unlock()
 
 	// Hold ONE persistent vsock connection for the whole session, reused for every exec/run.
 	// A snapshot-restored VM accepts exactly one vsock connection, so per-connection execs
@@ -466,6 +510,7 @@ func (m *Manager) Destroy(ctx context.Context, sessionID string) error {
 	if !ok {
 		return fmt.Errorf("session %s not found", sessionID)
 	}
+	m.meterSession(sess, sess.State, time.Now())
 
 	if sess.State == StatePaused {
 		m.cleanupPausedFiles(sess)
@@ -473,6 +518,7 @@ func (m *Manager) Destroy(ctx context.Context, sessionID string) error {
 		if err := m.notifyState(sess, "destroyed"); err != nil {
 			return err
 		}
+		m.forgetMeter(sessionID)
 		slog.Info("paused session destroyed", "session_id", sessionID)
 		return nil
 	}
@@ -498,6 +544,7 @@ func (m *Manager) Destroy(ctx context.Context, sessionID string) error {
 	if err := m.notifyState(sess, "destroyed"); err != nil {
 		return err
 	}
+	m.forgetMeter(sessionID)
 	slog.Info("session destroyed", "session_id", sessionID)
 	return nil
 }
@@ -565,6 +612,7 @@ func (m *Manager) Pause(ctx context.Context, sessionID string) error {
 	if err := m.vmManager.Snapshot(ctx, vmID, snapPath, memPath); err != nil {
 		return fmt.Errorf("snapshot for pause: %w", err)
 	}
+	m.meterSession(sess, StateActive, time.Now())
 
 	// Detach from the pool so its capacity slot is freed, tear the VM down keeping the
 	// writable disk, then drop the (now empty) cgroup.
@@ -689,6 +737,7 @@ func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 	sess.VsockConn = conn
 	sess.PooledVM = nil // resumed VM is standalone; Destroy releases its slot + disk directly
 	sess.Pool = nil
+	m.meterSession(sess, StatePaused, time.Now())
 	sess.State = StateActive
 	sess.LastUsed = time.Now()
 

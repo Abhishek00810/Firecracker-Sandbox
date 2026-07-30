@@ -1,14 +1,13 @@
-// Control plane: auth + Postgres + the public REST API, with no local VMs.
-// First step of the distributed split — /session lifecycle works end-to-end
-// against the DB (so the SvelteKit dashboard is fully functional), while
-// /execute and /session/:id/{run,exec} return a clear "no agent" error until
-// remote host agents are implemented.
+// Control plane: auth, billing, metering ingestion, and the public REST API.
+// Lifecycle commands delegate to the orchestrator; execution is sent directly
+// to the selected private worker. This process never owns a local VM.
 package main
 
 import (
 	"backend/internal/controlplane"
 	controlconfig "backend/internal/controlplane/config"
 	"backend/internal/handler"
+	"backend/internal/metering"
 	"backend/internal/middleware"
 	"backend/internal/orchestrator"
 	"backend/internal/platform"
@@ -82,9 +81,14 @@ func main() {
 
 	svc := controlplane.NewService(platformClient, orchestratorClient, cfg.WorkerToken)
 
-	http.HandleFunc("/health", healthHandler)
-	http.HandleFunc("/session", handler.SessionHandler(svc, platformClient))
-	http.HandleFunc("/session/", handler.SessionHandler(svc, platformClient))
+	publicMux := http.NewServeMux()
+	publicMux.HandleFunc("/session", handler.SessionHandler(svc, platformClient))
+	publicMux.HandleFunc("/session/", handler.SessionHandler(svc, platformClient))
+
+	rootMux := http.NewServeMux()
+	rootMux.HandleFunc("/health", healthHandler)
+	rootMux.Handle(metering.Route, metering.Handler(platformClient, cfg.WorkerToken))
+	rootMux.Handle("/", middleware.Auth(platformClient, executionPolicy, billingConfig)(publicMux))
 
 	port := ":" + cfg.Port
 	slog.Info("control plane is running", "port", port)
@@ -92,7 +96,7 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
-	chain := middleware.Logging(middleware.Auth(platformClient, executionPolicy, billingConfig)(http.DefaultServeMux))
+	chain := middleware.Logging(rootMux)
 
 	srv := &http.Server{
 		Addr:              port,

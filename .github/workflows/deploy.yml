@@ -50,6 +50,7 @@ jobs:
               - 'backend/internal/agent/**'
               - 'backend/internal/plane/**'
               - 'backend/internal/platform/**'
+              - 'backend/internal/metering/**'
               - 'backend/internal/middleware/**'
               - 'backend/internal/policy/**'
               - 'backend/internal/billing/**'
@@ -70,6 +71,7 @@ jobs:
               - 'backend/cmd/worker/**'
               - 'backend/internal/executor/**'
               - 'backend/internal/session/**'
+              - 'backend/internal/metering/**'
               - 'backend/internal/worker/**'
               - 'backend/internal/bootstrap/**'
               - 'backend/internal/cgroup/**'
@@ -298,6 +300,7 @@ jobs:
           # worker-1 advertises 8 physical vCPUs; nano is 1 vCPU, so 4x = 32.
           WORKER_SLOT_COUNT: ${{ vars.WORKER_1_SLOT_COUNT || '32' }}
           WORKER_MAX_SESSIONS: ${{ vars.WORKER_1_MAX_SESSIONS || '32' }}
+          CONTROL_PLANE_INTERNAL_URL: ${{ vars.CONTROL_PLANE_INTERNAL_URL }}
 
   # Wait for worker 1's health check before touching worker 2. A manual
   # worker-2-only dispatch is allowed to bypass the intentionally skipped first job.
@@ -331,3 +334,4 @@ jobs:
           # worker-2 advertises 48 physical vCPUs; nano is 1 vCPU, so 4x = 192.
           WORKER_SLOT_COUNT: ${{ vars.WORKER_2_SLOT_COUNT || '192' }}
           WORKER_MAX_SESSIONS: ${{ vars.WORKER_2_MAX_SESSIONS || '192' }}
+          CONTROL_PLANE_INTERNAL_URL: ${{ vars.CONTROL_PLANE_INTERNAL_URL }}

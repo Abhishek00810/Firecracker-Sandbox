@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"time"
 
+	"backend/internal/metering"
+
 	"github.com/jackc/pgx/v5"
 )
 
@@ -205,21 +207,49 @@ func (c *Client) InsertSandboxLog(ctx context.Context, entry SandboxLog) {
 	}
 }
 
-type UsageMeter struct {
-	UserID        string
-	SandboxID     string
-	BillingModel  string
-	Bucket        string
-	VCPUSeconds   float64
-	RAMGBSeconds  float64
-	DiskGBSeconds float64
-}
-
-func (c *Client) AccrueUsageMeter(ctx context.Context, meter UsageMeter) {
-	_, err := c.pool.Exec(ctx, `INSERT INTO usage_meters (user_id,sandbox_id,billing_model,bucket,vcpu_seconds,ram_gb_seconds,disk_gb_seconds) VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (sandbox_id,bucket) DO UPDATE SET vcpu_seconds=usage_meters.vcpu_seconds+EXCLUDED.vcpu_seconds,ram_gb_seconds=usage_meters.ram_gb_seconds+EXCLUDED.ram_gb_seconds,disk_gb_seconds=usage_meters.disk_gb_seconds+EXCLUDED.disk_gb_seconds`, meter.UserID, meter.SandboxID, meter.BillingModel, meter.Bucket, meter.VCPUSeconds, meter.RAMGBSeconds, meter.DiskGBSeconds)
+func (c *Client) AccrueUsageMeters(ctx context.Context, samples []metering.Sample) error {
+	tx, err := c.pool.Begin(ctx)
 	if err != nil {
-		slog.Warn("usage meter accrue failed", "err", err)
+		return fmt.Errorf("begin usage meter batch: %w", err)
 	}
+	defer tx.Rollback(ctx)
+
+	for _, sample := range samples {
+		tag, execErr := tx.Exec(ctx, `
+			INSERT INTO usage_meters (
+				user_id,sandbox_id,billing_model,bucket,
+				vcpu_seconds,ram_gb_seconds,disk_gb_seconds
+			)
+			SELECT
+				s.user_id,s.id,s.billing_model,$3,$4,$5,$6
+			FROM sandboxes s
+			WHERE s.id::text=$1 AND s.host_id=$2
+			ON CONFLICT (sandbox_id,bucket) DO UPDATE SET
+				vcpu_seconds=GREATEST(usage_meters.vcpu_seconds,EXCLUDED.vcpu_seconds),
+				ram_gb_seconds=GREATEST(usage_meters.ram_gb_seconds,EXCLUDED.ram_gb_seconds),
+				disk_gb_seconds=GREATEST(usage_meters.disk_gb_seconds,EXCLUDED.disk_gb_seconds)`,
+			sample.SandboxID,
+			sample.WorkerID,
+			sample.Bucket,
+			sample.VCPUSeconds,
+			sample.RAMGBSeconds,
+			sample.DiskGBSeconds,
+		)
+		if execErr != nil {
+			return fmt.Errorf("accrue usage meter for sandbox %s: %w", sample.SandboxID, execErr)
+		}
+		if tag.RowsAffected() == 0 {
+			slog.Warn(
+				"rejected usage sample from non-owning worker",
+				"sandbox_id", sample.SandboxID,
+				"worker_id", sample.WorkerID,
+			)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit usage meter batch: %w", err)
+	}
+	return nil
 }
 
 type SandboxRef struct {
