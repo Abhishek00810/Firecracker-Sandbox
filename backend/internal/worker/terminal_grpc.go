@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"crypto/subtle"
+	"log/slog"
 	"strings"
 
 	workerv1 "backend/internal/rpc/worker/v1"
@@ -44,6 +45,11 @@ func (s *TerminalGRPCServer) OpenTerminal(ctx context.Context, request *workerv1
 		uint16(request.GetColumns()),
 		uint16(request.GetRows()),
 	); err != nil {
+		slog.Error("guest terminal creation failed",
+			"sandbox_id", request.GetSandboxId(),
+			"terminal_id", request.GetTerminalId(),
+			"err", err,
+		)
 		return nil, terminalStatus(err)
 	}
 	return &workerv1.OpenTerminalResponse{TerminalId: request.GetTerminalId(), State: "ready"}, nil

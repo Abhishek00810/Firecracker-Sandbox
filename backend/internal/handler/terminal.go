@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -101,6 +102,13 @@ func CreateTerminalHandler(sandboxes plane.Service, placements TerminalPlacement
 		err = workers.OpenTerminal(workerCtx, placement.Endpoint, sandboxID, terminalID, request.Shell, request.Columns, request.Rows)
 		cancel()
 		if err != nil {
+			slog.Error("worker terminal creation failed",
+				"request_id", requestID,
+				"sandbox_id", sandboxID,
+				"terminal_id", terminalID,
+				"worker_id", placement.WorkerID,
+				"err", err,
+			)
 			terminals.Cancel(terminalID)
 			writeTerminalError(w, http.StatusBadGateway, "terminal_creation_failed", "worker failed to create terminal", requestID)
 			return
