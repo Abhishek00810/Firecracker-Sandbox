@@ -13,22 +13,24 @@ type Config struct {
 	LogLevel    string
 	LogFormat   string
 
-	OrchestratorURL   string
-	OrchestratorToken string
-	WorkerToken       string
+	OrchestratorURL        string
+	OrchestratorToken      string
+	WorkerToken            string
+	TerminalAllowedOrigins []string
 }
 
 // Load reads only control-plane settings. It performs no worker host or asset
 // validation, so the control plane remains independent of Firecracker.
 func Load() (*Config, error) {
 	cfg := &Config{
-		DatabaseURL:       strings.TrimSpace(os.Getenv("DATABASE_URL")),
-		Port:              defaultString(strings.TrimSpace(os.Getenv("PORT")), "8080"),
-		LogLevel:          defaultString(strings.TrimSpace(os.Getenv("LOG_LEVEL")), "info"),
-		LogFormat:         defaultString(strings.TrimSpace(os.Getenv("LOG_FORMAT")), "json"),
-		OrchestratorURL:   strings.TrimRight(strings.TrimSpace(os.Getenv("ORCHESTRATOR_URL")), "/"),
-		OrchestratorToken: strings.TrimSpace(os.Getenv("ORCHESTRATOR_TOKEN")),
-		WorkerToken:       strings.TrimSpace(os.Getenv("WORKER_TOKEN")),
+		DatabaseURL:            strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		Port:                   defaultString(strings.TrimSpace(os.Getenv("PORT")), "8080"),
+		LogLevel:               defaultString(strings.TrimSpace(os.Getenv("LOG_LEVEL")), "info"),
+		LogFormat:              defaultString(strings.TrimSpace(os.Getenv("LOG_FORMAT")), "json"),
+		OrchestratorURL:        strings.TrimRight(strings.TrimSpace(os.Getenv("ORCHESTRATOR_URL")), "/"),
+		OrchestratorToken:      strings.TrimSpace(os.Getenv("ORCHESTRATOR_TOKEN")),
+		WorkerToken:            strings.TrimSpace(os.Getenv("WORKER_TOKEN")),
+		TerminalAllowedOrigins: splitCSV(os.Getenv("TERMINAL_ALLOWED_ORIGINS")),
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -43,8 +45,17 @@ func Load() (*Config, error) {
 	if cfg.WorkerToken == "" {
 		return nil, errors.New("WORKER_TOKEN must be set")
 	}
-
 	return cfg, nil
+}
+
+func splitCSV(value string) []string {
+	var values []string
+	for _, item := range strings.Split(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			values = append(values, item)
+		}
+	}
+	return values
 }
 
 func defaultString(value, fallback string) string {

@@ -4,6 +4,7 @@
 package main
 
 import (
+	"backend/internal/agent"
 	"backend/internal/controlplane"
 	controlconfig "backend/internal/controlplane/config"
 	"backend/internal/handler"
@@ -11,6 +12,7 @@ import (
 	"backend/internal/middleware"
 	"backend/internal/orchestrator"
 	"backend/internal/platform"
+	"backend/internal/terminal"
 	"context"
 	"encoding/json"
 	"log/slog"
@@ -80,14 +82,23 @@ func main() {
 	}
 
 	svc := controlplane.NewService(platformClient, orchestratorClient, cfg.WorkerToken)
+	terminalWorkers := agent.NewTerminalPool(cfg.WorkerToken)
+	defer terminalWorkers.Close()
+	terminalManager, err := terminal.NewManager(terminal.DeriveSigningSecret(cfg.WorkerToken), 60*time.Second)
+	if err != nil {
+		slog.Error("terminal token initialization failed", "err", err)
+		os.Exit(1)
+	}
 
 	publicMux := http.NewServeMux()
 	publicMux.HandleFunc("/session", handler.SessionHandler(svc, platformClient))
 	publicMux.HandleFunc("/session/", handler.SessionHandler(svc, platformClient))
+	publicMux.HandleFunc("POST /v1/sandboxes/{sandboxID}/terminals", handler.CreateTerminalHandler(svc, orchestratorClient, terminalWorkers, terminalManager))
 
 	rootMux := http.NewServeMux()
 	rootMux.HandleFunc("/health", healthHandler)
 	rootMux.Handle(metering.Route, metering.Handler(platformClient, cfg.WorkerToken))
+	rootMux.HandleFunc("GET /v1/terminals/{terminalID}", handler.AttachTerminalHandler(orchestratorClient, terminalWorkers, terminalManager, cfg.TerminalAllowedOrigins))
 	rootMux.Handle("/", middleware.Auth(platformClient, executionPolicy, billingConfig)(publicMux))
 
 	port := ":" + cfg.Port

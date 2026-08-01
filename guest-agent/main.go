@@ -184,6 +184,8 @@ func evictKernel(language string) {
 // consistent cross-language contract we reset in-memory interpreter state on every pause
 // (the filesystem, installed packages, and re-injected env vars still persist).
 func resetRuntimes() {
+	terminals.CloseAll()
+
 	kernelsMu.Lock()
 	for lang, kb := range kernels {
 		if kb != nil && kb.cmd != nil && kb.cmd.Process != nil {
@@ -576,16 +578,22 @@ func (c *fdConn) Write(p []byte) (n int, err error) {
 // Type == "exec"              → run a shell command in the persistent bash session.
 // Type == "" (default)        → code execution request.
 type incomingMessage struct {
-	Type     string            `json:"type"`
-	Code     string            `json:"code"`
-	Language string            `json:"language"`
-	Timeout  int               `json:"timeout"`
-	Mode     string            `json:"mode"`
-	GuestIP  string            `json:"guest_ip"`
-	GWIP     string            `json:"gw_ip"`
-	Command  string            `json:"command"`
-	Env      map[string]string `json:"env"`
+	Type       string            `json:"type"`
+	Code       string            `json:"code"`
+	Language   string            `json:"language"`
+	Timeout    int               `json:"timeout"`
+	Mode       string            `json:"mode"`
+	GuestIP    string            `json:"guest_ip"`
+	GWIP       string            `json:"gw_ip"`
+	Command    string            `json:"command"`
+	Env        map[string]string `json:"env"`
+	TerminalID string            `json:"terminal_id"`
+	Shell      string            `json:"shell"`
+	Columns    uint16            `json:"columns"`
+	Rows       uint16            `json:"rows"`
 }
+
+var terminals = newTerminalManager(maxGuestTerminals)
 
 // handleNetworkConfig reconfigures eth0 using netlink directly — no exec.Command,
 // no gratuitous ARP. On bare KVM x86_64, ip addr add triggers a gratuitous ARP
@@ -991,6 +999,47 @@ func handleConnection(connFd int) {
 			handleExec(conn, msg.Command, msg.Timeout)
 			continue
 		}
+		if msg.Type == "terminal_open" {
+			err := terminals.Open(terminalOpenRequest{
+				ID: msg.TerminalID, Shell: msg.Shell, Columns: msg.Columns, Rows: msg.Rows, Env: msg.Env,
+			})
+			state := ""
+			if err == nil {
+				state = "ready"
+			}
+			json.NewEncoder(conn).Encode(struct {
+				Success bool   `json:"success"`
+				State   string `json:"state,omitempty"`
+				Error   string `json:"error,omitempty"`
+			}{Success: err == nil, State: state, Error: errorString(err)})
+			continue
+		}
+		if msg.Type == "terminal_close" {
+			err := terminals.Close(msg.TerminalID)
+			state := ""
+			if err == nil {
+				state = "closed"
+			}
+			json.NewEncoder(conn).Encode(struct {
+				Success bool   `json:"success"`
+				State   string `json:"state,omitempty"`
+				Error   string `json:"error,omitempty"`
+			}{Success: err == nil, State: state, Error: errorString(err)})
+			continue
+		}
+		if msg.Type == "terminal_close_all" {
+			terminals.CloseAll()
+			json.NewEncoder(conn).Encode(struct {
+				Success bool `json:"success"`
+			}{Success: true})
+			continue
+		}
+		if msg.Type == "terminal_attach" {
+			if err := terminals.Attach(conn, msg.TerminalID); err != nil {
+				log.Printf("terminal attach failed terminal_id=%s: %v", msg.TerminalID, err)
+			}
+			return
+		}
 
 		req := ExecutionRequest{
 			Code:     msg.Code,
@@ -1010,6 +1059,13 @@ func handleConnection(connFd int) {
 	}
 }
 
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
 func listenVsock() (int, error) {
 	fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM, 0)
 	if err != nil {
@@ -1020,7 +1076,7 @@ func listenVsock() (int, error) {
 		unix.Close(fd)
 		return -1, fmt.Errorf("bind: %w", err)
 	}
-	if err = unix.Listen(fd, 1); err != nil {
+	if err = unix.Listen(fd, 128); err != nil {
 		unix.Close(fd)
 		return -1, fmt.Errorf("listen: %w", err)
 	}
@@ -1108,7 +1164,9 @@ func main() {
 			continue
 		}
 
-		handleConnection(connFd)
-		unix.Close(connFd)
+		go func(connectionFD int) {
+			handleConnection(connectionFD)
+			unix.Close(connectionFD)
+		}(connFd)
 	}
 }

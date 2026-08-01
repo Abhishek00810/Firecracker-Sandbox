@@ -9,6 +9,7 @@ import (
 	"backend/internal/metering"
 	"backend/internal/orchestrator"
 	"backend/internal/plane"
+	workerv1 "backend/internal/rpc/worker/v1"
 	"backend/internal/session"
 	"backend/internal/vmsize"
 	"backend/internal/worker"
@@ -20,8 +21,12 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
+
+	"github.com/soheilhy/cmux"
+	"google.golang.org/grpc"
 )
 
 func setupLogger() {
@@ -261,6 +266,7 @@ func main() {
 		onState,
 		onMeter,
 	)
+	sessionMgr.SetMaxTerminalsPerSandbox(envInt("WORKER_MAX_TERMINALS_PER_SANDBOX", 8))
 	for _, recovered := range sessionMgr.Sessions() {
 		admission.Restore(
 			recovered.ID,
@@ -287,11 +293,29 @@ func main() {
 		os.Exit(1)
 	}
 
+	multiplexer := cmux.New(listener)
+	grpcListener := multiplexer.MatchWithWriters(cmux.HTTP2MatchHeaderFieldSendSettings("content-type", "application/grpc"))
+	httpListener := multiplexer.Match(cmux.Any())
+	grpcServer := grpc.NewServer(
+		grpc.UnaryInterceptor(worker.UnaryTokenAuth(token)),
+		grpc.StreamInterceptor(worker.StreamTokenAuth(token)),
+	)
+	workerv1.RegisterWorkerTerminalServiceServer(grpcServer, worker.NewTerminalGRPCServer(sessionMgr))
+
 	go func() {
-		slog.Info("worker listening", "addr", bind)
-		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
-			slog.Error("worker server failed", "err", err)
-			os.Exit(1)
+		slog.Info("worker HTTP and gRPC listening", "addr", bind)
+		if err := grpcServer.Serve(grpcListener); err != nil {
+			slog.Error("worker gRPC server failed", "err", err)
+		}
+	}()
+	go func() {
+		if err := srv.Serve(httpListener); err != nil && err != http.ErrServerClosed {
+			slog.Error("worker HTTP server failed", "err", err)
+		}
+	}()
+	go func() {
+		if err := multiplexer.Serve(); err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
+			slog.Error("worker listener failed", "err", err)
 		}
 	}()
 
@@ -321,6 +345,18 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	if err := srv.Shutdown(ctx); err != nil {
 		slog.Error("worker HTTP shutdown failed", "err", err)
+	}
+	grpcStopped := make(chan struct{})
+	go func() {
+		grpcServer.GracefulStop()
+		close(grpcStopped)
+	}()
+	select {
+	case <-grpcStopped:
+	case <-time.After(5 * time.Second):
+		slog.Warn("forcing worker gRPC streams closed during drain")
+		grpcServer.Stop()
+		<-grpcStopped
 	}
 	cancel()
 

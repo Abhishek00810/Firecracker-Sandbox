@@ -9,7 +9,8 @@
 #
 # Usage: install-worker.sh <local-binary-path>
 # Env:   SSH_KEY (private key contents), SSH_HOST, SSH_USER
-#        WORKER_SLOT_COUNT, WORKER_MAX_SESSIONS, WORKER_*_OVERCOMMIT_RATIO
+#        WORKER_SLOT_COUNT, WORKER_MAX_SESSIONS, WORKER_*_OVERCOMMIT_RATIO,
+#        WORKER_MAX_TERMINALS_PER_SANDBOX
 #        CONTROL_PLANE_INTERNAL_URL (internal raw-usage ingestion endpoint)
 set -euo pipefail
 
@@ -17,7 +18,7 @@ BINARY="${1:?usage: install-worker.sh <binary>}"
 : "${SSH_KEY:?SSH_KEY required}" "${SSH_HOST:?SSH_HOST required}" "${SSH_USER:?SSH_USER required}"
 UNIT="$(dirname "$0")/worker.service"
 
-for value in "${WORKER_SLOT_COUNT:-}" "${WORKER_MAX_SESSIONS:-}"; do
+for value in "${WORKER_SLOT_COUNT:-}" "${WORKER_MAX_SESSIONS:-}" "${WORKER_MAX_TERMINALS_PER_SANDBOX:-}"; do
 	[ -z "$value" ] && continue
 	case "$value" in
 	*[!0-9]* | 0)
@@ -44,7 +45,7 @@ $SCP "$UNIT"   "${SSH_USER}@${SSH_HOST}:/tmp/renderops-worker.service.new"
 
 echo "==> installing (idempotent) and restarting"
 # shellcheck disable=SC2087
-$SSH "sudo WORKER_SLOT_COUNT='${WORKER_SLOT_COUNT:-}' WORKER_MAX_SESSIONS='${WORKER_MAX_SESSIONS:-}' WORKER_CPU_OVERCOMMIT_RATIO='${WORKER_CPU_OVERCOMMIT_RATIO:-}' WORKER_MEMORY_OVERCOMMIT_RATIO='${WORKER_MEMORY_OVERCOMMIT_RATIO:-}' CONTROL_PLANE_INTERNAL_URL='${CONTROL_PLANE_INTERNAL_URL:-}' bash -s" <<'REMOTE'
+$SSH "sudo WORKER_SLOT_COUNT='${WORKER_SLOT_COUNT:-}' WORKER_MAX_SESSIONS='${WORKER_MAX_SESSIONS:-}' WORKER_CPU_OVERCOMMIT_RATIO='${WORKER_CPU_OVERCOMMIT_RATIO:-}' WORKER_MEMORY_OVERCOMMIT_RATIO='${WORKER_MEMORY_OVERCOMMIT_RATIO:-}' WORKER_MAX_TERMINALS_PER_SANDBOX='${WORKER_MAX_TERMINALS_PER_SANDBOX:-}' CONTROL_PLANE_INTERNAL_URL='${CONTROL_PLANE_INTERNAL_URL:-}' bash -s" <<'REMOTE'
 set -euo pipefail
 # Preconditions from the one-time host setup — fail clearly if missing.
 if [ ! -f /etc/renderops/worker.env ]; then
@@ -74,6 +75,7 @@ set_env_value SLOT_COUNT "$WORKER_SLOT_COUNT"
 set_env_value WORKER_MAX_SESSIONS "$WORKER_MAX_SESSIONS"
 set_env_value WORKER_CPU_OVERCOMMIT_RATIO "$WORKER_CPU_OVERCOMMIT_RATIO"
 set_env_value WORKER_MEMORY_OVERCOMMIT_RATIO "$WORKER_MEMORY_OVERCOMMIT_RATIO"
+set_env_value WORKER_MAX_TERMINALS_PER_SANDBOX "$WORKER_MAX_TERMINALS_PER_SANDBOX"
 set_env_value CONTROL_PLANE_INTERNAL_URL "${CONTROL_PLANE_INTERNAL_URL:-}"
 
 install -D -m 0755 /tmp/renderops-worker.new /opt/renderops/renderops-worker

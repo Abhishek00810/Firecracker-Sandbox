@@ -1,8 +1,11 @@
 package middleware
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
@@ -23,6 +26,20 @@ func RequestIDFromContext(ctx context.Context) string {
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
+}
+
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
+func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := r.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("response writer does not support hijacking")
+	}
+	connection, buffer, err := hijacker.Hijack()
+	if err == nil {
+		r.status = http.StatusSwitchingProtocols
+	}
+	return connection, buffer, err
 }
 
 func (r *statusRecorder) WriteHeader(code int) {

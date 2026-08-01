@@ -458,6 +458,12 @@ func (f *fakeSessionService) Exec(ctx context.Context, sessionID, command string
 	}, nil
 }
 
+func (f *fakeSessionService) OpenTerminal(context.Context, string, string, string, uint16, uint16) error {
+	return nil
+}
+
+func (f *fakeSessionService) CloseTerminal(context.Context, string, string) error { return nil }
+
 func (f *fakeSessionService) Create(ctx context.Context, userID, billingModel string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*plane.SessionInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

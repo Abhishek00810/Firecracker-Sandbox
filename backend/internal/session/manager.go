@@ -13,6 +13,7 @@ import (
 	"backend/internal/cgroup"
 	"backend/internal/executor"
 	"backend/internal/executor/firecracker"
+	"backend/internal/terminal"
 	"backend/internal/vmsize"
 
 	"github.com/google/uuid"
@@ -59,6 +60,7 @@ type Manager struct {
 	meterMu       sync.Mutex
 	meterLast     map[string]time.Time
 	meterTotals   map[string]MeterSample
+	maxTerminals  int
 }
 
 type createLock struct {
@@ -94,6 +96,7 @@ func NewManager(
 		createLocks:   make(map[string]*createLock),
 		meterLast:     make(map[string]time.Time),
 		meterTotals:   make(map[string]MeterSample),
+		maxTerminals:  8,
 	}
 	if err := os.MkdirAll(m.pauseDir, 0o755); err != nil {
 		slog.Error("failed to create pause snapshot dir", "dir", m.pauseDir, "err", err)
@@ -113,6 +116,12 @@ func NewManager(
 		go m.meterTicker()
 	}
 	return m
+}
+
+func (m *Manager) SetMaxTerminalsPerSandbox(maxTerminals int) {
+	if maxTerminals > 0 {
+		m.maxTerminals = maxTerminals
+	}
 }
 
 // meterTicker accrues RAW resource-time for every live session once a minute and hands each
@@ -364,6 +373,7 @@ func (m *Manager) CreateWithID(ctx context.Context, sandboxID, userID, billingMo
 		CreatedAt:    time.Now(),
 		LastUsed:     time.Now(),
 		State:        StateActive,
+		Terminals:    make(map[string]struct{}),
 	}
 	if err := m.store.Add(sess); err != nil {
 		pool.Release(pvm)
@@ -395,6 +405,90 @@ func (m *Manager) CreateWithID(ctx context.Context, sandboxID, userID, billingMo
 
 	slog.Info("session created", "session_id", sess.ID, "vm_id", pvm.VM.ID, "billing_model", billingModel, "warm", warm, "ms", time.Since(t0).Milliseconds())
 	return sess, nil
+}
+
+func (m *Manager) OpenTerminal(ctx context.Context, sessionID, terminalID, shell string, columns, rows uint16) error {
+	sess, ok := m.store.Get(sessionID)
+	if !ok {
+		return fmt.Errorf("session %s not found", sessionID)
+	}
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	if sess.State != StateActive || sess.VM == nil || sess.VsockConn == nil {
+		return fmt.Errorf("session %s is not active", sessionID)
+	}
+	if _, exists := sess.Terminals[terminalID]; exists {
+		return fmt.Errorf("terminal %s already exists", terminalID)
+	}
+	if len(sess.Terminals) >= m.maxTerminals {
+		return fmt.Errorf("terminal limit reached (%d)", m.maxTerminals)
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	client := firecracker.NewVsockClient(sess.VM.VsockPath)
+	if err := client.OpenTerminalOnConn(sess.VsockConn, firecracker.TerminalOpenRequest{
+		TerminalID: terminalID,
+		Shell:      shell,
+		Columns:    columns,
+		Rows:       rows,
+		Env:        sess.Env,
+	}); err != nil {
+		return err
+	}
+	if sess.Terminals == nil {
+		sess.Terminals = make(map[string]struct{})
+	}
+	sess.Terminals[terminalID] = struct{}{}
+	sess.LastUsed = time.Now()
+	return nil
+}
+
+func (m *Manager) CloseTerminal(ctx context.Context, sessionID, terminalID string) error {
+	sess, ok := m.store.Get(sessionID)
+	if !ok {
+		return fmt.Errorf("session %s not found", sessionID)
+	}
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	if sess.State != StateActive || sess.VM == nil || sess.VsockConn == nil {
+		return fmt.Errorf("session %s is not active", sessionID)
+	}
+	if _, exists := sess.Terminals[terminalID]; !exists {
+		return fmt.Errorf("terminal %s not found", terminalID)
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	client := firecracker.NewVsockClient(sess.VM.VsockPath)
+	err := client.CloseTerminalOnConn(sess.VsockConn, terminalID)
+	delete(sess.Terminals, terminalID)
+	return err
+}
+
+func (m *Manager) AttachTerminal(ctx context.Context, sessionID, terminalID string, stream terminal.Stream) error {
+	sess, ok := m.store.Get(sessionID)
+	if !ok {
+		return fmt.Errorf("session %s not found", sessionID)
+	}
+	sess.mu.Lock()
+	if sess.State != StateActive || sess.VM == nil || sess.VsockConn == nil {
+		sess.mu.Unlock()
+		return fmt.Errorf("session %s is not active", sessionID)
+	}
+	if _, exists := sess.Terminals[terminalID]; !exists {
+		sess.mu.Unlock()
+		return fmt.Errorf("terminal %s not found", terminalID)
+	}
+	vsockPath := sess.VM.VsockPath
+	sess.LastUsed = time.Now()
+	sess.mu.Unlock()
+
+	return firecracker.NewVsockClient(vsockPath).AttachTerminal(ctx, terminalID, stream)
 }
 
 func (m *Manager) lockCreate(sandboxID string) func() {
@@ -523,6 +617,13 @@ func (m *Manager) Destroy(ctx context.Context, sessionID string) error {
 		return nil
 	}
 
+	if sess.VsockConn != nil && len(sess.Terminals) > 0 {
+		client := firecracker.NewVsockClient(sess.VM.VsockPath)
+		if err := client.CloseAllTerminalsOnConn(sess.VsockConn); err != nil {
+			slog.Warn("close terminals before destroy failed", "session_id", sessionID, "err", err)
+		}
+		sess.Terminals = nil
+	}
 	if sess.VsockConn != nil {
 		sess.VsockConn.Close()
 	}
@@ -569,6 +670,13 @@ func (m *Manager) Pause(ctx context.Context, sessionID string) error {
 	}
 	if sess.State != StateActive || sess.VM == nil {
 		return nil
+	}
+	if sess.VsockConn != nil && len(sess.Terminals) > 0 {
+		client := firecracker.NewVsockClient(sess.VM.VsockPath)
+		if err := client.CloseAllTerminalsOnConn(sess.VsockConn); err != nil {
+			return fmt.Errorf("close terminals before pause: %w", err)
+		}
+		sess.Terminals = nil
 	}
 
 	t0 := time.Now()

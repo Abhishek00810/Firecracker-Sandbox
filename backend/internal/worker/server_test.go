@@ -12,11 +12,17 @@ import (
 	"backend/internal/executor"
 	"backend/internal/plane"
 	"backend/internal/session"
+	"backend/internal/terminal"
 )
 
 type fakeSessionService struct {
-	createdID string
-	session   *session.Session
+	createdID      string
+	session        *session.Session
+	openedSandbox  string
+	openedTerminal string
+	closedTerminal string
+	attachedInput  terminal.Frame
+	attach         func(terminal.Stream) error
 }
 
 func (f *fakeSessionService) Create(context.Context, string, string, map[string]string, int, int, int, bool, time.Duration, time.Duration) (*session.Session, error) {
@@ -44,6 +50,24 @@ func (f *fakeSessionService) Execute(context.Context, string, string, string, in
 
 func (f *fakeSessionService) Exec(context.Context, string, string, int) (executor.ExecutionResult, error) {
 	return executor.ExecutionResult{}, nil
+}
+
+func (f *fakeSessionService) OpenTerminal(_ context.Context, sandboxID, terminalID, _ string, _, _ uint16) error {
+	f.openedSandbox = sandboxID
+	f.openedTerminal = terminalID
+	return nil
+}
+
+func (f *fakeSessionService) CloseTerminal(_ context.Context, _, terminalID string) error {
+	f.closedTerminal = terminalID
+	return nil
+}
+
+func (f *fakeSessionService) AttachTerminal(_ context.Context, _, _ string, stream terminal.Stream) error {
+	if f.attach != nil {
+		return f.attach(stream)
+	}
+	return nil
 }
 
 func (f *fakeSessionService) Pause(context.Context, string) error   { return nil }

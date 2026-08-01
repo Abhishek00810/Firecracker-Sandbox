@@ -1,0 +1,57 @@
+syntax = "proto3";
+
+package renderops.worker.v1;
+
+option go_package = "backend/internal/rpc/worker/v1;workerv1";
+
+service WorkerTerminalService {
+  rpc OpenTerminal(OpenTerminalRequest) returns (OpenTerminalResponse);
+  rpc CloseTerminal(CloseTerminalRequest) returns (CloseTerminalResponse);
+  rpc AttachTerminal(stream TerminalFrame) returns (stream TerminalFrame);
+}
+
+enum TerminalFrameType {
+  TERMINAL_FRAME_TYPE_UNSPECIFIED = 0;
+  TERMINAL_FRAME_TYPE_ATTACH = 1;
+  TERMINAL_FRAME_TYPE_READY = 2;
+  TERMINAL_FRAME_TYPE_INPUT = 3;
+  TERMINAL_FRAME_TYPE_OUTPUT = 4;
+  TERMINAL_FRAME_TYPE_RESIZE = 5;
+  TERMINAL_FRAME_TYPE_EXIT = 6;
+  TERMINAL_FRAME_TYPE_ERROR = 7;
+  TERMINAL_FRAME_TYPE_CLOSE = 8;
+}
+
+message TerminalFrame {
+  TerminalFrameType type = 1;
+  string terminal_id = 2;
+  string sandbox_id = 3;
+  bytes data = 4;
+  uint32 columns = 5;
+  uint32 rows = 6;
+  int32 exit_code = 7;
+  string message = 8;
+}
+
+message OpenTerminalRequest {
+  string terminal_id = 1;
+  string sandbox_id = 2;
+  string shell = 3;
+  uint32 columns = 4;
+  uint32 rows = 5;
+}
+
+message OpenTerminalResponse {
+  string terminal_id = 1;
+  string state = 2;
+}
+
+message CloseTerminalRequest {
+  string terminal_id = 1;
+  string sandbox_id = 2;
+}
+
+message CloseTerminalResponse {
+  string terminal_id = 1;
+  string state = 2;
+}

@@ -29,6 +29,14 @@ type ExecuteResponse struct {
 	Duration float64 `json:"duration"`
 }
 
+type TerminalOpenRequest struct {
+	TerminalID string            `json:"terminal_id"`
+	Shell      string            `json:"shell"`
+	Columns    uint16            `json:"columns"`
+	Rows       uint16            `json:"rows"`
+	Env        map[string]string `json:"env,omitempty"`
+}
+
 func NewVsockClient(socketPath string) *VsockClient {
 	return &VsockClient{
 		socketPath: socketPath,
@@ -113,6 +121,50 @@ func (v *VsockClient) SetEnvOnConn(conn net.Conn, env map[string]string) error {
 	conn.SetDeadline(time.Time{})
 	if !resp.Success {
 		return fmt.Errorf("set_env failed: %s", resp.Error)
+	}
+	return nil
+}
+
+func (v *VsockClient) OpenTerminalOnConn(conn net.Conn, request TerminalOpenRequest) error {
+	req := struct {
+		Type string `json:"type"`
+		TerminalOpenRequest
+	}{Type: "terminal_open", TerminalOpenRequest: request}
+	return v.terminalRequest(conn, req, "open")
+}
+
+func (v *VsockClient) CloseTerminalOnConn(conn net.Conn, terminalID string) error {
+	req := struct {
+		Type       string `json:"type"`
+		TerminalID string `json:"terminal_id"`
+	}{Type: "terminal_close", TerminalID: terminalID}
+	return v.terminalRequest(conn, req, "close")
+}
+
+func (v *VsockClient) CloseAllTerminalsOnConn(conn net.Conn) error {
+	req := struct {
+		Type string `json:"type"`
+	}{Type: "terminal_close_all"}
+	return v.terminalRequest(conn, req, "close all")
+}
+
+func (v *VsockClient) terminalRequest(conn net.Conn, request any, operation string) error {
+	if err := json.NewEncoder(conn).Encode(request); err != nil {
+		return fmt.Errorf("send terminal %s request: %w", operation, err)
+	}
+	var response struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error,omitempty"`
+	}
+	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		return fmt.Errorf("set terminal %s deadline: %w", operation, err)
+	}
+	defer func() { _ = conn.SetDeadline(time.Time{}) }()
+	if err := json.NewDecoder(conn).Decode(&response); err != nil {
+		return fmt.Errorf("read terminal %s response: %w", operation, err)
+	}
+	if !response.Success {
+		return fmt.Errorf("terminal %s failed: %s", operation, response.Error)
 	}
 	return nil
 }

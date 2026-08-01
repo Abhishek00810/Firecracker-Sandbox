@@ -39,6 +39,7 @@ services:
       ORCHESTRATOR_URL: ${ORCHESTRATOR_URL:?ORCHESTRATOR_URL is required}
       ORCHESTRATOR_TOKEN: ${ORCHESTRATOR_TOKEN:?ORCHESTRATOR_TOKEN is required}
       WORKER_TOKEN: ${WORKER_TOKEN:?WORKER_TOKEN is required}
+      TERMINAL_ALLOWED_ORIGINS: ${TERMINAL_ALLOWED_ORIGINS:-dev.renderops.com}
     depends_on:
       postgres:
         condition: service_healthy
