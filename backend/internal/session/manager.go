@@ -212,6 +212,9 @@ func (m *Manager) recoverPaused() {
 	}
 	recovered := 0
 	for _, sess := range sessions {
+		if sess.RootfsPathAtPause == "" && m.template != nil {
+			sess.RootfsPathAtPause = m.template.RootfsPath
+		}
 		if err := m.store.Add(sess); err != nil {
 			slog.Warn("could not recover paused session", "session_id", sess.ID, "err", err)
 			continue
@@ -704,6 +707,7 @@ func (m *Manager) Pause(ctx context.Context, sessionID string) error {
 	sess.VsockPathAtPause = tmpl.VsockPath
 	sess.TapNameAtPause = tmpl.TapName
 	sess.WritableDiskPath = sess.VM.WritableDiskPath
+	sess.RootfsPathAtPause = sess.VM.Config.RootfsPath
 
 	// Close the persistent connection and let the guest agent fall back into accept()
 	// BEFORE we freeze the VM. On a live (not-yet-frozen) VM the close propagates normally,
@@ -767,10 +771,14 @@ func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 	}
 
 	t0 := time.Now()
+	rootfsPath := sess.RootfsPathAtPause
+	if rootfsPath == "" {
+		rootfsPath = m.template.RootfsPath
+	}
 	tmpl := &firecracker.SnapshotTemplate{
 		SnapPath:         sess.SnapPath,
 		MemPath:          sess.MemPath,
-		RootfsPath:       m.template.RootfsPath, // shared read-only lower
+		RootfsPath:       rootfsPath,
 		WritableDiskPath: sess.WritableDiskPath, // the session's own disk, attached in place
 		VsockPath:        sess.VsockPathAtPause,
 		TapName:          sess.TapNameAtPause,

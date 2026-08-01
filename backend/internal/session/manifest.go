@@ -17,45 +17,47 @@ import (
 // (S3/Blob), a later phase. Records pointing at missing files are dropped on recovery.
 
 type pausedRecord struct {
-	ID               string            `json:"id"`
-	UserID           string            `json:"user_id"`
-	BillingModel     string            `json:"billing_model"`
-	LegacyTier       string            `json:"tier,omitempty"` // read-only compatibility for pre-PAYG manifests
-	VCPUs            int               `json:"vcpus"`
-	MemoryMB         int               `json:"memory_mb"`
-	DiskGB           int               `json:"disk_gb"`
-	Env              map[string]string `json:"env,omitempty"`
-	Internet         bool              `json:"internet"`
-	IdleTimeoutNs    int64             `json:"idle_timeout_ns"`
-	MaxLifetimeNs    int64             `json:"max_lifetime_ns"`
-	CreatedAt        time.Time         `json:"created_at"`
-	PausedAt         time.Time         `json:"paused_at"`
-	SnapPath         string            `json:"snap_path"`
-	MemPath          string            `json:"mem_path"`
-	WritableDiskPath string            `json:"writable_disk_path"`
-	VsockPathAtPause string            `json:"vsock_path_at_pause"`
-	TapNameAtPause   string            `json:"tap_name_at_pause"`
+	ID                string            `json:"id"`
+	UserID            string            `json:"user_id"`
+	BillingModel      string            `json:"billing_model"`
+	LegacyTier        string            `json:"tier,omitempty"` // read-only compatibility for pre-PAYG manifests
+	VCPUs             int               `json:"vcpus"`
+	MemoryMB          int               `json:"memory_mb"`
+	DiskGB            int               `json:"disk_gb"`
+	Env               map[string]string `json:"env,omitempty"`
+	Internet          bool              `json:"internet"`
+	IdleTimeoutNs     int64             `json:"idle_timeout_ns"`
+	MaxLifetimeNs     int64             `json:"max_lifetime_ns"`
+	CreatedAt         time.Time         `json:"created_at"`
+	PausedAt          time.Time         `json:"paused_at"`
+	SnapPath          string            `json:"snap_path"`
+	MemPath           string            `json:"mem_path"`
+	WritableDiskPath  string            `json:"writable_disk_path"`
+	RootfsPathAtPause string            `json:"rootfs_path_at_pause,omitempty"`
+	VsockPathAtPause  string            `json:"vsock_path_at_pause"`
+	TapNameAtPause    string            `json:"tap_name_at_pause"`
 }
 
 func recordFromSession(s *Session) pausedRecord {
 	return pausedRecord{
-		ID:               s.ID,
-		UserID:           s.UserID,
-		BillingModel:     s.BillingModel,
-		VCPUs:            s.VCPUs,
-		MemoryMB:         s.MemoryMB,
-		DiskGB:           s.DiskGB,
-		Env:              s.Env,
-		Internet:         s.Internet,
-		IdleTimeoutNs:    int64(s.IdleTimeout),
-		MaxLifetimeNs:    int64(s.MaxLifetime),
-		CreatedAt:        s.CreatedAt,
-		PausedAt:         s.PausedAt,
-		SnapPath:         s.SnapPath,
-		MemPath:          s.MemPath,
-		WritableDiskPath: s.WritableDiskPath,
-		VsockPathAtPause: s.VsockPathAtPause,
-		TapNameAtPause:   s.TapNameAtPause,
+		ID:                s.ID,
+		UserID:            s.UserID,
+		BillingModel:      s.BillingModel,
+		VCPUs:             s.VCPUs,
+		MemoryMB:          s.MemoryMB,
+		DiskGB:            s.DiskGB,
+		Env:               s.Env,
+		Internet:          s.Internet,
+		IdleTimeoutNs:     int64(s.IdleTimeout),
+		MaxLifetimeNs:     int64(s.MaxLifetime),
+		CreatedAt:         s.CreatedAt,
+		PausedAt:          s.PausedAt,
+		SnapPath:          s.SnapPath,
+		MemPath:           s.MemPath,
+		WritableDiskPath:  s.WritableDiskPath,
+		RootfsPathAtPause: s.RootfsPathAtPause,
+		VsockPathAtPause:  s.VsockPathAtPause,
+		TapNameAtPause:    s.TapNameAtPause,
 	}
 }
 
@@ -68,25 +70,26 @@ func (r pausedRecord) toSession() *Session {
 		billingModel = "payg"
 	}
 	return &Session{
-		ID:               r.ID,
-		UserID:           r.UserID,
-		BillingModel:     billingModel,
-		VCPUs:            r.VCPUs,
-		MemoryMB:         r.MemoryMB,
-		DiskGB:           r.DiskGB,
-		Env:              r.Env,
-		Internet:         r.Internet,
-		IdleTimeout:      time.Duration(r.IdleTimeoutNs),
-		MaxLifetime:      time.Duration(r.MaxLifetimeNs),
-		CreatedAt:        r.CreatedAt,
-		LastUsed:         r.PausedAt,
-		State:            StatePaused,
-		PausedAt:         r.PausedAt,
-		SnapPath:         r.SnapPath,
-		MemPath:          r.MemPath,
-		WritableDiskPath: r.WritableDiskPath,
-		VsockPathAtPause: r.VsockPathAtPause,
-		TapNameAtPause:   r.TapNameAtPause,
+		ID:                r.ID,
+		UserID:            r.UserID,
+		BillingModel:      billingModel,
+		VCPUs:             r.VCPUs,
+		MemoryMB:          r.MemoryMB,
+		DiskGB:            r.DiskGB,
+		Env:               r.Env,
+		Internet:          r.Internet,
+		IdleTimeout:       time.Duration(r.IdleTimeoutNs),
+		MaxLifetime:       time.Duration(r.MaxLifetimeNs),
+		CreatedAt:         r.CreatedAt,
+		LastUsed:          r.PausedAt,
+		State:             StatePaused,
+		PausedAt:          r.PausedAt,
+		SnapPath:          r.SnapPath,
+		MemPath:           r.MemPath,
+		WritableDiskPath:  r.WritableDiskPath,
+		RootfsPathAtPause: r.RootfsPathAtPause,
+		VsockPathAtPause:  r.VsockPathAtPause,
+		TapNameAtPause:    r.TapNameAtPause,
 	}
 }
 

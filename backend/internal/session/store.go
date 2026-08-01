@@ -44,13 +44,14 @@ type Session struct {
 	// Auto-pause state. When State == StatePaused the VM is gone and these describe how
 	// to resume it: restore from SnapPath/MemPath, reattach WritableDiskPath in place,
 	// re-bake VsockPathAtPause + TapNameAtPause. All persisted to the recovery manifest.
-	State            SessionState
-	PausedAt         time.Time
-	SnapPath         string // per-session VM-state snapshot file (on disk, not /dev/shm)
-	MemPath          string // per-session guest-RAM snapshot file
-	WritableDiskPath string // the session's writable upper disk — survives across pause
-	VsockPathAtPause string // vsock UDS path baked into the session snapshot
-	TapNameAtPause   string // host TAP name baked into the session snapshot
+	State             SessionState
+	PausedAt          time.Time
+	SnapPath          string // per-session VM-state snapshot file (on disk, not /dev/shm)
+	MemPath           string // per-session guest-RAM snapshot file
+	WritableDiskPath  string // the session's writable upper disk — survives across pause
+	RootfsPathAtPause string // immutable lower rootfs used by this snapshot
+	VsockPathAtPause  string // vsock UDS path baked into the session snapshot
+	TapNameAtPause    string // host TAP name baked into the session snapshot
 }
 
 type Store struct {

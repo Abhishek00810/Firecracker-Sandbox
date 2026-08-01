@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestCreate(t *testing.T) {
@@ -46,4 +47,22 @@ func TestCreate(t *testing.T) {
 	}
 
 	t.Logf("✓ Created VM: %s", vm.ID)
+}
+
+func TestWaitForPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "vsock.sock")
+	go func() {
+		time.Sleep(25 * time.Millisecond)
+		_ = os.WriteFile(path, nil, 0o600)
+	}()
+	if err := waitForPath(context.Background(), path, time.Second); err != nil {
+		t.Fatalf("waitForPath failed: %v", err)
+	}
+}
+
+func TestWaitForPathTimesOut(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing.sock")
+	if err := waitForPath(context.Background(), path, 20*time.Millisecond); err == nil {
+		t.Fatal("waitForPath unexpectedly succeeded")
+	}
 }

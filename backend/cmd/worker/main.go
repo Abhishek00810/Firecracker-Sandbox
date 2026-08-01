@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -163,6 +164,12 @@ func main() {
 	cfg := h.Config
 	vmManager := h.VMManager
 	slotCount := h.SlotCount
+	resolvedRootfs, err := filepath.EvalSymlinks(cfg.RootfsPath)
+	if err != nil {
+		slog.Error("resolve immutable rootfs failed", "path", cfg.RootfsPath, "err", err)
+		os.Exit(1)
+	}
+	cfg.RootfsPath = resolvedRootfs
 
 	// Base config derives from the DEFAULT size (vmsize.Default) so the default-size
 	// template is actually built at that shape — not a hardcoded 256MB/10GB.

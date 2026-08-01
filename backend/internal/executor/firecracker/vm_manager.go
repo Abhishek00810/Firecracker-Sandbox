@@ -869,6 +869,10 @@ func (f *FireCrackerManager) loadSnapshot(ctx context.Context, cfg VMConfig, tmp
 	resumeMs := time.Since(lastPhase).Milliseconds()
 	lastPhase = time.Now()
 
+	if err := waitForPath(ctx, tmpl.VsockPath, 2*time.Second); err != nil {
+		restoreCleanup()
+		return nil, fmt.Errorf("vsock did not become ready after resume: %w", err)
+	}
 	// Rename vsock → unique per-VM path (fd survives rename, Firecracker keeps listening)
 	if err := os.Rename(tmpl.VsockPath, vsockPath); err != nil {
 		restoreCleanup()
@@ -924,6 +928,27 @@ func (f *FireCrackerManager) loadSnapshot(ctx context.Context, cfg VMConfig, tmp
 	)
 
 	return vm, nil
+}
+
+func waitForPath(ctx context.Context, path string, timeout time.Duration) error {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return nil
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("timed out waiting for %s", path)
+		case <-ticker.C:
+		}
+	}
 }
 
 // TemplateBuildOptions controls what runs inside the build VM before it is
