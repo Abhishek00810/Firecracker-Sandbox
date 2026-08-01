@@ -45,6 +45,10 @@ jobs:
       - name: Run tests
         run: go test ./...
 
+      - name: Test worker rootfs activation
+        working-directory: ${{ github.workspace }}
+        run: bash ops/worker/tests/activate-rootfs_test.sh
+
   guest-agent:
     name: Guest Agent
     runs-on: ubuntu-latest

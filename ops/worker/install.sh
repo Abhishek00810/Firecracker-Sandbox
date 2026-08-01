@@ -7,7 +7,7 @@
 # verifies those exist and fails clearly if not — it does NOT create secrets or
 # provision assets.
 #
-# Usage: install-worker.sh <local-binary-path>
+# Usage: install-worker.sh <local-binary-path> [rootfs-archive checksum-file]
 # Env:   SSH_KEY (private key contents), SSH_HOST, SSH_USER
 #        WORKER_SLOT_COUNT, WORKER_MAX_SESSIONS, WORKER_*_OVERCOMMIT_RATIO,
 #        WORKER_MAX_TERMINALS_PER_SANDBOX
@@ -15,8 +15,20 @@
 set -euo pipefail
 
 BINARY="${1:?usage: install-worker.sh <binary>}"
+ROOTFS_ARCHIVE="${2:-}"
+ROOTFS_CHECKSUM="${3:-}"
 : "${SSH_KEY:?SSH_KEY required}" "${SSH_HOST:?SSH_HOST required}" "${SSH_USER:?SSH_USER required}"
 UNIT="$(dirname "$0")/worker.service"
+ROOTFS_INSTALLER="$(dirname "$0")/activate-rootfs.sh"
+DEPLOY_ROOTFS_VERSION=""
+
+if [ -n "$ROOTFS_ARCHIVE" ] || [ -n "$ROOTFS_CHECKSUM" ]; then
+	: "${ROOTFS_ARCHIVE:?rootfs archive required}" "${ROOTFS_CHECKSUM:?rootfs checksum required}"
+	: "${ROOTFS_VERSION:?ROOTFS_VERSION required when deploying a rootfs}"
+	test -f "$ROOTFS_ARCHIVE"
+	test -f "$ROOTFS_CHECKSUM"
+	DEPLOY_ROOTFS_VERSION="$ROOTFS_VERSION"
+fi
 
 for value in "${WORKER_SLOT_COUNT:-}" "${WORKER_MAX_SESSIONS:-}" "${WORKER_MAX_TERMINALS_PER_SANDBOX:-}"; do
 	[ -z "$value" ] && continue
@@ -42,10 +54,16 @@ SSH="ssh -i $KEYFILE -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 ${
 echo "==> uploading worker binary + service unit"
 $SCP "$BINARY" "${SSH_USER}@${SSH_HOST}:/tmp/renderops-worker.new"
 $SCP "$UNIT"   "${SSH_USER}@${SSH_HOST}:/tmp/renderops-worker.service.new"
+if [ -n "$ROOTFS_ARCHIVE" ]; then
+	echo "==> uploading rootfs version ${ROOTFS_VERSION}"
+	$SCP "$ROOTFS_ARCHIVE" "${SSH_USER}@${SSH_HOST}:/tmp/renderops-rootfs.tar.gz.new"
+	$SCP "$ROOTFS_CHECKSUM" "${SSH_USER}@${SSH_HOST}:/tmp/renderops-rootfs.sha256.new"
+	$SCP "$ROOTFS_INSTALLER" "${SSH_USER}@${SSH_HOST}:/tmp/activate-rootfs.sh.new"
+fi
 
 echo "==> installing (idempotent) and restarting"
 # shellcheck disable=SC2087
-$SSH "sudo WORKER_SLOT_COUNT='${WORKER_SLOT_COUNT:-}' WORKER_MAX_SESSIONS='${WORKER_MAX_SESSIONS:-}' WORKER_CPU_OVERCOMMIT_RATIO='${WORKER_CPU_OVERCOMMIT_RATIO:-}' WORKER_MEMORY_OVERCOMMIT_RATIO='${WORKER_MEMORY_OVERCOMMIT_RATIO:-}' WORKER_MAX_TERMINALS_PER_SANDBOX='${WORKER_MAX_TERMINALS_PER_SANDBOX:-}' CONTROL_PLANE_INTERNAL_URL='${CONTROL_PLANE_INTERNAL_URL:-}' bash -s" <<'REMOTE'
+$SSH "sudo WORKER_SLOT_COUNT='${WORKER_SLOT_COUNT:-}' WORKER_MAX_SESSIONS='${WORKER_MAX_SESSIONS:-}' WORKER_CPU_OVERCOMMIT_RATIO='${WORKER_CPU_OVERCOMMIT_RATIO:-}' WORKER_MEMORY_OVERCOMMIT_RATIO='${WORKER_MEMORY_OVERCOMMIT_RATIO:-}' WORKER_MAX_TERMINALS_PER_SANDBOX='${WORKER_MAX_TERMINALS_PER_SANDBOX:-}' CONTROL_PLANE_INTERNAL_URL='${CONTROL_PLANE_INTERNAL_URL:-}' ROOTFS_VERSION='${DEPLOY_ROOTFS_VERSION}' bash -s" <<'REMOTE'
 set -euo pipefail
 # Preconditions from the one-time host setup — fail clearly if missing.
 if [ ! -f /etc/renderops/worker.env ]; then
@@ -80,7 +98,13 @@ set_env_value CONTROL_PLANE_INTERNAL_URL "${CONTROL_PLANE_INTERNAL_URL:-}"
 
 install -D -m 0755 /tmp/renderops-worker.new /opt/renderops/renderops-worker
 install -D -m 0644 /tmp/renderops-worker.service.new /etc/systemd/system/renderops-worker.service
-rm -f /tmp/renderops-worker.new /tmp/renderops-worker.service.new
+if [ -n "${ROOTFS_VERSION:-}" ]; then
+  chmod 0755 /tmp/activate-rootfs.sh.new
+  ROOT_DIRECTORY=/opt/renderops/worker /tmp/activate-rootfs.sh.new \
+    /tmp/renderops-rootfs.tar.gz.new /tmp/renderops-rootfs.sha256.new "$ROOTFS_VERSION"
+fi
+rm -f /tmp/renderops-worker.new /tmp/renderops-worker.service.new \
+  /tmp/activate-rootfs.sh.new /tmp/renderops-rootfs.tar.gz.new /tmp/renderops-rootfs.sha256.new
 systemctl daemon-reload
 systemctl enable renderops-worker >/dev/null 2>&1 || true
 systemctl restart renderops-worker

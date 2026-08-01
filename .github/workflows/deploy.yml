@@ -20,6 +20,10 @@ on:
         default: "all"
         type: choice
         options: [all, control-plane, orchestrator, worker, worker-1, worker-2]
+      rebuild_rootfs:
+        description: "Build and roll out a new guest-agent rootfs"
+        default: false
+        type: boolean
 
 concurrency:
   group: deploy-${{ github.ref }}
@@ -36,6 +40,7 @@ jobs:
       control_plane: ${{ steps.filter.outputs.control_plane }}
       orchestrator: ${{ steps.filter.outputs.orchestrator }}
       worker: ${{ steps.filter.outputs.worker }}
+      rootfs: ${{ steps.filter.outputs.rootfs }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -83,6 +88,11 @@ jobs:
               - 'backend/go.mod'
               - 'backend/go.sum'
               - 'ops/worker/**'
+              - 'guest-agent/**'
+              - 'Dockerfile.rootfs'
+            rootfs:
+              - 'guest-agent/**'
+              - 'Dockerfile.rootfs'
 
   # ---- CONTROL PLANE: build image on GitHub -> GHCR -> compose pull on the box ----
 
@@ -259,6 +269,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      rootfs_changed: ${{ steps.rootfs.outputs.changed }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -267,6 +279,42 @@ jobs:
       - name: Build worker (linux/amd64)
         working-directory: backend
         run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/renderops-worker ./cmd/worker
+      - name: Decide whether to build rootfs
+        id: rootfs
+        env:
+          PATH_CHANGED: ${{ needs.changes.outputs.rootfs }}
+          MANUAL_REBUILD: ${{ github.event_name == 'workflow_dispatch' && inputs.rebuild_rootfs || false }}
+        run: |
+          if [ "$PATH_CHANGED" = "true" ] || [ "$MANUAL_REBUILD" = "true" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build versioned guest rootfs
+        if: steps.rootfs.outputs.changed == 'true'
+        run: |
+          docker build \
+            --platform linux/amd64 \
+            --file Dockerfile.rootfs \
+            --target rootfs-export \
+            --output type=local,dest=/tmp/renderops-rootfs-build \
+            .
+          mkdir -p /tmp/renderops-rootfs-artifact
+          sha256sum /tmp/renderops-rootfs-build/rootfs-alpine.ext4 \
+            > /tmp/renderops-rootfs-artifact/rootfs-alpine.ext4.sha256
+          tar --sparse -C /tmp/renderops-rootfs-build -czf \
+            /tmp/renderops-rootfs-artifact/rootfs-alpine.ext4.tar.gz \
+            rootfs-alpine.ext4
+        working-directory: .
+      - name: Upload versioned guest rootfs
+        if: steps.rootfs.outputs.changed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: renderops-rootfs-${{ github.sha }}
+          path: /tmp/renderops-rootfs-artifact
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
       - name: Upload worker binary
         uses: actions/upload-artifact@v4
         with:
@@ -291,8 +339,22 @@ jobs:
         with:
           name: renderops-worker-${{ github.sha }}
           path: /tmp/renderops-worker-artifact
+      - name: Download guest rootfs
+        if: needs.build-worker.outputs.rootfs_changed == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: renderops-rootfs-${{ github.sha }}
+          path: /tmp/renderops-rootfs-artifact
       - name: Deploy worker 1
-        run: bash ops/worker/install.sh /tmp/renderops-worker-artifact/renderops-worker
+        run: |
+          args=()
+          if [ -f /tmp/renderops-rootfs-artifact/rootfs-alpine.ext4.tar.gz ]; then
+            args=(
+              /tmp/renderops-rootfs-artifact/rootfs-alpine.ext4.tar.gz
+              /tmp/renderops-rootfs-artifact/rootfs-alpine.ext4.sha256
+            )
+          fi
+          bash ops/worker/install.sh /tmp/renderops-worker-artifact/renderops-worker "${args[@]}"
         env:
           SSH_KEY: ${{ secrets.WORKER_SSH_KEY }}
           SSH_HOST: ${{ secrets.WORKER_HOST }}
@@ -304,6 +366,7 @@ jobs:
           WORKER_MEMORY_OVERCOMMIT_RATIO: ${{ vars.ORCHESTRATOR_MEMORY_OVERCOMMIT_RATIO || '1' }}
           WORKER_MAX_TERMINALS_PER_SANDBOX: ${{ vars.WORKER_MAX_TERMINALS_PER_SANDBOX || '8' }}
           CONTROL_PLANE_INTERNAL_URL: ${{ vars.CONTROL_PLANE_INTERNAL_URL }}
+          ROOTFS_VERSION: ${{ github.sha }}
 
   # Wait for worker 1's health check before touching worker 2. A manual
   # worker-2-only dispatch is allowed to bypass the intentionally skipped first job.
@@ -328,8 +391,22 @@ jobs:
         with:
           name: renderops-worker-${{ github.sha }}
           path: /tmp/renderops-worker-artifact
+      - name: Download guest rootfs
+        if: needs.build-worker.outputs.rootfs_changed == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: renderops-rootfs-${{ github.sha }}
+          path: /tmp/renderops-rootfs-artifact
       - name: Deploy worker 2
-        run: bash ops/worker/install.sh /tmp/renderops-worker-artifact/renderops-worker
+        run: |
+          args=()
+          if [ -f /tmp/renderops-rootfs-artifact/rootfs-alpine.ext4.tar.gz ]; then
+            args=(
+              /tmp/renderops-rootfs-artifact/rootfs-alpine.ext4.tar.gz
+              /tmp/renderops-rootfs-artifact/rootfs-alpine.ext4.sha256
+            )
+          fi
+          bash ops/worker/install.sh /tmp/renderops-worker-artifact/renderops-worker "${args[@]}"
         env:
           SSH_KEY: ${{ secrets.WORKER_2_SSH_KEY }}
           SSH_HOST: ${{ secrets.WORKER_2_HOST }}
@@ -341,3 +418,4 @@ jobs:
           WORKER_MEMORY_OVERCOMMIT_RATIO: ${{ vars.ORCHESTRATOR_MEMORY_OVERCOMMIT_RATIO || '1' }}
           WORKER_MAX_TERMINALS_PER_SANDBOX: ${{ vars.WORKER_MAX_TERMINALS_PER_SANDBOX || '8' }}
           CONTROL_PLANE_INTERNAL_URL: ${{ vars.CONTROL_PLANE_INTERNAL_URL }}
+          ROOTFS_VERSION: ${{ github.sha }}

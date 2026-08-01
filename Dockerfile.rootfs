@@ -11,12 +11,13 @@
 ARG ALPINE=alpine:3.20
 
 # ── guest-agent: built from this repo's source, no host Go needed ────────────
-FROM golang:1.23-alpine AS guestbuild
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS guestbuild
+ARG TARGETARCH
 WORKDIR /src
 COPY guest-agent/go.mod guest-agent/go.sum ./
 RUN go mod download
 COPY guest-agent/ ./
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /guest-agent .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -o /guest-agent .
 
 # ── rootfs contents: Alpine + python/node + jupyter stack + guest-agent ──────
 FROM ${ALPINE} AS rootfs
@@ -40,7 +41,6 @@ RUN chmod +x /usr/local/bin/guest-agent /usr/local/bin/kernel_bridge.py
 ENV GIT_TERMINAL_PROMPT=0
 RUN git config --global credential.helper "" \
  && printf '[global]\nbreak-system-packages = true\n' > /etc/pip.conf \
- && echo "nameserver 8.8.8.8" > /etc/resolv.conf \
  && printf 'GUESTIP=172.16.0.2\nGWIP=172.16.0.1\n' > /etc/vm-network.env \
  && mkdir -p /workspace
 
@@ -54,6 +54,7 @@ COPY --from=rootfs / /rootfs-root
 # without mounting it, so this works in an unprivileged build.
 RUN rm -rf /rootfs-root/proc /rootfs-root/sys && mkdir -p /rootfs-root/proc /rootfs-root/sys \
  && rm -rf /rootfs-root/dev && mkdir -p /rootfs-root/dev \
+ && printf 'nameserver 8.8.8.8\n' > /rootfs-root/etc/resolv.conf \
  && mkdir -p /out \
  && mkfs.ext4 -q -L rootfs -m 0 -d /rootfs-root /out/rootfs-alpine.ext4 ${ROOTFS_SIZE}
 
