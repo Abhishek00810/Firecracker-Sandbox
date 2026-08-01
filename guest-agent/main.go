@@ -1083,6 +1083,27 @@ func listenVsock() (int, error) {
 	return fd, nil
 }
 
+func ensurePTYFilesystem() error {
+	if err := os.MkdirAll("/dev/pts", 0o755); err != nil {
+		return fmt.Errorf("create /dev/pts: %w", err)
+	}
+	if _, err := os.Stat("/dev/pts/ptmx"); os.IsNotExist(err) {
+		if err := unix.Mount("devpts", "/dev/pts", "devpts", 0, "newinstance,ptmxmode=0666,mode=0620,gid=5"); err != nil && err != unix.EBUSY {
+			return fmt.Errorf("mount devpts: %w", err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("stat /dev/pts/ptmx: %w", err)
+	}
+	if _, err := os.Lstat("/dev/ptmx"); os.IsNotExist(err) {
+		if err := os.Symlink("pts/ptmx", "/dev/ptmx"); err != nil {
+			return fmt.Errorf("link /dev/ptmx: %w", err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("stat /dev/ptmx: %w", err)
+	}
+	return nil
+}
+
 // readNetworkConfig reads guest IP and gateway from /etc/vm-network.env,
 // which the host writes into the rootfs copy before, Firecracker starts.
 func readNetworkConfig() (guestIP, gwIP string) {
@@ -1112,6 +1133,9 @@ func main() {
 	// stays at ~38 bits forever — below the 128 bits getrandom() requires.
 	// This must run before any bridge process starts.
 	seedCRNG()
+	if err := ensurePTYFilesystem(); err != nil {
+		log.Printf("warning: PTY filesystem unavailable: %v", err)
+	}
 
 	// bring up loopback interface so 127.0.0.1 works inside the VM
 	// required for ZMQ (jupyter kernel ↔ kernel_bridge.py communicate via TCP localhost)

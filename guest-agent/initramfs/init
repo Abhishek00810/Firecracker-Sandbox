@@ -4,6 +4,9 @@
 mount -t proc proc /proc
 mount -t sysfs sys /sys
 mount -t devtmpfs dev /dev
+mkdir -p /dev/pts
+mount -t devpts -o newinstance,ptmxmode=0666,mode=0620,gid=5 devpts /dev/pts
+ln -sf pts/ptmx /dev/ptmx
 
 # Wait up to 50s for the lower (/dev/vda, read-only rootfs) and writable (/dev/vdb,
 # per-VM upper disk) block devices to appear.
