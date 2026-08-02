@@ -9,6 +9,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/control-plane ./cmd/control-plane
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/preview-gateway ./cmd/preview-gateway
 
 FROM alpine:3.21 AS runtime
 
@@ -17,6 +18,7 @@ RUN apk --no-cache add ca-certificates && adduser -D -H -u 10001 app
 USER app
 
 COPY --from=build /out/control-plane /usr/local/bin/control-plane
+COPY --from=build /out/preview-gateway /usr/local/bin/preview-gateway
 
 EXPOSE 8080
 ENTRYPOINT ["control-plane"]

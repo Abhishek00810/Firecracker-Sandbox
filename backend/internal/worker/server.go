@@ -1,9 +1,15 @@
 package worker
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -20,17 +26,19 @@ type Server struct {
 	maxSlots  int
 	admission *Admission
 	draining  atomic.Bool
+	dialer    namespaceDialer
 }
 
 // NewServer builds a worker HTTP server. token is the internal shared secret the
 // control plane must present (empty disables the check — dev only).
 func NewServer(svc session.Service, token string, maxSlots int) *Server {
-	return &Server{svc: svc, token: token, maxSlots: maxSlots}
+	return &Server{svc: svc, token: token, maxSlots: maxSlots, dialer: systemNamespaceDialer{}}
 }
 
 func NewServerWithAdmission(svc session.Service, token string, admission *Admission) *Server {
 	return &Server{
 		svc: svc, token: token, maxSlots: admission.Capacity().MaxSlots, admission: admission,
+		dialer: systemNamespaceDialer{},
 	}
 }
 
@@ -167,6 +175,9 @@ func (s *Server) sandboxOp(w http.ResponseWriter, r *http.Request) {
 		res, err := s.svc.Exec(r.Context(), id, req.Command, req.TimeoutS)
 		s.writeResult(w, res, err)
 
+	case strings.HasPrefix(op, "ports/"):
+		s.portProxy(w, r, id, strings.TrimPrefix(op, "ports/"))
+
 	case op == "pause" && r.Method == http.MethodPost:
 		err := s.svc.Pause(r.Context(), id)
 		if err == nil && s.admission != nil {
@@ -207,6 +218,58 @@ func (s *Server) sandboxOp(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeErr(w, http.StatusNotFound, "not_found", "unknown worker operation")
 	}
+}
+
+type portTargetResolver interface {
+	ResolvePortTarget(string) (int, error)
+}
+
+func (s *Server) portProxy(w http.ResponseWriter, r *http.Request, sandboxID, rest string) {
+	portText, upstreamPath, _ := strings.Cut(rest, "/")
+	parsedPort, err := strconv.ParseUint(portText, 10, 16)
+	if err != nil || parsedPort == 0 {
+		writeErr(w, http.StatusBadRequest, "invalid_preview_port", "port must be between 1 and 65535")
+		return
+	}
+	resolver, ok := s.svc.(portTargetResolver)
+	if !ok {
+		writeErr(w, http.StatusNotImplemented, "preview_unavailable", "worker preview proxy is unavailable")
+		return
+	}
+	slot, err := resolver.ResolvePortTarget(sandboxID)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "sandbox_not_found", "sandbox is not active")
+		return
+	}
+	if upstreamPath == "" {
+		upstreamPath = "/"
+	} else {
+		upstreamPath = "/" + upstreamPath
+	}
+	address := net.JoinHostPort("172.16.0.2", portText)
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return s.dialer.DialContext(ctx, slot, address)
+	}
+	originalHost := r.Header.Get("X-Forwarded-Host")
+	proxy := &httputil.ReverseProxy{
+		Rewrite: func(request *httputil.ProxyRequest) {
+			request.Out.URL = &url.URL{
+				Scheme: "http", Host: address, Path: upstreamPath,
+				RawQuery: request.In.URL.RawQuery,
+			}
+			request.Out.Host = originalHost
+			request.Out.Header.Del(plane.AuthHeader)
+			request.SetXForwarded()
+			request.Out.Header.Set("X-Forwarded-Host", originalHost)
+			request.Out.Header.Set("X-Forwarded-Proto", "https")
+		},
+		Transport: transport, FlushInterval: -1,
+		ErrorHandler: func(response http.ResponseWriter, _ *http.Request, proxyErr error) {
+			writeErr(response, http.StatusBadGateway, "preview_upstream_unavailable", fmt.Sprintf("sandbox port %d is unavailable", parsedPort))
+		},
+	}
+	proxy.ServeHTTP(w, r)
 }
 
 func (s *Server) writeResult(w http.ResponseWriter, res any, err error) {

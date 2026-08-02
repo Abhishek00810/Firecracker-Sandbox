@@ -24,7 +24,7 @@ func TestByteRingKeepsNewestBytes(t *testing.T) {
 }
 
 func TestValidateTerminalOpen(t *testing.T) {
-	valid := terminalOpenRequest{ID: "term_abc-123", Shell: "/bin/bash", Columns: 120, Rows: 32}
+	valid := terminalOpenRequest{ID: "term_abc-123", Hostname: "1f6552e4-cf25-42b1-929b-7fd35a086f1b", Shell: "/bin/bash", Columns: 120, Rows: 32}
 	if err := validateTerminalOpen(valid); err != nil {
 		t.Fatalf("valid request rejected: %v", err)
 	}
@@ -32,6 +32,7 @@ func TestValidateTerminalOpen(t *testing.T) {
 		{ID: "../escape", Shell: "/bin/bash", Columns: 120, Rows: 32},
 		{ID: "term_1", Shell: "/bin/sh", Columns: 120, Rows: 32},
 		{ID: "term_1", Shell: "/bin/bash", Columns: 1, Rows: 1},
+		{ID: "term_1", Hostname: "invalid.host", Shell: "/bin/bash", Columns: 120, Rows: 32},
 	} {
 		if err := validateTerminalOpen(request); err == nil {
 			t.Fatalf("invalid request accepted: %+v", request)

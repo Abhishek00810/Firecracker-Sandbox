@@ -434,6 +434,7 @@ func (m *Manager) OpenTerminal(ctx context.Context, sessionID, terminalID, shell
 	client := firecracker.NewVsockClient(sess.VM.VsockPath)
 	if err := client.OpenTerminalOnConn(sess.VsockConn, firecracker.TerminalOpenRequest{
 		TerminalID: terminalID,
+		Hostname:   sessionID,
 		Shell:      shell,
 		Columns:    columns,
 		Rows:       rows,
@@ -964,6 +965,21 @@ schedule:
 
 func (m *Manager) GetSession(id string) (*Session, bool) {
 	return m.store.Get(id)
+}
+
+// ResolvePortTarget returns a consistent network-slot snapshot for a live
+// sandbox. A lifecycle transition immediately afterward may still make the dial fail.
+func (m *Manager) ResolvePortTarget(id string) (int, error) {
+	sess, ok := m.store.Get(id)
+	if !ok {
+		return 0, fmt.Errorf("session %s not found", id)
+	}
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	if sess.State != StateActive || sess.VM == nil || sess.VM.Slot < 0 {
+		return 0, fmt.Errorf("session %s is not active", id)
+	}
+	return sess.VM.Slot, nil
 }
 
 // Sessions returns a point-in-time view used to rebuild worker-local admission

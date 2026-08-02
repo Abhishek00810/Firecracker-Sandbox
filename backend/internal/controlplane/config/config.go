@@ -17,6 +17,7 @@ type Config struct {
 	OrchestratorToken      string
 	WorkerToken            string
 	TerminalAllowedOrigins []string
+	PreviewDomain          string
 }
 
 // Load reads only control-plane settings. It performs no worker host or asset
@@ -31,6 +32,7 @@ func Load() (*Config, error) {
 		OrchestratorToken:      strings.TrimSpace(os.Getenv("ORCHESTRATOR_TOKEN")),
 		WorkerToken:            strings.TrimSpace(os.Getenv("WORKER_TOKEN")),
 		TerminalAllowedOrigins: splitCSV(os.Getenv("TERMINAL_ALLOWED_ORIGINS")),
+		PreviewDomain:          defaultString(strings.TrimSpace(os.Getenv("PREVIEW_DOMAIN")), "dev-sandbox.renderops.com"),
 	}
 
 	if cfg.DatabaseURL == "" {

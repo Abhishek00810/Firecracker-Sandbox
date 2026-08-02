@@ -31,6 +31,7 @@ concurrency:
 
 env:
   CONTROL_PLANE_IMAGE: ghcr.io/${{ github.repository_owner }}/control-plane
+  CADDY_IMAGE: ghcr.io/${{ github.repository_owner }}/caddy-cloudflare
   ORCHESTRATOR_IMAGE: ghcr.io/${{ github.repository_owner }}/orchestrator
 
 jobs:
@@ -49,6 +50,7 @@ jobs:
           filters: |
             control_plane:
               - 'backend/cmd/control-plane/**'
+              - 'backend/cmd/preview-gateway/**'
               - 'backend/internal/controlplane/**'
               - 'backend/internal/handler/**'
               - 'backend/internal/orchestrator/**'
@@ -58,6 +60,8 @@ jobs:
               - 'backend/internal/metering/**'
               - 'backend/internal/middleware/**'
               - 'backend/internal/policy/**'
+              - 'backend/internal/preview/**'
+              - 'backend/internal/previewgateway/**'
               - 'backend/internal/billing/**'
               - 'backend/internal/vmsize/**'
               - 'backend/Dockerfile.controlplane'
@@ -122,6 +126,15 @@ jobs:
           tags: |
             ${{ env.CONTROL_PLANE_IMAGE }}:latest
             ${{ env.CONTROL_PLANE_IMAGE }}:${{ github.sha }}
+      - name: Build and push Caddy with Cloudflare DNS support
+        uses: docker/build-push-action@v6
+        with:
+          context: ./ops/control-plane
+          file: ./ops/control-plane/Dockerfile.caddy
+          push: true
+          tags: |
+            ${{ env.CADDY_IMAGE }}:latest
+            ${{ env.CADDY_IMAGE }}:${{ github.sha }}
 
   # Runs ON the basic server via the self-hosted runner (label: control-plane).
   # Pulls the freshly-pushed image and recreates ONLY the control-plane service.
@@ -147,23 +160,26 @@ jobs:
             cp ops/control-plane/Caddyfile /opt/renderops/Caddyfile
             cd /opt/renderops
             docker compose config --quiet
-            docker compose pull control-plane
+            docker compose pull control-plane preview-gateway caddy
             # Include postgres so private bind/health configuration changes are
             # actually applied. Its named volume preserves database contents.
-            docker compose up -d postgres control-plane
+            docker compose up -d postgres control-plane preview-gateway caddy
             docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile || true
           '
       - name: Health check
         working-directory: /opt/renderops
         run: |
           for i in $(seq 1 20); do
-            if docker compose exec -T control-plane wget -qO- http://127.0.0.1:8081/health >/dev/null 2>&1; then
-              echo "control-plane healthy after ${i}s"; exit 0
+            if docker compose exec -T control-plane wget -qO- http://127.0.0.1:8081/health >/dev/null 2>&1 \
+              && docker compose exec -T preview-gateway wget -qO- http://127.0.0.1:8082/health >/dev/null 2>&1; then
+              echo "control-plane and preview-gateway healthy after ${i}s"; exit 0
             fi
             sleep 2
           done
-          echo "control-plane did not become healthy:"
+          echo "control-plane stack did not become healthy:"
           docker compose logs --tail=40 control-plane || true
+          docker compose logs --tail=40 preview-gateway || true
+          docker compose logs --tail=40 caddy || true
           exit 1
 
   # ---- ORCHESTRATOR: multi-arch image -> GHCR -> dedicated private server ----

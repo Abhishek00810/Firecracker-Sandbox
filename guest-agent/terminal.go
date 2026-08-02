@@ -30,11 +30,12 @@ const (
 )
 
 type terminalOpenRequest struct {
-	ID      string
-	Shell   string
-	Columns uint16
-	Rows    uint16
-	Env     map[string]string
+	ID       string
+	Hostname string
+	Shell    string
+	Columns  uint16
+	Rows     uint16
+	Env      map[string]string
 }
 
 type terminalSession struct {
@@ -79,6 +80,11 @@ func (m *terminalManager) Open(request terminalOpenRequest) error {
 	}
 	if len(m.sessions) >= m.max {
 		return fmt.Errorf("terminal limit reached (%d)", m.max)
+	}
+	if request.Hostname != "" {
+		if err := syscall.Sethostname([]byte(request.Hostname)); err != nil {
+			return fmt.Errorf("set sandbox hostname: %w", err)
+		}
 	}
 
 	cmd := exec.Command(request.Shell, "-l")
@@ -317,10 +323,26 @@ func validateTerminalOpen(request terminalOpenRequest) error {
 	if request.Shell != "/bin/bash" {
 		return errors.New("unsupported terminal shell")
 	}
+	if request.Hostname != "" && !validHostname(request.Hostname) {
+		return errors.New("invalid sandbox hostname")
+	}
 	if request.Columns < 20 || request.Columns > 500 || request.Rows < 5 || request.Rows > 200 {
 		return errors.New("terminal size is outside the supported range")
 	}
 	return nil
+}
+
+func validHostname(hostname string) bool {
+	if len(hostname) == 0 || len(hostname) > 63 || hostname[0] == '-' || hostname[len(hostname)-1] == '-' {
+		return false
+	}
+	for _, r := range hostname {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 func mergeEnvironment(base []string, overrides map[string]string) []string {

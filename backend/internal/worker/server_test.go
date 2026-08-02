@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,6 +25,14 @@ type fakeSessionService struct {
 	closedTerminal string
 	attachedInput  terminal.Frame
 	attach         func(terminal.Stream) error
+}
+
+func (f *fakeSessionService) ResolvePortTarget(string) (int, error) { return 7, nil }
+
+type fixedDialer struct{ address string }
+
+func (d fixedDialer) DialContext(ctx context.Context, _ int, _ string) (net.Conn, error) {
+	return (&net.Dialer{}).DialContext(ctx, "tcp", d.address)
 }
 
 func (f *fakeSessionService) Create(context.Context, string, string, map[string]string, int, int, int, bool, time.Duration, time.Duration) (*session.Session, error) {
@@ -170,6 +180,30 @@ func TestCapacityReportsLiveFreeSlots(t *testing.T) {
 	}
 	if capacity.FreeSlots != 9 || capacity.MaxSlots != 10 {
 		t.Fatalf("capacity=%+v", capacity)
+	}
+}
+
+func TestPortProxyForwardsThroughResolvedSandboxSlot(t *testing.T) {
+	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.RequestURI() != "/app/assets.js?q=1" {
+			t.Fatalf("guest request URI=%q", r.URL.RequestURI())
+		}
+		if r.Host != "3000-sandbox.example.com" {
+			t.Fatalf("guest host=%q", r.Host)
+		}
+		_, _ = w.Write([]byte("guest response"))
+	}))
+	defer guest.Close()
+
+	server := NewServer(&fakeSessionService{}, "worker-secret", 10)
+	server.dialer = fixedDialer{address: strings.TrimPrefix(guest.URL, "http://")}
+	request := httptest.NewRequest(http.MethodGet, "/worker/sandbox/sandbox-1/ports/3000/app/assets.js?q=1", nil)
+	request.Header.Set("X-Worker-Token", "worker-secret")
+	request.Header.Set("X-Forwarded-Host", "3000-sandbox.example.com")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Body.String() != "guest response" {
+		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
 	}
 }
 

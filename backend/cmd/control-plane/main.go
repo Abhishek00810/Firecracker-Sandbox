@@ -12,6 +12,7 @@ import (
 	"backend/internal/middleware"
 	"backend/internal/orchestrator"
 	"backend/internal/platform"
+	"backend/internal/preview"
 	"backend/internal/terminal"
 	"context"
 	"encoding/json"
@@ -89,11 +90,17 @@ func main() {
 		slog.Error("terminal token initialization failed", "err", err)
 		os.Exit(1)
 	}
+	previewSigner, err := preview.NewSigner(preview.DeriveSigningSecret(cfg.WorkerToken))
+	if err != nil {
+		slog.Error("preview token initialization failed", "err", err)
+		os.Exit(1)
+	}
 
 	publicMux := http.NewServeMux()
 	publicMux.HandleFunc("/session", handler.SessionHandler(svc, platformClient))
 	publicMux.HandleFunc("/session/", handler.SessionHandler(svc, platformClient))
 	publicMux.HandleFunc("POST /v1/sandboxes/{sandboxID}/terminals", handler.CreateTerminalHandler(svc, orchestratorClient, terminalWorkers, terminalManager))
+	publicMux.HandleFunc("POST /v1/sandboxes/{sandboxID}/ports/{port}/preview", handler.CreatePreviewHandler(svc, previewSigner, cfg.PreviewDomain))
 
 	rootMux := http.NewServeMux()
 	rootMux.HandleFunc("/health", healthHandler)

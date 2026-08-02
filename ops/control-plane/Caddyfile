@@ -7,3 +7,10 @@ dev-api.renderops.com {
 	encode zstd gzip
 	reverse_proxy control-plane:8081
 }
+
+*.dev-sandbox.renderops.com {
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+	}
+	reverse_proxy preview-gateway:8082
+}

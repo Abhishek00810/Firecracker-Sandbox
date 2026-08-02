@@ -588,6 +588,7 @@ type incomingMessage struct {
 	Command    string            `json:"command"`
 	Env        map[string]string `json:"env"`
 	TerminalID string            `json:"terminal_id"`
+	Hostname   string            `json:"hostname"`
 	Shell      string            `json:"shell"`
 	Columns    uint16            `json:"columns"`
 	Rows       uint16            `json:"rows"`
@@ -1001,7 +1002,7 @@ func handleConnection(connFd int) {
 		}
 		if msg.Type == "terminal_open" {
 			err := terminals.Open(terminalOpenRequest{
-				ID: msg.TerminalID, Shell: msg.Shell, Columns: msg.Columns, Rows: msg.Rows, Env: msg.Env,
+				ID: msg.TerminalID, Hostname: msg.Hostname, Shell: msg.Shell, Columns: msg.Columns, Rows: msg.Rows, Env: msg.Env,
 			})
 			state := ""
 			if err == nil {

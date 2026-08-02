@@ -31,6 +31,7 @@ type ExecuteResponse struct {
 
 type TerminalOpenRequest struct {
 	TerminalID string            `json:"terminal_id"`
+	Hostname   string            `json:"hostname,omitempty"`
 	Shell      string            `json:"shell"`
 	Columns    uint16            `json:"columns"`
 	Rows       uint16            `json:"rows"`

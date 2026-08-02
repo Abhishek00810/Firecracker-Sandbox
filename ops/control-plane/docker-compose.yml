@@ -40,11 +40,29 @@ services:
       ORCHESTRATOR_TOKEN: ${ORCHESTRATOR_TOKEN:?ORCHESTRATOR_TOKEN is required}
       WORKER_TOKEN: ${WORKER_TOKEN:?WORKER_TOKEN is required}
       TERMINAL_ALLOWED_ORIGINS: ${TERMINAL_ALLOWED_ORIGINS:-dev.renderops.com}
+      PREVIEW_DOMAIN: ${PREVIEW_DOMAIN:-dev-sandbox.renderops.com}
     depends_on:
       postgres:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8081/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    networks: [internal]
+
+  preview-gateway:
+    image: ghcr.io/renderops-ai/control-plane:latest
+    entrypoint: ["preview-gateway"]
+    restart: unless-stopped
+    environment:
+      PORT: "8082"
+      PREVIEW_DOMAIN: ${PREVIEW_DOMAIN:-dev-sandbox.renderops.com}
+      ORCHESTRATOR_URL: ${ORCHESTRATOR_URL:?ORCHESTRATOR_URL is required}
+      ORCHESTRATOR_TOKEN: ${ORCHESTRATOR_TOKEN:?ORCHESTRATOR_TOKEN is required}
+      WORKER_TOKEN: ${WORKER_TOKEN:?WORKER_TOKEN is required}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8082/health"]
       interval: 10s
       timeout: 3s
       retries: 10
@@ -84,7 +102,7 @@ services:
     networks: [internal]
 
   caddy:
-    image: caddy:2.10-alpine
+    image: ghcr.io/renderops-ai/caddy-cloudflare:latest
     restart: unless-stopped
     ports:
       - "80:80"
@@ -94,9 +112,13 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
+    environment:
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:?CLOUDFLARE_API_TOKEN is required}
     depends_on:
       platform:
         condition: service_started
+      preview-gateway:
+        condition: service_healthy
     networks: [internal]
 
 networks:
