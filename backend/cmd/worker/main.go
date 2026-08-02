@@ -221,24 +221,6 @@ func main() {
 		envFloat("WORKER_MEMORY_OVERCOMMIT_RATIO", 1),
 	)
 
-	var onState session.StateHook
-	if orchestratorURL, workerID := os.Getenv("ORCHESTRATOR_URL"), os.Getenv("WORKER_ID"); orchestratorURL != "" && workerID != "" {
-		orchestrationClient := orchestrator.NewClient(orchestratorURL, os.Getenv("WORKER_TOKEN"))
-		onState = func(sandboxID, _ string, state string) error {
-			switch state {
-			case "active":
-				admission.MarkActive(sandboxID)
-			case "paused":
-				admission.MarkPaused(sandboxID)
-			case "destroyed":
-				admission.Release(sandboxID)
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			return orchestrationClient.ReportWorkerState(ctx, workerID, sandboxID, state)
-		}
-	}
-
 	var usageReporter *metering.Reporter
 	var onMeter session.MeterHook
 	if controlPlaneURL, workerID := os.Getenv("CONTROL_PLANE_INTERNAL_URL"), os.Getenv("WORKER_ID"); controlPlaneURL != "" && workerID != "" {
@@ -257,6 +239,31 @@ func main() {
 		}
 	} else {
 		slog.Warn("CONTROL_PLANE_INTERNAL_URL or WORKER_ID not set; raw usage reporting is disabled")
+	}
+
+	var onState session.StateHook
+	if orchestratorURL, workerID := os.Getenv("ORCHESTRATOR_URL"), os.Getenv("WORKER_ID"); orchestratorURL != "" && workerID != "" {
+		orchestrationClient := orchestrator.NewClient(orchestratorURL, os.Getenv("WORKER_TOKEN"))
+		onState = func(sandboxID, _ string, state string) error {
+			switch state {
+			case "active":
+				admission.MarkActive(sandboxID)
+			case "paused":
+				admission.MarkPaused(sandboxID)
+			case "destroyed":
+				admission.Release(sandboxID)
+			}
+			if state == "destroyed" && usageReporter != nil {
+				flushCtx, flushCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				if err := usageReporter.Flush(flushCtx); err != nil {
+					slog.Error("flush final usage before placement release failed", "sandbox_id", sandboxID, "err", err)
+				}
+				flushCancel()
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			return orchestrationClient.ReportWorkerState(ctx, workerID, sandboxID, state)
+		}
 	}
 
 	// The worker never accesses the DB. Lifecycle events go to the orchestrator;

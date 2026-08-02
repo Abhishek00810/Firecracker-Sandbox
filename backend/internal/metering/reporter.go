@@ -17,17 +17,22 @@ const (
 type Reporter struct {
 	client   *Client
 	workerID string
-	input    chan Sample
+	input    chan reporterCommand
 	stop     chan struct{}
 	done     chan struct{}
 	once     sync.Once
+}
+
+type reporterCommand struct {
+	sample *Sample
+	flush  chan error
 }
 
 func NewReporter(client *Client, workerID string) *Reporter {
 	r := &Reporter{
 		client:   client,
 		workerID: workerID,
-		input:    make(chan Sample, defaultQueueSize),
+		input:    make(chan reporterCommand, defaultQueueSize),
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
 	}
@@ -37,7 +42,29 @@ func NewReporter(client *Client, workerID string) *Reporter {
 
 func (r *Reporter) Record(sample Sample) {
 	sample.WorkerID = r.workerID
-	r.input <- sample
+	r.input <- reporterCommand{sample: &sample}
+}
+
+// Flush waits until every sample recorded before this call has been submitted.
+// The command shares the sample queue, so channel ordering provides the barrier.
+func (r *Reporter) Flush(ctx context.Context) error {
+	result := make(chan error, 1)
+	select {
+	case r.input <- reporterCommand{flush: result}:
+	case <-r.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	select {
+	case err := <-result:
+		return err
+	case <-r.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (r *Reporter) Shutdown(ctx context.Context) error {
@@ -58,18 +85,32 @@ func (r *Reporter) run() {
 	pending := make([]Sample, 0, maxBatchSize)
 	for {
 		select {
-		case sample := <-r.input:
-			pending = append(pending, sample)
-			if len(pending) >= maxBatchSize {
-				pending = r.flush(pending)
+		case command := <-r.input:
+			if command.sample != nil {
+				pending = append(pending, *command.sample)
+				if len(pending) >= maxBatchSize {
+					pending, _ = r.flush(pending)
+				}
+			}
+			if command.flush != nil {
+				var err error
+				pending, err = r.flushAll(pending)
+				command.flush <- err
 			}
 		case <-ticker.C:
-			pending = r.flush(pending)
+			pending, _ = r.flush(pending)
 		case <-r.stop:
 			for {
 				select {
-				case sample := <-r.input:
-					pending = append(pending, sample)
+				case command := <-r.input:
+					if command.sample != nil {
+						pending = append(pending, *command.sample)
+					}
+					if command.flush != nil {
+						var err error
+						pending, err = r.flushAll(pending)
+						command.flush <- err
+					}
 				default:
 					r.flushUntilEmpty(pending)
 					return
@@ -79,9 +120,9 @@ func (r *Reporter) run() {
 	}
 }
 
-func (r *Reporter) flush(pending []Sample) []Sample {
+func (r *Reporter) flush(pending []Sample) ([]Sample, error) {
 	if len(pending) == 0 {
-		return pending
+		return pending, nil
 	}
 	count := min(len(pending), maxBatchSize)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -89,15 +130,29 @@ func (r *Reporter) flush(pending []Sample) []Sample {
 	cancel()
 	if err != nil {
 		slog.Warn("usage batch delivery failed; retaining batch for retry", "samples", count, "err", err)
-		time.Sleep(time.Second)
-		return pending
+		return pending, err
 	}
 	copy(pending, pending[count:])
-	return pending[:len(pending)-count]
+	return pending[:len(pending)-count], nil
+}
+
+func (r *Reporter) flushAll(pending []Sample) ([]Sample, error) {
+	for len(pending) > 0 {
+		var err error
+		pending, err = r.flush(pending)
+		if err != nil {
+			return pending, err
+		}
+	}
+	return pending, nil
 }
 
 func (r *Reporter) flushUntilEmpty(pending []Sample) {
 	for len(pending) > 0 {
-		pending = r.flush(pending)
+		var err error
+		pending, err = r.flush(pending)
+		if err != nil {
+			time.Sleep(time.Second)
+		}
 	}
 }
