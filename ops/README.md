@@ -38,13 +38,17 @@ sudo WORKER_TOKEN='<same value as the control-plane VPS>' \
   WORKER_ADVERTISE_URL='http://10.0.0.4:9876' \
   WORKER_ALLOCATABLE_VCPUS='8' \
   WORKER_ALLOCATABLE_MEMORY_MB='28000' \
-  WORKER_ALLOCATABLE_DISK_GB='20' \
+  WORKER_DISK_RESERVE_GB='100' \
   ASSET_BUNDLE=/path/to/renderops-assets.tar.gz \
   bash ops/worker/setup.sh
 ```
 
 The host must provide `/dev/kvm` and cgroup v2. Setup installs host networking
 tools, creates `/etc/renderops/worker.env`, and installs the systemd unit.
+Disk capacity is detected from the filesystem containing `ROOT_DIRECTORY`.
+`WORKER_DISK_RESERVE_GB` optionally reserves host space (the default is 5%,
+with a 10 GiB minimum), while `WORKER_DISK_CAP_GB` optionally imposes a lower
+operator ceiling.
 Normal deployments subsequently use `ops/worker/install.sh`.
 The advertised endpoint must be reachable only over the private network from
 the control plane and orchestrator; do not expose port `9876` to the internet.

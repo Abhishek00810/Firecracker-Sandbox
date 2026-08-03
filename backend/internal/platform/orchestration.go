@@ -84,6 +84,7 @@ func (c *Client) RecordHeartbeat(
 	tag, err := c.pool.Exec(ctx, `
 		UPDATE worker_hosts
 		SET last_heartbeat_at=$2,
+		    allocatable_disk_gb=$7,
 		    reported_vcpus=$3,
 		    reported_memory_mb=$4,
 		    reported_disk_gb=$5,
@@ -98,6 +99,7 @@ func (c *Client) RecordHeartbeat(
 		capacity.ReservedMemoryMB,
 		capacity.ReservedDiskGB,
 		capacity.ReservedSandboxes,
+		capacity.AllocatableDiskGB,
 	)
 	if err != nil {
 		return fmt.Errorf("record worker heartbeat: %w", err)

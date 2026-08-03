@@ -25,6 +25,16 @@ type Admission struct {
 	allocatableDiskGB   int
 	maxSandboxes        int
 	reservations        map[string]reservation
+	diskCapacity        func(reservedDiskGB int) (int, error)
+}
+
+// SetDiskCapacityProvider makes disk admission follow the filesystem that
+// actually stores sandbox data. The last valid value is retained if a
+// transient statfs call fails.
+func (a *Admission) SetDiskCapacityProvider(provider func(reservedDiskGB int) (int, error)) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.diskCapacity = provider
 }
 
 func NewAdmission(vcpus, memoryMB, diskGB, maxSandboxes int, cpuRatio, memoryRatio float64) *Admission {
@@ -141,6 +151,12 @@ func (a *Admission) capacityLocked() plane.Capacity {
 		if !item.paused {
 			capacity.ReservedVCPUs += item.vcpus
 			capacity.ReservedMemoryMB += item.memoryMB
+		}
+	}
+	if a.diskCapacity != nil {
+		if detected, err := a.diskCapacity(capacity.ReservedDiskGB); err == nil && detected > 0 {
+			a.allocatableDiskGB = detected
+			capacity.AllocatableDiskGB = detected
 		}
 	}
 	capacity.FreeSlots = capacity.MaxSlots - capacity.ReservedSandboxes

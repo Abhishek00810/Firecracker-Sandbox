@@ -69,13 +69,14 @@ func startOrchestratorRegistration(ctx context.Context, slotCount int, capacity 
 		slog.Warn("ORCHESTRATOR_URL not set; worker registration and heartbeat are disabled")
 		return
 	}
+	currentCapacity := capacity()
 	registration := orchestrator.WorkerRegistration{
 		ID:                  os.Getenv("WORKER_ID"),
 		Endpoint:            os.Getenv("WORKER_ADVERTISE_URL"),
 		Pool:                os.Getenv("WORKER_POOL"),
 		AllocatableVCPUs:    envInt("WORKER_ALLOCATABLE_VCPUS", 0),
 		AllocatableMemoryMB: envInt("WORKER_ALLOCATABLE_MEMORY_MB", 0),
-		AllocatableDiskGB:   envInt("WORKER_ALLOCATABLE_DISK_GB", 0),
+		AllocatableDiskGB:   currentCapacity.AllocatableDiskGB,
 		MaxSandboxes:        envInt("WORKER_MAX_SESSIONS", slotCount),
 	}
 	if registration.ID == "" ||
@@ -215,10 +216,26 @@ func main() {
 	admission := worker.NewAdmission(
 		envInt("WORKER_ALLOCATABLE_VCPUS", 0),
 		envInt("WORKER_ALLOCATABLE_MEMORY_MB", 0),
-		envInt("WORKER_ALLOCATABLE_DISK_GB", 0),
+		1,
 		envInt("WORKER_MAX_SESSIONS", slotCount),
 		envFloat("WORKER_CPU_OVERCOMMIT_RATIO", 4),
 		envFloat("WORKER_MEMORY_OVERCOMMIT_RATIO", 1),
+	)
+	diskCapacity := worker.NewHostDiskCapacity(
+		cfg.RootDirectory,
+		envInt("WORKER_DISK_CAP_GB", 0),
+		envInt("WORKER_DISK_RESERVE_GB", 0),
+	)
+	admission.SetDiskCapacityProvider(diskCapacity.CapacityGB)
+	initialCapacity := admission.Capacity()
+	if initialCapacity.AllocatableDiskGB <= 0 {
+		slog.Error("worker filesystem has no schedulable disk capacity", "root", cfg.RootDirectory)
+		os.Exit(1)
+	}
+	slog.Info(
+		"worker disk capacity detected",
+		"root", cfg.RootDirectory,
+		"allocatable_disk_gb", initialCapacity.AllocatableDiskGB,
 	)
 
 	var usageReporter *metering.Reporter
