@@ -794,7 +794,9 @@ func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 	msRestore := time.Since(t0).Milliseconds()
 
 	if err := m.vmManager.SetSlotEgress(vm.Slot, sess.Internet); err != nil {
-		m.vmManager.Destroy(ctx, vm.ID)
+		if cleanupErr := m.vmManager.TeardownKeepDisk(ctx, vm.ID); cleanupErr != nil {
+			slog.Error("failed to clean up resumed VM after network policy failure", "vm_id", vm.ID, "err", cleanupErr)
+		}
 		return fmt.Errorf("re-apply network policy on resume: %w", err)
 	}
 
@@ -831,7 +833,9 @@ func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 		if cg != nil {
 			cg.Destroy()
 		}
-		m.vmManager.Destroy(ctx, vm.ID)
+		if cleanupErr := m.vmManager.TeardownKeepDisk(ctx, vm.ID); cleanupErr != nil {
+			slog.Error("failed to clean up resumed VM after vsock connection failure", "vm_id", vm.ID, "err", cleanupErr)
+		}
 		return fmt.Errorf("vsock connect on resume: %w", err)
 	}
 
@@ -839,12 +843,26 @@ func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 	// pause across every language (a snapshot restore can also leave ZMQ Python kernels
 	// degraded). Then re-inject the session's env so config still persists across the pause.
 	if err := vsockClient.ResetRuntimesOnConn(conn); err != nil {
-		slog.Warn("reset_runtimes on resume failed", "session_id", sessionID, "err", err)
+		_ = conn.Close()
+		if cg != nil {
+			cg.Destroy()
+		}
+		if cleanupErr := m.vmManager.TeardownKeepDisk(ctx, vm.ID); cleanupErr != nil {
+			slog.Error("failed to clean up resumed VM after guest readiness failure", "vm_id", vm.ID, "err", cleanupErr)
+		}
+		return fmt.Errorf("verify guest agent on resume: %w", err)
 	}
 	msReset := time.Since(t0).Milliseconds()
 	if len(sess.Env) > 0 {
 		if err := vsockClient.SetEnvOnConn(conn, sess.Env); err != nil {
-			slog.Warn("re-inject env on resume failed", "session_id", sessionID, "err", err)
+			_ = conn.Close()
+			if cg != nil {
+				cg.Destroy()
+			}
+			if cleanupErr := m.vmManager.TeardownKeepDisk(ctx, vm.ID); cleanupErr != nil {
+				slog.Error("failed to clean up resumed VM after environment restore failure", "vm_id", vm.ID, "err", cleanupErr)
+			}
+			return fmt.Errorf("restore guest environment on resume: %w", err)
 		}
 	}
 	msSetEnv := time.Since(t0).Milliseconds()

@@ -92,11 +92,16 @@ func (v *VsockClient) ResetRuntimesOnConn(conn net.Conn) error {
 	var resp struct {
 		Success bool `json:"success"`
 	}
-	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		return fmt.Errorf("set reset_runtimes deadline: %w", err)
+	}
+	defer func() { _ = conn.SetDeadline(time.Time{}) }()
 	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
 		return fmt.Errorf("read reset_runtimes response: %w", err)
 	}
-	conn.SetDeadline(time.Time{})
+	if !resp.Success {
+		return fmt.Errorf("reset_runtimes failed")
+	}
 	return nil
 }
 
@@ -115,11 +120,13 @@ func (v *VsockClient) SetEnvOnConn(conn net.Conn, env map[string]string) error {
 		Success bool   `json:"success"`
 		Error   string `json:"error,omitempty"`
 	}
-	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		return fmt.Errorf("set set_env deadline: %w", err)
+	}
+	defer func() { _ = conn.SetDeadline(time.Time{}) }()
 	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
 		return fmt.Errorf("read set_env response: %w", err)
 	}
-	conn.SetDeadline(time.Time{})
 	if !resp.Success {
 		return fmt.Errorf("set_env failed: %s", resp.Error)
 	}
