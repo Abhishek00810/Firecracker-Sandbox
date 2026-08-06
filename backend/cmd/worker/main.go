@@ -222,19 +222,19 @@ func main() {
 		envFloat("WORKER_MEMORY_OVERCOMMIT_RATIO", 1),
 	)
 	diskCapacity := worker.NewHostDiskCapacity(
-		cfg.RootDirectory,
+		cfg.ActiveDiskDir,
 		envInt("WORKER_DISK_CAP_GB", 0),
 		envInt("WORKER_DISK_RESERVE_GB", 0),
 	)
 	admission.SetDiskCapacityProvider(diskCapacity.CapacityGB)
 	initialCapacity := admission.Capacity()
 	if initialCapacity.AllocatableDiskGB <= 0 {
-		slog.Error("worker filesystem has no schedulable disk capacity", "root", cfg.RootDirectory)
+		slog.Error("worker filesystem has no schedulable disk capacity", "root", cfg.ActiveDiskDir)
 		os.Exit(1)
 	}
 	slog.Info(
 		"worker disk capacity detected",
-		"root", cfg.RootDirectory,
+		"root", cfg.ActiveDiskDir,
 		"allocatable_disk_gb", initialCapacity.AllocatableDiskGB,
 	)
 

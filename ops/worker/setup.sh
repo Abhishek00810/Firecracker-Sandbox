@@ -35,6 +35,9 @@ if [ ! -f "$ENV_FILE" ]; then
 	umask 077
 	{
 		printf 'ROOT_DIRECTORY=%s\n' "$WORKER_ROOT"
+		printf 'ACTIVE_DISK_BACKEND=%s\n' "${ACTIVE_DISK_BACKEND:-filesystem}"
+		printf 'ACTIVE_DISK_DIR=%s\n' "${ACTIVE_DISK_DIR:-$WORKER_ROOT/sockets}"
+		printf 'ACTIVE_DISK_CLONE_MODE=%s\n' "${ACTIVE_DISK_CLONE_MODE:-auto}"
 		printf 'WORKER_BIND=%s\n' "${WORKER_BIND:-127.0.0.1:9876}"
 		printf 'WORKER_TOKEN=%s\n' "$WORKER_TOKEN"
 		printf 'WORKER_ID=%s\n' "${WORKER_ID:-}"

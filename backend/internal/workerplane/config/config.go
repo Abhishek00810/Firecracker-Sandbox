@@ -2,6 +2,7 @@ package config
 
 import (
 	"backend/internal/bootstrap"
+	"backend/internal/writabledisk"
 	"errors"
 	"fmt"
 	"os"
@@ -12,18 +13,21 @@ import (
 )
 
 type Config struct {
-	RootDirectory      string // ROOT_DIRECTORY on the worker host; all agent paths derive from it
-	AssetsPath         string
-	KernelPath         string
-	RootfsPath         string
-	InitrdPath         string
-	FirecrackerBinary  string
-	SocketDir          string
-	SnapshotDir        string
-	HostValidationMode string
-	FCRunUID           int // uid Firecracker VMMs drop to via setpriv; 0 = run as root (disabled)
-	FCRunGID           int // gid Firecracker VMMs drop to via setpriv; 0 = run as root (disabled)
-	Warnings           []string
+	RootDirectory       string // ROOT_DIRECTORY on the worker host; all agent paths derive from it
+	AssetsPath          string
+	KernelPath          string
+	RootfsPath          string
+	InitrdPath          string
+	FirecrackerBinary   string
+	SocketDir           string
+	ActiveDiskBackend   string
+	ActiveDiskDir       string
+	ActiveDiskCloneMode writabledisk.CloneMode
+	SnapshotDir         string
+	HostValidationMode  string
+	FCRunUID            int // uid Firecracker VMMs drop to via setpriv; 0 = run as root (disabled)
+	FCRunGID            int // gid Firecracker VMMs drop to via setpriv; 0 = run as root (disabled)
+	Warnings            []string
 }
 
 // Load builds the worker host configuration. It does not read or require a
@@ -87,6 +91,20 @@ func Load() (*Config, error) {
 	}
 	if err := os.MkdirAll(cfg.SocketDir, 0755); err != nil {
 		return nil, fmt.Errorf("create socket dir %q: %w", cfg.SocketDir, err)
+	}
+
+	cfg.ActiveDiskBackend = defaultString(strings.ToLower(strings.TrimSpace(os.Getenv("ACTIVE_DISK_BACKEND"))), writabledisk.BackendFilesystem)
+	cfg.ActiveDiskDir = defaultString(strings.TrimSpace(os.Getenv("ACTIVE_DISK_DIR")), cfg.SocketDir)
+	cfg.ActiveDiskDir, err = filepath.Abs(cfg.ActiveDiskDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve active disk dir: %w", err)
+	}
+	cfg.ActiveDiskCloneMode, err = writabledisk.ParseCloneMode(os.Getenv("ACTIVE_DISK_CLONE_MODE"))
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(cfg.ActiveDiskDir, 0750); err != nil {
+		return nil, fmt.Errorf("create active disk dir %q: %w", cfg.ActiveDiskDir, err)
 	}
 
 	cfg.SnapshotDir = defaultString(strings.TrimSpace(os.Getenv("SNAPSHOT_DIR")), "/dev/shm/fc-snapshots")

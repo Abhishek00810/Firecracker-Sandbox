@@ -18,6 +18,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"backend/internal/writabledisk"
+
 	"github.com/google/uuid"
 )
 
@@ -171,8 +173,9 @@ type FireCrackerManager struct {
 	provisionSlots chan struct{}
 	// Non-root uid/gid that Firecracker VMM children drop to via setpriv. 0 = run as
 	// root (disabled). The backend itself stays root for netns/iptables/cgroup/mounts.
-	FCUid int
-	FCGid int
+	FCUid         int
+	FCGid         int
+	writableDisks writabledisk.Store
 }
 
 type VMManager interface {
@@ -184,7 +187,10 @@ type VMManager interface {
 	LoadFromSnapshot(ctx context.Context, cfg VMConfig, tmpl *SnapshotTemplate) (*MicroVM, error)
 }
 
-func NewFirecrackerManager(socketDir, assetsPath, binaryPath string, slotCount, maxConcurrentProvisions, fcUid, fcGid int) *FireCrackerManager {
+func NewFirecrackerManager(socketDir, assetsPath, binaryPath string, writableDisks writabledisk.Store, slotCount, maxConcurrentProvisions, fcUid, fcGid int) *FireCrackerManager {
+	if writableDisks == nil {
+		panic("writable disk store is required")
+	}
 	if maxConcurrentProvisions < 1 {
 		maxConcurrentProvisions = 1
 	}
@@ -197,7 +203,18 @@ func NewFirecrackerManager(socketDir, assetsPath, binaryPath string, slotCount, 
 		provisionSlots: make(chan struct{}, maxConcurrentProvisions),
 		FCUid:          fcUid,
 		FCGid:          fcGid,
+		writableDisks:  writableDisks,
 	}
+}
+
+func (f *FireCrackerManager) WritableDiskRoot() string { return f.writableDisks.Root() }
+
+func (f *FireCrackerManager) ListWritableDisks(ctx context.Context) ([]string, error) {
+	return f.writableDisks.List(ctx)
+}
+
+func (f *FireCrackerManager) DeleteWritableDisk(ctx context.Context, path string) error {
+	return f.writableDisks.Delete(ctx, path)
 }
 
 func (f *FireCrackerManager) acquireProvision(ctx context.Context) error {
@@ -340,7 +357,10 @@ func (f *FireCrackerManager) Create(ctx context.Context, cfg VMConfig) (*MicroVM
 	socketPath := f.getSocketPath(vmID)
 	vsockPath := filepath.Join(f.SocketDir, fmt.Sprintf("vsock-%s.sock", vmID))
 
-	var writableDiskPath string
+	var (
+		writableDiskPath string
+		err              error
+	)
 	if cfg.InitrdPath == "" {
 		// No initramfs: fall back to full rootfs copy (legacy cold boot)
 		rootfsCopy := filepath.Join(f.SocketDir, fmt.Sprintf("rootfs-%s.ext4", vmID))
@@ -360,14 +380,14 @@ func (f *FireCrackerManager) Create(ctx context.Context, cfg VMConfig) (*MicroVM
 				diskMB = defaultWritableDiskMB
 			}
 		}
-		writableDiskPath = filepath.Join(f.SocketDir, fmt.Sprintf("writable-%s.ext4", vmID))
-		if err := makeExt4(writableDiskPath, diskMB); err != nil {
+		writableDiskPath, err = f.writableDisks.Create(ctx, vmID, diskMB)
+		if err != nil {
 			return nil, fmt.Errorf("failed to create writable disk for VM %s: %w", vmID, err)
 		}
 		// Firecracker drops to an unprivileged user (FCUid) and must open this disk
 		// read-write; the file was created here as root, so hand it ownership.
 		if err := f.chownForFC(writableDiskPath); err != nil {
-			os.Remove(writableDiskPath)
+			_ = f.writableDisks.Delete(ctx, writableDiskPath)
 			return nil, fmt.Errorf("chown writable disk for VM %s: %w", vmID, err)
 		}
 	}
@@ -408,22 +428,6 @@ func copyFile(src, dst string) error {
 	return err
 }
 
-// makeExt4 creates a sparse, pre-formatted ext4 image of sizeMB at path. It backs the
-// per-VM writable upper layer (/dev/vdb) for OverlayFS-mode VMs. Sparse: the file only
-// consumes the blocks actually written, not the full sizeMB up front.
-func makeExt4(path string, sizeMB int) error {
-	if out, err := exec.Command("truncate", "-s", fmt.Sprintf("%dM", sizeMB), path).CombinedOutput(); err != nil {
-		return fmt.Errorf("truncate %s: %w: %s", path, err, out)
-	}
-	// -F: operate on a regular file (not a block device). -m 0: no reserved blocks, so
-	// the full disk is usable by the sandbox.
-	if out, err := exec.Command("mkfs.ext4", "-q", "-F", "-m", "0", path).CombinedOutput(); err != nil {
-		os.Remove(path)
-		return fmt.Errorf("mkfs.ext4 %s: %w: %s", path, err, out)
-	}
-	return nil
-}
-
 // chownForFC hands a backend-created file to the unprivileged user Firecracker drops to,
 // so the VMM can open it. A no-op when privilege drop is disabled (FCUid == 0).
 func (f *FireCrackerManager) chownForFC(path string) error {
@@ -431,17 +435,6 @@ func (f *FireCrackerManager) chownForFC(path string) error {
 		return nil
 	}
 	return os.Chown(path, f.FCUid, f.FCGid)
-}
-
-// copyDiskReflink clones a disk image, preferring a copy-on-write reflink when the host
-// filesystem supports it (instant, no extra space until the copies diverge) and falling
-// back to a full sparse byte copy otherwise. Used to clone the golden writable disk for
-// each restored VM so they start from identical state but can diverge independently.
-func copyDiskReflink(src, dst string) error {
-	if out, err := exec.Command("cp", "--reflink=auto", "--sparse=always", src, dst).CombinedOutput(); err != nil {
-		return fmt.Errorf("cp %s -> %s: %w: %s", src, dst, err, out)
-	}
-	return nil
 }
 
 func (f *FireCrackerManager) Boot(ctx context.Context, vmID string) error {
@@ -653,7 +646,9 @@ func (f *FireCrackerManager) teardown(ctx context.Context, vmID string, keepDisk
 	// upper disk is this VM's alone, so remove it — unless the caller is keeping it
 	// (a paused session whose state lives on that disk).
 	if !keepDisk && vm.WritableDiskPath != "" {
-		os.Remove(vm.WritableDiskPath)
+		if err := f.writableDisks.Delete(ctx, vm.WritableDiskPath); err != nil {
+			slog.Warn("failed to delete writable disk", "vm_id", vmID, "path", vm.WritableDiskPath, "err", err)
+		}
 	}
 
 	// Slot-based VMs (snapshot restores): return the slot to the pool so the next
@@ -721,9 +716,6 @@ func (f *FireCrackerManager) loadSnapshot(ctx context.Context, cfg VMConfig, tmp
 	// cloneDisk: give this VM its own copy of the golden disk. Otherwise reuse the
 	// session's existing disk in place (and don't remove it on cleanup).
 	writableDiskPath := tmpl.WritableDiskPath
-	if cloneDisk {
-		writableDiskPath = filepath.Join(f.SocketDir, fmt.Sprintf("writable-%s.ext4", vmID))
-	}
 
 	// Bound concurrent provisioning so the host is not stampeded. Acquire before the
 	// network slot so capacity is not held while waiting for CPU admission.
@@ -806,7 +798,7 @@ func (f *FireCrackerManager) loadSnapshot(ctx context.Context, cfg VMConfig, tmp
 		// Only remove a disk we created for this VM (clone path). A resumed session's
 		// disk is the caller's state — never delete it on a failed resume.
 		if cloneDisk {
-			os.Remove(writableDiskPath)
+			_ = f.writableDisks.Delete(ctx, writableDiskPath)
 		}
 	}
 
@@ -819,7 +811,8 @@ func (f *FireCrackerManager) loadSnapshot(ctx context.Context, cfg VMConfig, tmp
 	// the on-disk image. Reflink keeps this near-instant on a CoW host filesystem. On a
 	// session resume (cloneDisk=false) the session's existing disk is attached in place.
 	if cloneDisk {
-		if err := copyDiskReflink(tmpl.WritableDiskPath, writableDiskPath); err != nil {
+		writableDiskPath, err = f.writableDisks.Clone(ctx, vmID, tmpl.WritableDiskPath)
+		if err != nil {
 			restoreCleanup()
 			return nil, fmt.Errorf("clone writable disk failed: %w", err)
 		}

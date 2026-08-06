@@ -45,7 +45,16 @@ sudo WORKER_TOKEN='<same value as the control-plane VPS>' \
 
 The host must provide `/dev/kvm` and cgroup v2. Setup installs host networking
 tools, creates `/etc/renderops/worker.env`, and installs the systemd unit.
-Disk capacity is detected from the filesystem containing `ROOT_DIRECTORY`.
+Disk capacity is detected from the filesystem containing `ACTIVE_DISK_DIR`.
+
+Writable sandbox images use the store selected by `ACTIVE_DISK_BACKEND`
+(`filesystem` today). Point `ACTIVE_DISK_DIR` at a mounted local NVMe, Azure
+Managed Disk, or EBS filesystem without changing worker code.
+`ACTIVE_DISK_CLONE_MODE=required`
+fails restores when reflink cloning is unavailable; `auto` preserves the
+legacy fallback to a sparse full copy, and `copy` disables reflinks explicitly.
+For prebuilt templates with `required`, keep `TEMPLATE_CACHE_DIR` on the same
+mounted filesystem so the golden writable seed can be reflink-cloned.
 `WORKER_DISK_RESERVE_GB` optionally reserves host space (the default is 5%,
 with a 10 GiB minimum), while `WORKER_DISK_CAP_GB` optionally imposes a lower
 operator ceiling.
