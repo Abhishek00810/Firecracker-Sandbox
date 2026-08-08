@@ -31,12 +31,16 @@ func TestLoadResolvesPathsAndDirs(t *testing.T) {
 	writeFile(t, firecrackerBinary, "#!/bin/sh\nexit 0\n", 0755)
 
 	socketDir := filepath.Join(tmp, "sockets")
+	activeDiskDir := filepath.Join(tmp, "active-disks")
 	snapshotDir := filepath.Join(tmp, "snapshots")
 
 	t.Setenv("ROOT_DIRECTORY", tmp)
 	t.Setenv("ASSETS_PATH", assetsDir)
 	t.Setenv("FIRECRACKER_BINARY", firecrackerBinary)
 	t.Setenv("SOCKET_DIR", socketDir)
+	t.Setenv("ACTIVE_DISK_BACKEND", "filesystem")
+	t.Setenv("ACTIVE_DISK_DIR", activeDiskDir)
+	t.Setenv("ACTIVE_DISK_CLONE_MODE", "required")
 	t.Setenv("SNAPSHOT_DIR", snapshotDir)
 	t.Setenv("HOST_VALIDATION_MODE", "warn")
 
@@ -59,6 +63,18 @@ func TestLoadResolvesPathsAndDirs(t *testing.T) {
 	}
 	if _, err := os.Stat(snapshotDir); err != nil {
 		t.Fatalf("snapshot dir not created: %v", err)
+	}
+	if cfg.ActiveDiskDir != activeDiskDir {
+		t.Fatalf("expected active disk dir %q, got %q", activeDiskDir, cfg.ActiveDiskDir)
+	}
+	if cfg.ActiveDiskBackend != "filesystem" {
+		t.Fatalf("expected filesystem backend, got %q", cfg.ActiveDiskBackend)
+	}
+	if cfg.ActiveDiskCloneMode != "required" {
+		t.Fatalf("expected required clone mode, got %q", cfg.ActiveDiskCloneMode)
+	}
+	if _, err := os.Stat(activeDiskDir); err != nil {
+		t.Fatalf("active disk dir not created: %v", err)
 	}
 }
 

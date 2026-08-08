@@ -261,15 +261,20 @@ func (m *Manager) cleanupOrphanedDisks() {
 		keepPause[s.ID] = true
 	}
 
-	// 1. Orphaned per-VM writable disks in the socket dir.
+	// 1. Orphaned per-VM writable disks in the configured active disk store.
 	removedDisks := 0
-	writables, _ := filepath.Glob(filepath.Join(m.vmManager.SocketDir, "writable-*.ext4"))
+	writables, err := m.vmManager.ListWritableDisks(context.Background())
+	if err != nil {
+		slog.Warn("failed to list writable disks during startup cleanup", "err", err)
+	}
 	for _, p := range writables {
 		if keepDisk[p] {
 			continue
 		}
-		if err := os.Remove(p); err == nil {
+		if err := m.vmManager.DeleteWritableDisk(context.Background(), p); err == nil {
 			removedDisks++
+		} else {
+			slog.Warn("failed to remove orphaned writable disk", "path", p, "err", err)
 		}
 	}
 
@@ -910,7 +915,9 @@ func (m *Manager) ensureActive(ctx context.Context, sessionID string) error {
 // cleanupPausedFiles deletes a paused session's on-disk artifacts (snapshot + writable disk).
 func (m *Manager) cleanupPausedFiles(sess *Session) {
 	if sess.WritableDiskPath != "" {
-		os.Remove(sess.WritableDiskPath)
+		if err := m.vmManager.DeleteWritableDisk(context.Background(), sess.WritableDiskPath); err != nil {
+			slog.Warn("failed to delete paused writable disk", "session_id", sess.ID, "path", sess.WritableDiskPath, "err", err)
+		}
 	}
 	os.RemoveAll(filepath.Join(m.pauseDir, sess.ID))
 }

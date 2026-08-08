@@ -18,6 +18,7 @@ import (
 	"backend/internal/cgroup"
 	"backend/internal/executor/firecracker"
 	workerconfig "backend/internal/workerplane/config"
+	"backend/internal/writabledisk"
 )
 
 // Host is the result of Init: the resolved config plus the ready-to-use manager.
@@ -82,8 +83,17 @@ func Init() (*Host, error) {
 		slog.Warn("cgroup init failed, limits will not be enforced", "err", err)
 	}
 
+	writableDisks, err := writabledisk.New(writabledisk.Config{
+		Backend:   cfg.ActiveDiskBackend,
+		Root:      cfg.ActiveDiskDir,
+		CloneMode: cfg.ActiveDiskCloneMode,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("initialize writable disk store: %w", err)
+	}
+
 	vmManager := firecracker.NewFirecrackerManager(
-		cfg.SocketDir, cfg.AssetsPath, cfg.FirecrackerBinary,
+		cfg.SocketDir, cfg.AssetsPath, cfg.FirecrackerBinary, writableDisks,
 		slotCount, maxProvisions, cfg.FCRunUID, cfg.FCRunGID,
 	)
 
