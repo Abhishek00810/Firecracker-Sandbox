@@ -102,14 +102,16 @@ func (f *Filesystem) Clone(ctx context.Context, sandboxID, sourcePath string) (s
 		return "", err
 	}
 
-	args := []string{"--sparse=always"}
+	args := make([]string, 0, 4)
 	switch f.cloneMode {
 	case CloneRequired:
-		args = append(args, "--reflink=always")
+		// GNU cp only permits reflink cloning with --sparse=auto. The cloned
+		// ext4 image remains sparse because holes are shared by the reflink.
+		args = append(args, "--sparse=auto", "--reflink=always")
 	case CloneCopy:
-		args = append(args, "--reflink=never")
+		args = append(args, "--sparse=always", "--reflink=never")
 	default:
-		args = append(args, "--reflink=auto")
+		args = append(args, "--sparse=auto", "--reflink=auto")
 	}
 	args = append(args, sourcePath, path)
 	if out, err := f.run(ctx, "cp", args...); err != nil {

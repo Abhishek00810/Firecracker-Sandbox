@@ -74,12 +74,13 @@ func TestFilesystemCreateBuildsSparseExt4Image(t *testing.T) {
 
 func TestFilesystemCloneModes(t *testing.T) {
 	for _, tc := range []struct {
-		mode CloneMode
-		flag string
+		mode       CloneMode
+		sparseFlag string
+		reflink   string
 	}{
-		{CloneAuto, "--reflink=auto"},
-		{CloneRequired, "--reflink=always"},
-		{CloneCopy, "--reflink=never"},
+		{CloneAuto, "--sparse=auto", "--reflink=auto"},
+		{CloneRequired, "--sparse=auto", "--reflink=always"},
+		{CloneCopy, "--sparse=always", "--reflink=never"},
 	} {
 		t.Run(string(tc.mode), func(t *testing.T) {
 			store := newTestFilesystem(t, tc.mode)
@@ -92,7 +93,7 @@ func TestFilesystemCloneModes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Clone() error: %v", err)
 			}
-			want := []string{"--sparse=always", tc.flag, "/templates/golden.ext4", path}
+			want := []string{tc.sparseFlag, tc.reflink, "/templates/golden.ext4", path}
 			if !reflect.DeepEqual(args, want) {
 				t.Fatalf("clone args = %#v, want %#v", args, want)
 			}

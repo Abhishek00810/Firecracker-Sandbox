@@ -990,10 +990,12 @@ func handleConnection(connFd int) {
 			continue
 		}
 		if msg.Type == "reset_runtimes" {
+			log.Printf("resetting guest runtimes")
 			resetRuntimes()
 			json.NewEncoder(conn).Encode(struct {
 				Success bool `json:"success"`
 			}{true})
+			log.Printf("guest runtimes reset")
 			continue
 		}
 		if msg.Type == "exec" {
