@@ -76,7 +76,7 @@ func TestFilesystemCloneModes(t *testing.T) {
 	for _, tc := range []struct {
 		mode       CloneMode
 		sparseFlag string
-		reflink   string
+		reflink    string
 	}{
 		{CloneAuto, "--sparse=auto", "--reflink=auto"},
 		{CloneRequired, "--sparse=auto", "--reflink=always"},
