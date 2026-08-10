@@ -36,15 +36,16 @@ func NewService(db *platform.Client, orchestrationClient *orchestrator.Client, w
 func (s *Service) Create(ctx context.Context, userID, billingModel string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*plane.SessionInfo, error) {
 	sandboxID := uuid.NewString()
 	if err := s.db.InsertSandbox(ctx, platform.Sandbox{
-		ID:           sandboxID,
-		UserID:       userID,
-		Name:         "sandbox",
-		State:        "scheduling",
-		BillingModel: billingModel,
-		VCPUs:        vcpus,
-		MemoryMB:     memoryMB,
-		DiskGB:       diskGB,
-		Internet:     internet,
+		ID:            sandboxID,
+		UserID:        userID,
+		Name:          "sandbox",
+		State:         "scheduling",
+		BillingModel:  billingModel,
+		VCPUs:         vcpus,
+		MemoryMB:      memoryMB,
+		DiskGB:        diskGB,
+		Internet:      internet,
+		IdleTimeoutMs: int(idleTimeout.Milliseconds()),
 	}); err != nil {
 		return nil, fmt.Errorf("create sandbox scheduling row: %w", err)
 	}
@@ -108,7 +109,11 @@ func (s *Service) Exec(ctx context.Context, sessionID, command string, timeoutSe
 // On a not-found error we mark it destroyed so it drops out of the dashboard,
 // and return a clear message instead of the raw agent error.
 func (s *Service) reconcile(ctx context.Context, sessionID string, err error) error {
-	if err == nil || !strings.Contains(err.Error(), "not found") {
+	if err == nil {
+		s.db.TouchSandbox(ctx, sessionID)
+		return nil
+	}
+	if !strings.Contains(err.Error(), "not found") {
 		return err
 	}
 	_ = s.orchestrator.Destroy(ctx, sessionID)
@@ -160,6 +165,7 @@ func (s *Service) GetSession(ctx context.Context, id string) (*plane.SessionInfo
 		MemoryMB:     ref.MemoryMB,
 		DiskGB:       ref.DiskGB,
 		Internet:     ref.Internet,
+		IdleTimeout:  time.Duration(ref.IdleTimeoutMs) * time.Millisecond,
 		CreatedAt:    ref.Created,
 		LastUsed:     ref.LastUsed,
 		State:        state,

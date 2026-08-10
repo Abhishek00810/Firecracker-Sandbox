@@ -19,8 +19,12 @@ import (
 	"github.com/google/uuid"
 )
 
-// pauseTTL is how long a paused session's snapshot is retained before it's hard-deleted.
-const pauseTTL = 7 * 24 * time.Hour
+const (
+	// A short scan interval keeps user-selected idle deadlines reasonably accurate without
+	// creating one timer goroutine per sandbox.
+	reaperInterval = 10 * time.Second
+	pauseTTL       = 7 * 24 * time.Hour
+)
 
 // StateHook is called on every session lifecycle transition — manual (endpoint) AND
 // automatic (reaper idle-pause, on-demand resume, TTL destroy) — so an external store
@@ -663,6 +667,12 @@ func (m *Manager) Destroy(ctx context.Context, sessionID string) error {
 // RAM and cgroup — keeping its writable disk. The session stays in the store as paused
 // and resumes transparently on next use. Idempotent: a non-active session is a no-op.
 func (m *Manager) Pause(ctx context.Context, sessionID string) error {
+	return m.pause(ctx, sessionID, time.Time{})
+}
+
+// pause performs a manual pause when idleCheckAt is zero. For an automatic pause,
+// it rechecks idleness while holding the session lock so new work cannot race the reaper.
+func (m *Manager) pause(ctx context.Context, sessionID string, idleCheckAt time.Time) error {
 	sess, ok := m.store.Get(sessionID)
 	if !ok {
 		return fmt.Errorf("session %s not found", sessionID)
@@ -674,6 +684,12 @@ func (m *Manager) Pause(ctx context.Context, sessionID string) error {
 
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
+	if !idleCheckAt.IsZero() {
+		idleDeadline := sess.LastUsed.Add(sess.IdleTimeout)
+		if sess.State != StateActive || sess.IdleTimeout <= 0 || idleCheckAt.Before(idleDeadline) || len(sess.Terminals) > 0 {
+			return nil
+		}
+	}
 	if sess.State == StatePaused {
 		return m.notifyState(sess, "paused")
 	}
@@ -1026,37 +1042,61 @@ func (m *Manager) Stats() map[string]int {
 	}
 }
 
-// reaper runs every minute: it PAUSES idle active sessions (freeing RAM/slot while
+type reapAction uint8
+
+const (
+	reapNone reapAction = iota
+	reapPause
+	reapDestroy
+)
+
+// reapActionFor is called with sess.mu held.
+func reapActionFor(sess *Session, now time.Time) reapAction {
+	if sess.MaxLifetime > 0 && !now.Before(sess.CreatedAt.Add(sess.MaxLifetime)) {
+		return reapDestroy
+	}
+
+	switch sess.State {
+	case StateActive:
+		if sess.IdleTimeout > 0 && len(sess.Terminals) == 0 && !now.Before(sess.LastUsed.Add(sess.IdleTimeout)) {
+			return reapPause
+		}
+	case StatePaused:
+		if !now.Before(sess.PausedAt.Add(pauseTTL)) {
+			return reapDestroy
+		}
+	}
+	return reapNone
+}
+
+func (m *Manager) reapOnce(ctx context.Context, now time.Time) {
+	for _, sess := range m.store.All() {
+		sess.mu.Lock()
+		action := reapActionFor(sess, now)
+		sessionID := sess.ID
+		sess.mu.Unlock()
+
+		switch action {
+		case reapPause:
+			if err := m.pause(ctx, sessionID, now); err != nil {
+				slog.Error("reaper auto-pause failed", "session_id", sessionID, "err", err)
+			}
+		case reapDestroy:
+			if err := m.Destroy(ctx, sessionID); err != nil {
+				slog.Error("reaper destroy failed", "session_id", sessionID, "err", err)
+			}
+		}
+	}
+}
+
+// reaper periodically PAUSES idle active sessions (freeing RAM/slot while
 // keeping state on disk), destroys sessions past their max lifetime, and hard-deletes
 // paused sessions past the retention TTL.
 func (m *Manager) reaper() {
-	ticker := time.NewTicker(1 * time.Minute)
+	ticker := time.NewTicker(reaperInterval)
 	defer ticker.Stop()
 	for range ticker.C {
-		now := time.Now()
-		for _, sess := range m.store.All() {
-			switch sess.State {
-			case StateActive:
-				// Idle auto-pause is disabled: snapshot-resume is broken (vsock
-				// rebind fails), so a paused sandbox is unrecoverable. Sessions
-				// stay active until their hard max lifetime, then are destroyed.
-				if sess.MaxLifetime > 0 && now.Sub(sess.CreatedAt) > sess.MaxLifetime {
-					slog.Info("session max lifetime reached, destroying", "session_id", sess.ID)
-					if err := m.Destroy(context.Background(), sess.ID); err != nil {
-						slog.Error("reaper destroy failed", "session_id", sess.ID, "err", err)
-					}
-				}
-			case StatePaused:
-				ttlExpired := now.Sub(sess.PausedAt) > pauseTTL
-				lifetimeExpired := sess.MaxLifetime > 0 && now.Sub(sess.CreatedAt) > sess.MaxLifetime
-				if ttlExpired || lifetimeExpired {
-					slog.Info("paused session expired, destroying", "session_id", sess.ID, "ttl_expired", ttlExpired)
-					if err := m.Destroy(context.Background(), sess.ID); err != nil {
-						slog.Error("reaper destroy paused failed", "session_id", sess.ID, "err", err)
-					}
-				}
-			}
-		}
+		m.reapOnce(context.Background(), time.Now())
 	}
 }
 

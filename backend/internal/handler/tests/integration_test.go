@@ -241,6 +241,9 @@ func TestSKPlatformContract(t *testing.T) {
 			SessionID string `json:"session_id"`
 			State     string `json:"state"`
 		} `json:"session"`
+		Limits *struct {
+			IdleTimeoutMs int `json:"idle_timeout_ms"`
+		} `json:"limits"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&createResp); err != nil {
 		t.Fatalf("create: decode: %v", err)
@@ -250,6 +253,9 @@ func TestSKPlatformContract(t *testing.T) {
 	}
 	if createResp.Session.State != "active" {
 		t.Fatalf("create: sk expects state active, got %q", createResp.Session.State)
+	}
+	if createResp.Limits == nil || createResp.Limits.IdleTimeoutMs != 300_000 {
+		t.Fatalf("create must report requested idle timeout, got %+v", createResp.Limits)
 	}
 	id := createResp.Session.SessionID
 
@@ -515,6 +521,8 @@ func (f *fakeSessionService) Create(ctx context.Context, userID, billingModel st
 		ID:           id,
 		UserID:       userID,
 		BillingModel: billingModel,
+		IdleTimeout:  idleTimeout,
+		MaxLifetime:  maxLifetime,
 		CreatedAt:    time.Now().UTC(),
 		LastUsed:     time.Now().UTC(),
 		State:        plane.StateActive,

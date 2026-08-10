@@ -151,13 +151,13 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 					BillingModel: sess.BillingModel,
 					CreatedAt:    sess.CreatedAt.Format(time.RFC3339),
 					LastUsed:     sess.LastUsed.Format(time.RFC3339),
-					ExpiresAt:    sess.LastUsed.Add(tc.SessionIdleTimeout).Format(time.RFC3339),
+					ExpiresAt:    sess.LastUsed.Add(sess.IdleTimeout).Format(time.RFC3339),
 				},
 				Limits: &SessionLimits{
 					MaxSessions:    tc.MaxSessions,
 					ActiveSessions: 0, // no per-tenant count yet
 					MaxExecutionMs: int(tc.MaxExecTimeout.Milliseconds()),
-					IdleTimeoutMs:  int(tc.SessionIdleTimeout.Milliseconds()),
+					IdleTimeoutMs:  int(sess.IdleTimeout.Milliseconds()),
 				},
 				Tenant: &TenantContext{
 					TenantID:     auth.TenantID,
@@ -241,7 +241,7 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 				Session: &SessionState{
 					State:     "active",
 					LastUsed:  sessSt.LastUsed.Format(time.RFC3339),
-					ExpiresAt: sessSt.LastUsed.Add(sessTc.SessionIdleTimeout).Format(time.RFC3339),
+					ExpiresAt: sessSt.LastUsed.Add(sessSt.IdleTimeout).Format(time.RFC3339),
 					RunCount:  sessSt.RunCount,
 				},
 			}
@@ -343,7 +343,7 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 				Session: &SessionState{
 					State:     "active",
 					LastUsed:  sessSt.LastUsed.Format(time.RFC3339),
-					ExpiresAt: sessSt.LastUsed.Add(sessTc.SessionIdleTimeout).Format(time.RFC3339),
+					ExpiresAt: sessSt.LastUsed.Add(sessSt.IdleTimeout).Format(time.RFC3339),
 					RunCount:  sessSt.RunCount,
 				},
 			}
@@ -483,13 +483,13 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 					BillingModel: sess.BillingModel,
 					CreatedAt:    sess.CreatedAt.Format(time.RFC3339),
 					LastUsed:     sess.LastUsed.Format(time.RFC3339),
-					ExpiresAt:    sess.LastUsed.Add(sessTc.SessionIdleTimeout).Format(time.RFC3339),
+					ExpiresAt:    sess.LastUsed.Add(sess.IdleTimeout).Format(time.RFC3339),
 				},
 				Limits: &SessionLimits{
 					MaxSessions:    sessTc.MaxSessions,
 					ActiveSessions: 0, // no per-tenant count yet
 					MaxExecutionMs: int(sessTc.MaxExecTimeout.Milliseconds()),
-					IdleTimeoutMs:  int(sessTc.SessionIdleTimeout.Milliseconds()),
+					IdleTimeoutMs:  int(sess.IdleTimeout.Milliseconds()),
 				},
 				Stats: &SessionStats{
 					RunCount:         sess.RunCount,
