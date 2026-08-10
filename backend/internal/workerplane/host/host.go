@@ -25,6 +25,7 @@ import (
 type Host struct {
 	Config        *workerconfig.Config
 	VMManager     *firecracker.FireCrackerManager
+	Capacity      CapacityConfig
 	SlotCount     int
 	MaxProvisions int
 }
@@ -43,8 +44,17 @@ func Init() (*Host, error) {
 		slog.Warn("startup warning", "message", warning)
 	}
 
-	slotCount := envInt("SLOT_COUNT", 50)
+	capacity := resolveCapacity()
+	slotCount := capacity.NetworkSlots
 	maxProvisions := envInt("MAX_CONCURRENT_PROVISIONS", runtime.NumCPU())
+	slog.Info(
+		"worker capacity resolved",
+		"physical_vcpus", capacity.PhysicalVCPUs,
+		"cpu_overcommit_ratio", capacity.CPUOvercommitRatio,
+		"max_sessions", capacity.MaxSessions,
+		"network_slots", capacity.NetworkSlots,
+		"network_slots_explicit", capacity.NetworkSlotsExplicit,
+	)
 
 	// step honors warn-vs-strict host validation: warn logs and continues, strict fails.
 	step := func(stage string, err error) error {
@@ -100,6 +110,7 @@ func Init() (*Host, error) {
 	return &Host{
 		Config:        cfg,
 		VMManager:     vmManager,
+		Capacity:      capacity,
 		SlotCount:     slotCount,
 		MaxProvisions: maxProvisions,
 	}, nil

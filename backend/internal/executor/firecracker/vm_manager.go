@@ -128,9 +128,9 @@ type VMStateChange struct {
 	State string `json:"state"`
 }
 
-// SlotPool manages pre-created network slots (netns + TAP + veth + iptables)
-// set up by server.sh. Each slot is a self-contained network environment that
-// a restored VM can be placed into without any guest-side reconfiguration.
+// SlotPool manages pre-created network slots (netns + TAP + veth + nftables)
+// set up during worker bootstrap. Each slot is a self-contained network
+// environment that a restored VM can use without guest-side reconfiguration.
 type SlotPool struct {
 	slots chan int
 }

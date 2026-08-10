@@ -63,7 +63,7 @@ func envFloat(key string, def float64) float64 {
 	return def
 }
 
-func startOrchestratorRegistration(ctx context.Context, slotCount int, capacity func() plane.Capacity) {
+func startOrchestratorRegistration(ctx context.Context, maxSessions int, physicalVCPUs int, capacity func() plane.Capacity) {
 	baseURL := os.Getenv("ORCHESTRATOR_URL")
 	if baseURL == "" {
 		slog.Warn("ORCHESTRATOR_URL not set; worker registration and heartbeat are disabled")
@@ -74,10 +74,10 @@ func startOrchestratorRegistration(ctx context.Context, slotCount int, capacity 
 		ID:                  os.Getenv("WORKER_ID"),
 		Endpoint:            os.Getenv("WORKER_ADVERTISE_URL"),
 		Pool:                os.Getenv("WORKER_POOL"),
-		AllocatableVCPUs:    envInt("WORKER_ALLOCATABLE_VCPUS", 0),
+		AllocatableVCPUs:    physicalVCPUs,
 		AllocatableMemoryMB: envInt("WORKER_ALLOCATABLE_MEMORY_MB", 0),
 		AllocatableDiskGB:   currentCapacity.AllocatableDiskGB,
-		MaxSandboxes:        envInt("WORKER_MAX_SESSIONS", slotCount),
+		MaxSandboxes:        maxSessions,
 	}
 	if registration.ID == "" ||
 		registration.Endpoint == "" ||
@@ -165,6 +165,7 @@ func main() {
 	cfg := h.Config
 	vmManager := h.VMManager
 	slotCount := h.SlotCount
+	maxSessions := h.Capacity.MaxSessions
 	resolvedRootfs, err := filepath.EvalSymlinks(cfg.RootfsPath)
 	if err != nil {
 		slog.Error("resolve immutable rootfs failed", "path", cfg.RootfsPath, "err", err)
@@ -214,11 +215,11 @@ func main() {
 	slog.Info("worker execution engine initialized", "sizes", len(sizePools), "template_source", env("TEMPLATE_SOURCE", "build"))
 
 	admission := worker.NewAdmission(
-		envInt("WORKER_ALLOCATABLE_VCPUS", 0),
+		h.Capacity.PhysicalVCPUs,
 		envInt("WORKER_ALLOCATABLE_MEMORY_MB", 0),
 		1,
-		envInt("WORKER_MAX_SESSIONS", slotCount),
-		envFloat("WORKER_CPU_OVERCOMMIT_RATIO", 4),
+		maxSessions,
+		h.Capacity.CPUOvercommitRatio,
 		envFloat("WORKER_MEMORY_OVERCOMMIT_RATIO", 1),
 	)
 	diskCapacity := worker.NewHostDiskCapacity(
@@ -289,7 +290,7 @@ func main() {
 		vmManager,
 		defaultTemplate,
 		baseCfg,
-		envInt("WORKER_MAX_SESSIONS", slotCount),
+		maxSessions,
 		5*time.Minute, // default idle timeout (per-session values from the request override)
 		24*time.Hour,  // default max lifetime
 		sizePools,
@@ -351,7 +352,7 @@ func main() {
 	}()
 
 	registrationCtx, stopRegistration := context.WithCancel(context.Background())
-	startOrchestratorRegistration(registrationCtx, slotCount, admission.Capacity)
+	startOrchestratorRegistration(registrationCtx, maxSessions, h.Capacity.PhysicalVCPUs, admission.Capacity)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)

@@ -49,11 +49,13 @@ if [ ! -f "$ENV_FILE" ]; then
 		printf 'WORKER_DISK_RESERVE_GB=%s\n' "${WORKER_DISK_RESERVE_GB:-}"
 		printf 'WORKER_CPU_OVERCOMMIT_RATIO=%s\n' "${WORKER_CPU_OVERCOMMIT_RATIO:-4}"
 		printf 'WORKER_MEMORY_OVERCOMMIT_RATIO=%s\n' "${WORKER_MEMORY_OVERCOMMIT_RATIO:-1}"
+		printf 'WORKER_MAX_SESSIONS=%s\n' "${WORKER_MAX_SESSIONS:-200}"
 		printf 'WORKER_MAX_TERMINALS_PER_SANDBOX=%s\n' "${WORKER_MAX_TERMINALS_PER_SANDBOX:-8}"
 		printf 'ORCHESTRATOR_URL=%s\n' "${ORCHESTRATOR_URL:-}"
 		printf 'CONTROL_PLANE_INTERNAL_URL=%s\n' "${CONTROL_PLANE_INTERNAL_URL:-}"
 		printf 'HOST_VALIDATION_MODE=strict\n'
-		printf 'SLOT_COUNT=%s\n' "${SLOT_COUNT:-50}"
+		# SLOT_COUNT is intentionally omitted. The worker derives active network
+		# slots from physical vCPUs x CPU overcommit, capped by max sessions.
 		printf 'MAX_CONCURRENT_PROVISIONS=%s\n' "${MAX_CONCURRENT_PROVISIONS:-8}"
 		printf 'TEMPLATE_SOURCE=%s\n' "${TEMPLATE_SOURCE:-build}"
 		printf 'TEMPLATE_CACHE_DIR=%s\n' "${TEMPLATE_CACHE_DIR:-$WORKER_ROOT/template-cache}"

@@ -9,7 +9,7 @@
 #
 # Usage: install-worker.sh <local-binary-path> [rootfs-archive checksum-file]
 # Env:   SSH_KEY (private key contents), SSH_HOST, SSH_USER
-#        WORKER_SLOT_COUNT, WORKER_MAX_SESSIONS, WORKER_*_OVERCOMMIT_RATIO,
+#        WORKER_MAX_SESSIONS, WORKER_*_OVERCOMMIT_RATIO,
 #        WORKER_MAX_TERMINALS_PER_SANDBOX
 #        CONTROL_PLANE_INTERNAL_URL (internal raw-usage ingestion endpoint)
 set -euo pipefail
@@ -30,7 +30,7 @@ if [ -n "$ROOTFS_ARCHIVE" ] || [ -n "$ROOTFS_CHECKSUM" ]; then
 	DEPLOY_ROOTFS_VERSION="$ROOTFS_VERSION"
 fi
 
-for value in "${WORKER_SLOT_COUNT:-}" "${WORKER_MAX_SESSIONS:-}" "${WORKER_MAX_TERMINALS_PER_SANDBOX:-}"; do
+for value in "${WORKER_MAX_SESSIONS:-}" "${WORKER_MAX_TERMINALS_PER_SANDBOX:-}"; do
 	[ -z "$value" ] && continue
 	case "$value" in
 	*[!0-9]* | 0)
@@ -63,7 +63,7 @@ fi
 
 echo "==> installing (idempotent) and restarting"
 # shellcheck disable=SC2087
-$SSH "sudo WORKER_SLOT_COUNT='${WORKER_SLOT_COUNT:-}' WORKER_MAX_SESSIONS='${WORKER_MAX_SESSIONS:-}' WORKER_CPU_OVERCOMMIT_RATIO='${WORKER_CPU_OVERCOMMIT_RATIO:-}' WORKER_MEMORY_OVERCOMMIT_RATIO='${WORKER_MEMORY_OVERCOMMIT_RATIO:-}' WORKER_MAX_TERMINALS_PER_SANDBOX='${WORKER_MAX_TERMINALS_PER_SANDBOX:-}' CONTROL_PLANE_INTERNAL_URL='${CONTROL_PLANE_INTERNAL_URL:-}' ROOTFS_VERSION='${DEPLOY_ROOTFS_VERSION}' bash -s" <<'REMOTE'
+$SSH "sudo WORKER_MAX_SESSIONS='${WORKER_MAX_SESSIONS:-}' WORKER_CPU_OVERCOMMIT_RATIO='${WORKER_CPU_OVERCOMMIT_RATIO:-}' WORKER_MEMORY_OVERCOMMIT_RATIO='${WORKER_MEMORY_OVERCOMMIT_RATIO:-}' WORKER_MAX_TERMINALS_PER_SANDBOX='${WORKER_MAX_TERMINALS_PER_SANDBOX:-}' CONTROL_PLANE_INTERNAL_URL='${CONTROL_PLANE_INTERNAL_URL:-}' ROOTFS_VERSION='${DEPLOY_ROOTFS_VERSION}' bash -s" <<'REMOTE'
 set -euo pipefail
 # Preconditions from the one-time host setup — fail clearly if missing.
 if [ ! -f /etc/renderops/worker.env ]; then
@@ -87,9 +87,9 @@ set_env_value() {
   fi
 }
 
-# Capacity is deployment configuration, not a secret. Keeping it here ensures
-# network provisioning and advertised max sessions change together on restart.
-set_env_value SLOT_COUNT "$WORKER_SLOT_COUNT"
+# Remove the legacy fixed slot count. The worker now derives network capacity
+# from detected vCPUs and the configured CPU overcommit ratio.
+sed -i '/^SLOT_COUNT=/d' /etc/renderops/worker.env
 set_env_value WORKER_MAX_SESSIONS "$WORKER_MAX_SESSIONS"
 set_env_value WORKER_CPU_OVERCOMMIT_RATIO "$WORKER_CPU_OVERCOMMIT_RATIO"
 set_env_value WORKER_MEMORY_OVERCOMMIT_RATIO "$WORKER_MEMORY_OVERCOMMIT_RATIO"
