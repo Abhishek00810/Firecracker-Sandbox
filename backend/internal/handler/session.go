@@ -126,6 +126,19 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 			}); err != nil {
 				slog.Warn("sandbox details update failed", "sandbox_id", sess.ID, "err", err)
 			}
+			recordAuditEventAsync(
+				usageLogger,
+				r,
+				auth.TenantID,
+				auth.APIKeyID,
+				"sandbox.created",
+				"sandbox",
+				sess.ID,
+				map[string]any{
+					"name": name, "vcpus": size.VCPUs, "memory_mb": size.MemoryMB,
+					"disk_gb": size.DiskGB, "billing_model": auth.Billing.Model,
+				},
+			)
 
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
@@ -390,6 +403,7 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 			// Bill active time up to the pause.
 			billRuntimeAsync(usageLogger, sessionID, auth.Billing.ExecutionRateUSDPerSec)
 			// state + timeline sync to the DB is handled by the manager's state hook
+			recordAuditEventAsync(usageLogger, r, auth.TenantID, auth.APIKeyID, "sandbox.paused", "sandbox", sessionID, nil)
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{"status": "success", "session_id": sessionID, "state": "paused"})
 
@@ -410,6 +424,7 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 				return
 			}
 			// state + timeline sync to the DB is handled by the manager's state hook
+			recordAuditEventAsync(usageLogger, r, auth.TenantID, auth.APIKeyID, "sandbox.resumed", "sandbox", sessionID, nil)
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{"status": "success", "session_id": sessionID, "state": "active"})
 
@@ -429,6 +444,7 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 				return
 			}
 			// state + timeline sync to the DB is handled by the manager's state hook
+			recordAuditEventAsync(usageLogger, r, auth.TenantID, auth.APIKeyID, "sandbox.destroyed", "sandbox", sessionID, nil)
 
 			w.WriteHeader(http.StatusNoContent)
 

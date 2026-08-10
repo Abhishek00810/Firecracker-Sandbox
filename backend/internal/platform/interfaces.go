@@ -17,6 +17,7 @@ type UsageLogger interface {
 	UpdateSandboxState(ctx context.Context, id, state string)
 	InsertSandboxLog(ctx context.Context, l SandboxLog)
 	InsertSandboxRun(ctx context.Context, run SandboxRun)
+	InsertAuditEvent(ctx context.Context, event AuditEvent) error
 	ListSandboxes(ctx context.Context, userID string) ([]SandboxListItem, error)
 	// BillSandboxRuntime debits the owner's balance for unbilled wall-clock time.
 	BillSandboxRuntime(ctx context.Context, sandboxID string, ratePerSec float64)

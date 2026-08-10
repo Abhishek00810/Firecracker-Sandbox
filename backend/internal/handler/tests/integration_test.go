@@ -203,11 +203,13 @@ func TestSessionLifecycle(t *testing.T) {
 // better-auth session token as Bearer), with the bodies sk sends and the
 // response fields sk parses. If this test fails, the dashboard is broken.
 func TestSKPlatformContract(t *testing.T) {
+	resolver := &fakePlatformService{
+		record:        platform.KeyRecord{ID: "profile-source", BalanceUSD: 10},
+		sessionUserID: "dash-user",
+		auditCh:       make(chan platform.AuditEvent, 4),
+	}
 	server := newTestServer(t, testDeps{
-		resolver: &fakePlatformService{
-			record:        platform.KeyRecord{ID: "profile-source", BalanceUSD: 10},
-			sessionUserID: "dash-user",
-		},
+		resolver: resolver,
 	})
 
 	do := func(method, path, body string) *httptest.ResponseRecorder {
@@ -264,6 +266,35 @@ func TestSKPlatformContract(t *testing.T) {
 	// destroySandbox: DELETE /session/{id} — sk only checks res.ok (204, empty body).
 	if rec := do(http.MethodDelete, "/session/"+id, ""); rec.Code != http.StatusNoContent {
 		t.Fatalf("destroy: expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	wantActions := map[string]bool{
+		"sandbox.created":   false,
+		"sandbox.paused":    false,
+		"sandbox.resumed":   false,
+		"sandbox.destroyed": false,
+	}
+	for range wantActions {
+		select {
+		case event := <-resolver.auditCh:
+			if _, ok := wantActions[event.Action]; !ok {
+				t.Fatalf("unexpected audit action %q", event.Action)
+			}
+			wantActions[event.Action] = true
+			if event.ScopeType != "personal" || event.ScopeID != "dash-user" {
+				t.Fatalf("unexpected audit scope: %+v", event)
+			}
+			if event.ResourceType != "sandbox" || event.ResourceID != id {
+				t.Fatalf("unexpected audit resource: %+v", event)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for lifecycle audit events")
+		}
+	}
+	for action, seen := range wantActions {
+		if !seen {
+			t.Errorf("missing audit action %q", action)
+		}
 	}
 }
 
@@ -390,6 +421,7 @@ type fakePlatformService struct {
 	logs          []platform.UsageLog
 	logCh         chan error
 	logDelay      time.Duration
+	auditCh       chan platform.AuditEvent
 }
 
 func (f *fakePlatformService) ResolveKey(keyHash string) (platform.KeyRecord, error) {
@@ -416,6 +448,13 @@ func (f *fakePlatformService) InsertUsageLog(ctx context.Context, log platform.U
 	if f.logCh != nil {
 		f.logCh <- ctx.Err()
 	}
+}
+
+func (f *fakePlatformService) InsertAuditEvent(_ context.Context, event platform.AuditEvent) error {
+	if f.auditCh != nil {
+		f.auditCh <- event
+	}
+	return nil
 }
 
 func (f *fakePlatformService) UpsertSandbox(ctx context.Context, sb platform.Sandbox) {}

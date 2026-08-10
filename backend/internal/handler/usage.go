@@ -1,10 +1,52 @@
 package handler
 
 import (
+	"backend/internal/middleware"
 	"backend/internal/platform"
 	"context"
+	"log/slog"
+	"net"
+	"net/http"
 	"time"
 )
+
+func recordAuditEventAsync(
+	logger platform.UsageLogger,
+	r *http.Request,
+	userID, apiKeyID, action, resourceType, resourceID string,
+	metadata map[string]any,
+) {
+	actorType := "user"
+	if apiKeyID != "" {
+		actorType = "api_key"
+	}
+	ipAddress := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		ipAddress = host
+	}
+	event := platform.AuditEvent{
+		ScopeType:     "personal",
+		ScopeID:       userID,
+		ActorType:     actorType,
+		ActorUserID:   userID,
+		ActorAPIKeyID: apiKeyID,
+		Action:        action,
+		ResourceType:  resourceType,
+		ResourceID:    resourceID,
+		Outcome:       "success",
+		RequestID:     middleware.RequestIDFromContext(r.Context()),
+		IPAddress:     ipAddress,
+		UserAgent:     r.UserAgent(),
+		Metadata:      metadata,
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		defer cancel()
+		if err := logger.InsertAuditEvent(ctx, event); err != nil {
+			slog.Warn("audit event insert failed", "action", action, "resource_id", resourceID, "err", err)
+		}
+	}()
+}
 
 func insertUsageLogAsync(logger platform.UsageLogger, log platform.UsageLog) {
 	// usage_logs.api_key_id is required in the existing schema. Dashboard calls
