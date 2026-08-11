@@ -44,7 +44,8 @@ func TestReapActionFor(t *testing.T) {
 		},
 	}
 
-	for _, tt := range tests {
+	for i := range tests {
+		tt := &tests[i]
 		t.Run(tt.name, func(t *testing.T) {
 			if got := reapActionFor(&tt.sess, now); got != tt.want {
 				t.Fatalf("reapActionFor() = %v, want %v", got, tt.want)
