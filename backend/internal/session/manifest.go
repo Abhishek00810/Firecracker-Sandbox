@@ -10,11 +10,12 @@ import (
 
 // manifest persists the set of PAUSED sessions to disk so they survive a backend
 // process restart (deploy, reboot) — the snapshot + writable disk are already on disk;
-// the manifest is the index that lets a fresh process find and resume them.
+// the manifest is the index that lets a fresh process find and resume them. When
+// configured, CheckpointRef also identifies the durable Blob generation.
 //
 // Scope (v1): this covers process restart / reboot, where the disk survives. It does NOT
-// survive local-NVMe loss (EC2 stop-start / host failure) — that needs durable storage
-// (S3/Blob), a later phase. Records pointing at missing files are dropped on recovery.
+// still requires local files for resume; restoring missing files from CheckpointRef
+// is the separate read-flow phase. Records pointing at missing files are dropped.
 
 type pausedRecord struct {
 	ID                string            `json:"id"`
@@ -36,6 +37,7 @@ type pausedRecord struct {
 	RootfsPathAtPause string            `json:"rootfs_path_at_pause,omitempty"`
 	VsockPathAtPause  string            `json:"vsock_path_at_pause"`
 	TapNameAtPause    string            `json:"tap_name_at_pause"`
+	CheckpointRef     string            `json:"checkpoint_ref,omitempty"`
 }
 
 func recordFromSession(s *Session) pausedRecord {
@@ -58,6 +60,7 @@ func recordFromSession(s *Session) pausedRecord {
 		RootfsPathAtPause: s.RootfsPathAtPause,
 		VsockPathAtPause:  s.VsockPathAtPause,
 		TapNameAtPause:    s.TapNameAtPause,
+		CheckpointRef:     s.CheckpointRef,
 	}
 }
 
@@ -90,6 +93,7 @@ func (r pausedRecord) toSession() *Session {
 		RootfsPathAtPause: r.RootfsPathAtPause,
 		VsockPathAtPause:  r.VsockPathAtPause,
 		TapNameAtPause:    r.TapNameAtPause,
+		CheckpointRef:     r.CheckpointRef,
 	}
 }
 

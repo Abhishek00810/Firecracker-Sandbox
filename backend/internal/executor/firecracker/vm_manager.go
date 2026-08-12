@@ -692,6 +692,28 @@ func (f *FireCrackerManager) Snapshot(ctx context.Context, vmID, snapPath, memPa
 	})
 }
 
+// ResumeLive reverses Snapshot's vCPU pause without replacing the Firecracker
+// process. It is used when a durable checkpoint upload fails before teardown.
+func (f *FireCrackerManager) ResumeLive(ctx context.Context, vmID string) error {
+	f.mu.RLock()
+	vm, exists := f.Vms[vmID]
+	f.mu.RUnlock()
+	if !exists {
+		return fmt.Errorf("VM %s not found", vmID)
+	}
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+				return net.Dial("unix", vm.SocketPath)
+			},
+		},
+	}
+	if err := f.patchJSON(client, "http://localhost/vm", VMStateChange{State: "Resumed"}); err != nil {
+		return fmt.Errorf("failed to resume VM: %w", err)
+	}
+	return nil
+}
+
 // LoadFromSnapshot restores a fresh pool VM from the golden template, cloning the
 // golden writable disk so every VM starts identical but can diverge.
 func (f *FireCrackerManager) LoadFromSnapshot(ctx context.Context, cfg VMConfig, tmpl *SnapshotTemplate) (*MicroVM, error) {
