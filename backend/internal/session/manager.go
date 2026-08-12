@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"backend/internal/cgroup"
+	"backend/internal/checkpoint"
 	"backend/internal/executor"
 	"backend/internal/executor/firecracker"
 	"backend/internal/terminal"
@@ -45,6 +46,10 @@ type MeterSample struct {
 // MeterHook receives raw usage deltas from the accrual ticker to persist (usage_meters).
 type MeterHook func(MeterSample)
 
+type CheckpointWriter interface {
+	Save(context.Context, checkpoint.Input) (string, error)
+}
+
 type Manager struct {
 	store         *Store
 	onState       StateHook
@@ -65,6 +70,7 @@ type Manager struct {
 	meterLast     map[string]time.Time
 	meterTotals   map[string]MeterSample
 	maxTerminals  int
+	checkpoints   CheckpointWriter
 }
 
 type createLock struct {
@@ -126,6 +132,10 @@ func (m *Manager) SetMaxTerminalsPerSandbox(maxTerminals int) {
 	if maxTerminals > 0 {
 		m.maxTerminals = maxTerminals
 	}
+}
+
+func (m *Manager) SetCheckpointWriter(writer CheckpointWriter) {
+	m.checkpoints = writer
 }
 
 // meterTicker accrues RAW resource-time for every live session once a minute and hands each
@@ -746,6 +756,24 @@ func (m *Manager) pause(ctx context.Context, sessionID string, idleCheckAt time.
 	if err := m.vmManager.Snapshot(ctx, vmID, snapPath, memPath); err != nil {
 		return fmt.Errorf("snapshot for pause: %w", err)
 	}
+	if m.checkpoints != nil {
+		checkpointRef, err := m.checkpoints.Save(ctx, checkpoint.Input{
+			SandboxID:        sessionID,
+			VCPUs:            sess.VCPUs,
+			MemoryMB:         sess.MemoryMB,
+			DiskGB:           sess.DiskGB,
+			RootfsPath:       sess.RootfsPathAtPause,
+			VsockPath:        sess.VsockPathAtPause,
+			TapName:          sess.TapNameAtPause,
+			SnapshotPath:     snapPath,
+			MemoryPath:       memPath,
+			WritableDiskPath: sess.WritableDiskPath,
+		})
+		if err != nil {
+			return m.rollbackFailedCheckpoint(ctx, sess, vmID, snapPath, memPath, err)
+		}
+		sess.CheckpointRef = checkpointRef
+	}
 	m.meterSession(sess, StateActive, time.Now())
 
 	// Detach from the pool so its capacity slot is freed, tear the VM down keeping the
@@ -776,6 +804,28 @@ func (m *Manager) pause(ctx context.Context, sessionID string, idleCheckAt time.
 	}
 	slog.Info("session paused", "session_id", sessionID, "ms", time.Since(t0).Milliseconds())
 	return nil
+}
+
+func (m *Manager) rollbackFailedCheckpoint(ctx context.Context, sess *Session, vmID, snapPath, memPath string, uploadErr error) error {
+	if err := m.vmManager.ResumeLive(ctx, vmID); err != nil {
+		return fmt.Errorf("durable checkpoint failed: %v; resume live VM: %w", uploadErr, err)
+	}
+	time.Sleep(500 * time.Millisecond)
+	client := firecracker.NewVsockClient(sess.VM.VsockPath)
+	conn, err := client.Connect()
+	if err != nil {
+		return fmt.Errorf("durable checkpoint failed: %v; reconnect resumed VM: %w", uploadErr, err)
+	}
+	if len(sess.Env) > 0 {
+		if err := client.SetEnvOnConn(conn, sess.Env); err != nil {
+			conn.Close()
+			return fmt.Errorf("durable checkpoint failed: %v; restore resumed VM environment: %w", uploadErr, err)
+		}
+	}
+	sess.VsockConn = conn
+	os.Remove(snapPath)
+	os.Remove(memPath)
+	return fmt.Errorf("durable checkpoint failed; sandbox resumed: %w", uploadErr)
 }
 
 // Resume restores a paused session from its own snapshot, reattaching its writable disk

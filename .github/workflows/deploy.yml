@@ -84,6 +84,7 @@ jobs:
               - 'backend/internal/worker/**'
               - 'backend/internal/bootstrap/**'
               - 'backend/internal/cgroup/**'
+              - 'backend/internal/checkpoint/**'
               - 'backend/internal/template/**'
               - 'backend/internal/vmsize/**'
               - 'backend/internal/workerplane/**'

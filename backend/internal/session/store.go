@@ -52,6 +52,7 @@ type Session struct {
 	RootfsPathAtPause string // immutable lower rootfs used by this snapshot
 	VsockPathAtPause  string // vsock UDS path baked into the session snapshot
 	TapNameAtPause    string // host TAP name baked into the session snapshot
+	CheckpointRef     string // durable checkpoint manifest key; local paths remain the phase-1 resume source
 }
 
 type Store struct {

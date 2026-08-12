@@ -5,12 +5,14 @@ package main
 
 import (
 	"backend/internal/cgroup"
+	"backend/internal/checkpoint"
 	"backend/internal/executor/firecracker"
 	"backend/internal/metering"
 	"backend/internal/orchestrator"
 	"backend/internal/plane"
 	workerv1 "backend/internal/rpc/worker/v1"
 	"backend/internal/session"
+	"backend/internal/template"
 	"backend/internal/vmsize"
 	"backend/internal/worker"
 	"backend/internal/workerplane/host"
@@ -298,6 +300,22 @@ func main() {
 		onState,
 		onMeter,
 	)
+	if account := env("BLOB_STORAGE_ACCOUNT", ""); account != "" && env("SANDBOX_CHECKPOINTS_ENABLED", "true") != "false" {
+		store, err := template.NewAzureBlobStore(account, env("BLOB_SECRET_KEY", ""), env("SANDBOX_CHECKPOINT_CONTAINER_NAME", env("BLOB_CONTAINER_NAME", "")))
+		if err != nil {
+			slog.Error("configure durable sandbox checkpoints", "err", err)
+			os.Exit(1)
+		}
+		writer, err := checkpoint.NewWriter(store, env("SANDBOX_CHECKPOINT_PREFIX", "sandbox-checkpoints"))
+		if err != nil {
+			slog.Error("configure durable sandbox checkpoint writer", "err", err)
+			os.Exit(1)
+		}
+		sessionMgr.SetCheckpointWriter(writer)
+		slog.Info("durable sandbox checkpoints enabled", "container", env("SANDBOX_CHECKPOINT_CONTAINER_NAME", env("BLOB_CONTAINER_NAME", "")))
+	} else {
+		slog.Warn("durable sandbox checkpoints disabled; paused state remains worker-local")
+	}
 	sessionMgr.SetMaxTerminalsPerSandbox(envInt("WORKER_MAX_TERMINALS_PER_SANDBOX", 8))
 	for _, recovered := range sessionMgr.Sessions() {
 		admission.Restore(

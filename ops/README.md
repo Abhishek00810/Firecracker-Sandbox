@@ -59,6 +59,11 @@ mounted filesystem so the golden writable seed can be reflink-cloned.
 with a 10 GiB minimum), while `WORKER_DISK_CAP_GB` optionally imposes a lower
 operator ceiling.
 Normal deployments subsequently use `ops/worker/install.sh`.
+When `BLOB_STORAGE_ACCOUNT`, `BLOB_SECRET_KEY`, and `BLOB_CONTAINER_NAME` are
+present in `/etc/renderops/worker.env`, pause checkpoints are written to Blob
+under `sandbox-checkpoints/` by default. `SANDBOX_CHECKPOINTS_ENABLED=false`
+disables the write flow; `SANDBOX_CHECKPOINT_CONTAINER_NAME` and
+`SANDBOX_CHECKPOINT_PREFIX` override its destination.
 The advertised endpoint must be reachable only over the private network from
 the control plane and orchestrator; do not expose port `9876` to the internet.
 
