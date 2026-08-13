@@ -64,6 +64,11 @@ present in `/etc/renderops/worker.env`, pause checkpoints are written to Blob
 under `sandbox-checkpoints/` by default. `SANDBOX_CHECKPOINTS_ENABLED=false`
 disables the write flow; `SANDBOX_CHECKPOINT_CONTAINER_NAME` and
 `SANDBOX_CHECKPOINT_PREFIX` override its destination.
+
+Writable disks are stored as 4 MiB content-addressed chunks. A later pause
+reuses unchanged chunk references and uploads only chunks whose contents changed;
+sparse holes are omitted from the manifest. VM state and memory remain immutable
+per-generation artifacts.
 The advertised endpoint must be reachable only over the private network from
 the control plane and orchestrator; do not expose port `9876` to the internet.
 
