@@ -1,23 +1,30 @@
 package checkpoint
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path"
+	"sort"
 	"strings"
 	"time"
 
 	"backend/internal/template"
 
 	"github.com/google/uuid"
+	"golang.org/x/sys/unix"
 )
 
-const manifestVersion = 1
+const (
+	manifestVersion  = 2
+	defaultChunkSize = 4 * 1024 * 1024
+)
 
 // Input is the complete local state required to resume a paused sandbox.
 type Input struct {
@@ -52,6 +59,19 @@ type Artifact struct {
 	SHA256    string `json:"sha256"`
 }
 
+type DiskChunk struct {
+	Index     int64  `json:"index"`
+	Key       string `json:"key"`
+	SizeBytes int64  `json:"size_bytes"`
+	SHA256    string `json:"sha256"`
+}
+
+type WritableDisk struct {
+	LogicalSizeBytes int64       `json:"logical_size_bytes"`
+	ChunkSizeBytes   int64       `json:"chunk_size_bytes"`
+	Chunks           []DiskChunk `json:"chunks"`
+}
+
 // Manifest is committed only after every checkpoint artifact is durable.
 type Manifest struct {
 	Version      int            `json:"version"`
@@ -62,7 +82,7 @@ type Manifest struct {
 	Resume       ResumeMetadata `json:"resume"`
 	Snapshot     Artifact       `json:"snapshot"`
 	Memory       Artifact       `json:"memory"`
-	WritableDisk Artifact       `json:"writable_disk"`
+	WritableDisk WritableDisk   `json:"writable_disk"`
 }
 
 type activePointer struct {
@@ -75,9 +95,10 @@ type activePointer struct {
 
 // Writer publishes immutable checkpoint generations to an object store.
 type Writer struct {
-	store  template.ArtifactStore
-	prefix string
-	now    func() time.Time
+	store     template.ArtifactStore
+	prefix    string
+	chunkSize int64
+	now       func() time.Time
 }
 
 func NewWriter(store template.ArtifactStore, prefix string) (*Writer, error) {
@@ -88,11 +109,11 @@ func NewWriter(store template.ArtifactStore, prefix string) (*Writer, error) {
 	if prefix == "" || prefix == "." || prefix == ".." || strings.HasPrefix(prefix, "../") {
 		return nil, fmt.Errorf("invalid checkpoint prefix %q", prefix)
 	}
-	return &Writer{store: store, prefix: prefix, now: time.Now}, nil
+	return &Writer{store: store, prefix: prefix, chunkSize: defaultChunkSize, now: time.Now}, nil
 }
 
-// Save uploads the three resume artifacts and commits the manifest and active
-// pointer last. Partial generations are therefore never selected for recovery.
+// Save uploads VM state, memory, and only new writable-disk chunks, then commits
+// the manifest and active pointer last. Partial generations are never selected.
 func (w *Writer) Save(ctx context.Context, in Input) (string, error) {
 	if _, err := uuid.Parse(in.SandboxID); err != nil {
 		return "", fmt.Errorf("invalid sandbox id %q: %w", in.SandboxID, err)
@@ -113,7 +134,7 @@ func (w *Writer) Save(ctx context.Context, in Input) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("upload memory: %w", err)
 	}
-	writable, err := w.putFile(ctx, path.Join(base, "writable.ext4"), in.WritableDiskPath)
+	writable, err := w.putDisk(ctx, in.SandboxID, in.WritableDiskPath)
 	if err != nil {
 		return "", fmt.Errorf("upload writable disk: %w", err)
 	}
@@ -144,6 +165,131 @@ func (w *Writer) Save(ctx context.Context, in Input) (string, error) {
 		return "", fmt.Errorf("activate checkpoint: %w", err)
 	}
 	return manifestKey, nil
+}
+
+func (w *Writer) putDisk(ctx context.Context, sandboxID, filePath string) (WritableDisk, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return WritableDisk{}, fmt.Errorf("open %s: %w", filePath, err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return WritableDisk{}, fmt.Errorf("stat %s: %w", filePath, err)
+	}
+	if info.Size() <= 0 {
+		return WritableDisk{}, fmt.Errorf("writable disk %s is empty", filePath)
+	}
+
+	indices, err := allocatedChunkIndices(f, info.Size(), w.chunkSize)
+	if err != nil {
+		return WritableDisk{}, fmt.Errorf("scan sparse writable disk: %w", err)
+	}
+	previous := w.previousChunks(ctx, sandboxID)
+	chunks := make([]DiskChunk, 0, len(indices))
+	for _, index := range indices {
+		if err := ctx.Err(); err != nil {
+			return WritableDisk{}, err
+		}
+		offset := index * w.chunkSize
+		size := min(w.chunkSize, info.Size()-offset)
+		data := make([]byte, size)
+		if _, err := f.ReadAt(data, offset); err != nil && !errors.Is(err, io.EOF) {
+			return WritableDisk{}, fmt.Errorf("read disk chunk %d: %w", index, err)
+		}
+		if isZero(data) {
+			continue
+		}
+		hash := sha256.Sum256(data)
+		digest := hex.EncodeToString(hash[:])
+		key := path.Join(w.prefix, sandboxID, "disk-chunks", digest)
+		if old, ok := previous[index]; ok && old.SHA256 == digest {
+			key = old.Key
+		} else {
+			_, exists, err := w.store.Stat(ctx, key)
+			if err != nil {
+				return WritableDisk{}, fmt.Errorf("stat disk chunk %d: %w", index, err)
+			}
+			if !exists {
+				if err := w.store.Put(ctx, key, bytes.NewReader(data)); err != nil {
+					return WritableDisk{}, fmt.Errorf("upload disk chunk %d: %w", index, err)
+				}
+			}
+		}
+		chunks = append(chunks, DiskChunk{Index: index, Key: key, SizeBytes: size, SHA256: digest})
+	}
+	return WritableDisk{LogicalSizeBytes: info.Size(), ChunkSizeBytes: w.chunkSize, Chunks: chunks}, nil
+}
+
+func (w *Writer) previousChunks(ctx context.Context, sandboxID string) map[int64]DiskChunk {
+	result := make(map[int64]DiskChunk)
+	pointerReader, err := w.store.Get(ctx, path.Join(w.prefix, sandboxID, "latest.json"))
+	if err != nil {
+		return result
+	}
+	defer pointerReader.Close()
+	var pointer activePointer
+	if json.NewDecoder(pointerReader).Decode(&pointer) != nil || pointer.ManifestKey == "" {
+		return result
+	}
+	manifestReader, err := w.store.Get(ctx, pointer.ManifestKey)
+	if err != nil {
+		return result
+	}
+	defer manifestReader.Close()
+	var manifest Manifest
+	if json.NewDecoder(manifestReader).Decode(&manifest) != nil || manifest.Version < 2 {
+		return result
+	}
+	for _, chunk := range manifest.WritableDisk.Chunks {
+		result[chunk.Index] = chunk
+	}
+	return result
+}
+
+func allocatedChunkIndices(f *os.File, logicalSize, chunkSize int64) ([]int64, error) {
+	indices := make(map[int64]struct{})
+	for offset := int64(0); offset < logicalSize; {
+		data, err := unix.Seek(int(f.Fd()), offset, unix.SEEK_DATA)
+		if errors.Is(err, unix.ENXIO) {
+			break
+		}
+		if errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOTSUP) {
+			for index := int64(0); index*chunkSize < logicalSize; index++ {
+				indices[index] = struct{}{}
+			}
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		hole, err := unix.Seek(int(f.Fd()), data, unix.SEEK_HOLE)
+		if err != nil {
+			return nil, err
+		}
+		if hole > logicalSize {
+			hole = logicalSize
+		}
+		for index := data / chunkSize; index*chunkSize < hole; index++ {
+			indices[index] = struct{}{}
+		}
+		offset = hole
+	}
+	result := make([]int64, 0, len(indices))
+	for index := range indices {
+		result = append(result, index)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
+	return result, nil
+}
+
+func isZero(data []byte) bool {
+	for _, value := range data {
+		if value != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func (w *Writer) putFile(ctx context.Context, key, filePath string) (Artifact, error) {

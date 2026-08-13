@@ -52,8 +52,100 @@ func TestWriterCommitsPointerLast(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantHash := sha256.Sum256([]byte("user-data"))
-	if manifest.WritableDisk.SizeBytes != int64(len("user-data")) || manifest.WritableDisk.SHA256 != hex.EncodeToString(wantHash[:]) {
+	if manifest.Version != 2 || manifest.WritableDisk.LogicalSizeBytes != int64(len("user-data")) || len(manifest.WritableDisk.Chunks) != 1 || manifest.WritableDisk.Chunks[0].SHA256 != hex.EncodeToString(wantHash[:]) {
 		t.Fatalf("unexpected writable artifact: %+v", manifest.WritableDisk)
+	}
+}
+
+func TestWriterReusesUnchangedDiskChunks(t *testing.T) {
+	store := newRecordingStore()
+	writer, err := NewWriter(store, "sandbox-checkpoints")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer.chunkSize = 4
+	dir := t.TempDir()
+	input := Input{
+		SandboxID:        "a6846a48-db37-46bc-907a-3a9e15093603",
+		SnapshotPath:     writeTestFile(t, dir, "snap", "snap"),
+		MemoryPath:       writeTestFile(t, dir, "mem", "mem"),
+		WritableDiskPath: writeTestFile(t, dir, "disk", "abcdefgh"),
+	}
+	if _, err := writer.Save(context.Background(), input); err != nil {
+		t.Fatal(err)
+	}
+	firstChunkWrites := store.chunkWrites()
+	store.order = nil
+	if _, err := writer.Save(context.Background(), input); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.chunkWrites(); got != 0 {
+		t.Fatalf("unchanged disk uploaded %d chunks, want 0 (first generation uploaded %d)", got, firstChunkWrites)
+	}
+}
+
+func TestWriterUploadsOnlyChangedDiskChunk(t *testing.T) {
+	store := newRecordingStore()
+	writer, err := NewWriter(store, "sandbox-checkpoints")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer.chunkSize = 4
+	dir := t.TempDir()
+	disk := writeTestFile(t, dir, "disk", "abcdefgh")
+	input := Input{SandboxID: "a6846a48-db37-46bc-907a-3a9e15093603", SnapshotPath: writeTestFile(t, dir, "snap", "snap"), MemoryPath: writeTestFile(t, dir, "mem", "mem"), WritableDiskPath: disk}
+	if _, err := writer.Save(context.Background(), input); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(disk, []byte("abcdWXYZ"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store.order = nil
+	if _, err := writer.Save(context.Background(), input); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.chunkWrites(); got != 1 {
+		t.Fatalf("changed disk uploaded %d chunks, want 1", got)
+	}
+}
+
+func TestWriterOmitsSparseHoles(t *testing.T) {
+	store := newRecordingStore()
+	writer, err := NewWriter(store, "sandbox-checkpoints")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer.chunkSize = 4096
+	dir := t.TempDir()
+	disk := filepath.Join(dir, "disk")
+	f, err := os.Create(disk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(3 * writer.chunkSize); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt([]byte("changed"), 2*writer.chunkSize); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	manifestKey, err := writer.Save(context.Background(), Input{
+		SandboxID:        "a6846a48-db37-46bc-907a-3a9e15093603",
+		SnapshotPath:     writeTestFile(t, dir, "snap", "snap"),
+		MemoryPath:       writeTestFile(t, dir, "mem", "mem"),
+		WritableDiskPath: disk,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest Manifest
+	if err := json.Unmarshal(store.objects[manifestKey], &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.WritableDisk.Chunks) != 1 || manifest.WritableDisk.Chunks[0].Index != 2 {
+		t.Fatalf("chunks=%+v, want only index 2", manifest.WritableDisk.Chunks)
 	}
 }
 
@@ -110,8 +202,25 @@ func (s *recordingStore) Put(_ context.Context, key string, r io.Reader) error {
 	return err
 }
 
-func (s *recordingStore) Get(context.Context, string) (io.ReadCloser, error) {
-	return nil, template.ErrNotFound
+func (s *recordingStore) Get(_ context.Context, key string) (io.ReadCloser, error) {
+	b, ok := s.objects[key]
+	if !ok {
+		return nil, template.ErrNotFound
+	}
+	return io.NopCloser(strings.NewReader(string(b))), nil
 }
-func (s *recordingStore) Stat(context.Context, string) (int64, bool, error) { return 0, false, nil }
-func (s *recordingStore) List(context.Context, string) ([]string, error)    { return nil, nil }
+func (s *recordingStore) Stat(_ context.Context, key string) (int64, bool, error) {
+	b, ok := s.objects[key]
+	return int64(len(b)), ok, nil
+}
+func (s *recordingStore) List(context.Context, string) ([]string, error) { return nil, nil }
+
+func (s *recordingStore) chunkWrites() int {
+	count := 0
+	for _, key := range s.order {
+		if strings.Contains(key, "/disk-chunks/") {
+			count++
+		}
+	}
+	return count
+}
