@@ -381,6 +381,9 @@ jobs:
           WORKER_MEMORY_OVERCOMMIT_RATIO: ${{ vars.ORCHESTRATOR_MEMORY_OVERCOMMIT_RATIO || '1' }}
           WORKER_MAX_TERMINALS_PER_SANDBOX: ${{ vars.WORKER_MAX_TERMINALS_PER_SANDBOX || '8' }}
           CONTROL_PLANE_INTERNAL_URL: ${{ vars.CONTROL_PLANE_INTERNAL_URL || 'https://dev-api.renderops.com' }}
+          BLOB_STORAGE_ACCOUNT: ${{ secrets.BLOB_STORAGE_ACCOUNT }}
+          BLOB_CONTAINER_NAME: ${{ secrets.BLOB_CONTAINER_NAME }}
+          BLOB_SECRET_KEY: ${{ secrets.BLOB_SECRET_KEY }}
           ROOTFS_VERSION: ${{ github.sha }}
 
   # Wait for worker 1's health check before touching worker 2. A manual
@@ -431,4 +434,7 @@ jobs:
           WORKER_MEMORY_OVERCOMMIT_RATIO: ${{ vars.ORCHESTRATOR_MEMORY_OVERCOMMIT_RATIO || '1' }}
           WORKER_MAX_TERMINALS_PER_SANDBOX: ${{ vars.WORKER_MAX_TERMINALS_PER_SANDBOX || '8' }}
           CONTROL_PLANE_INTERNAL_URL: ${{ vars.CONTROL_PLANE_INTERNAL_URL || 'https://dev-api.renderops.com' }}
+          BLOB_STORAGE_ACCOUNT: ${{ secrets.BLOB_STORAGE_ACCOUNT }}
+          BLOB_CONTAINER_NAME: ${{ secrets.BLOB_CONTAINER_NAME }}
+          BLOB_SECRET_KEY: ${{ secrets.BLOB_SECRET_KEY }}
           ROOTFS_VERSION: ${{ github.sha }}
