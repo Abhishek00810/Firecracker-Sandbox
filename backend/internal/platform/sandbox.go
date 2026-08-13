@@ -68,7 +68,7 @@ func (c *Client) UpsertSandbox(ctx context.Context, sb Sandbox) {
 	if sb.APIKeyID != "" {
 		apiKeyID = sb.APIKeyID
 	}
-	_, err := c.pool.Exec(ctx, `INSERT INTO sandboxes (id,user_id,api_key_id,name,state,billing_model,vcpus,memory_mb,disk_gb,internet,idle_timeout_ms,expires_at,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now()+($11*interval '1 millisecond'),$12) ON CONFLICT (id) DO UPDATE SET user_id=EXCLUDED.user_id,api_key_id=EXCLUDED.api_key_id,name=EXCLUDED.name,state=EXCLUDED.state,billing_model=EXCLUDED.billing_model,vcpus=EXCLUDED.vcpus,memory_mb=EXCLUDED.memory_mb,disk_gb=EXCLUDED.disk_gb,internet=EXCLUDED.internet,idle_timeout_ms=EXCLUDED.idle_timeout_ms,expires_at=EXCLUDED.expires_at,metadata=EXCLUDED.metadata,updated_at=now()`, sb.ID, sb.UserID, apiKeyID, sb.Name, sb.State, sb.BillingModel, sb.VCPUs, sb.MemoryMB, sb.DiskGB, sb.Internet, sb.IdleTimeoutMs, metadata)
+	_, err := c.pool.Exec(ctx, `INSERT INTO sandboxes (id,user_id,api_key_id,name,state,billing_model,vcpus,memory_mb,disk_gb,internet,idle_timeout_ms,expires_at,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now()+($11::bigint*interval '1 millisecond'),$12) ON CONFLICT (id) DO UPDATE SET user_id=EXCLUDED.user_id,api_key_id=EXCLUDED.api_key_id,name=EXCLUDED.name,state=EXCLUDED.state,billing_model=EXCLUDED.billing_model,vcpus=EXCLUDED.vcpus,memory_mb=EXCLUDED.memory_mb,disk_gb=EXCLUDED.disk_gb,internet=EXCLUDED.internet,idle_timeout_ms=EXCLUDED.idle_timeout_ms,expires_at=EXCLUDED.expires_at,metadata=EXCLUDED.metadata,updated_at=now()`, sb.ID, sb.UserID, apiKeyID, sb.Name, sb.State, sb.BillingModel, sb.VCPUs, sb.MemoryMB, sb.DiskGB, sb.Internet, sb.IdleTimeoutMs, metadata)
 	if err != nil {
 		slog.Warn("sandbox upsert failed", "err", err)
 	}
@@ -123,7 +123,7 @@ func (c *Client) InsertSandbox(ctx context.Context, sb Sandbox) error {
 			id,user_id,api_key_id,name,state,billing_model,
 			vcpus,memory_mb,disk_gb,internet,idle_timeout_ms,expires_at,metadata
 		)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now()+($11*interval '1 millisecond'),$12)`,
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now()+($11::bigint*interval '1 millisecond'),$12)`,
 		sb.ID,
 		sb.UserID,
 		apiKeyID,
