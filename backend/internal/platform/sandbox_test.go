@@ -1,6 +1,9 @@
 package platform
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestMarshalSandboxMetadataUsesObjectForNil(t *testing.T) {
 	metadata, err := marshalSandboxMetadata(nil)
@@ -19,5 +22,19 @@ func TestMarshalSandboxMetadataPreservesObject(t *testing.T) {
 	}
 	if string(metadata) != `{"purpose":"test"}` {
 		t.Fatalf("metadata=%s", metadata)
+	}
+}
+
+func TestSandboxInsertQueriesCastIdleTimeoutConsistently(t *testing.T) {
+	for name, query := range map[string]string{
+		"insert": insertSandboxQuery,
+		"upsert": upsertSandboxQuery,
+	} {
+		if count := strings.Count(query, "$11::integer"); count != 2 {
+			t.Errorf("%s query has %d explicit idle-timeout casts, want 2", name, count)
+		}
+		if strings.Contains(query, "$11::bigint") {
+			t.Errorf("%s query casts the integer column parameter to bigint", name)
+		}
 	}
 }
