@@ -25,7 +25,15 @@ const (
 	// creating one timer goroutine per sandbox.
 	reaperInterval = 10 * time.Second
 	pauseTTL       = 7 * 24 * time.Hour
+	consoleLogTail = 16 * 1024
 )
+
+func logTail(value string) string {
+	if len(value) <= consoleLogTail {
+		return value
+	}
+	return value[len(value)-consoleLogTail:]
+}
 
 // StateHook is called on every session lifecycle transition — manual (endpoint) AND
 // automatic (reaper idle-pause, on-demand resume, TTL destroy) — so an external store
@@ -937,6 +945,8 @@ func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 		}
 		if cleanupErr := m.vmManager.TeardownKeepDisk(ctx, vm.ID); cleanupErr != nil {
 			slog.Error("failed to clean up resumed VM after guest readiness failure", "vm_id", vm.ID, "err", cleanupErr)
+		} else {
+			slog.Error("guest runtime reset console", "session_id", sessionID, "vm_id", vm.ID, "stdout", logTail(vm.Stdout.String()), "stderr", logTail(vm.Stderr.String()))
 		}
 		return fmt.Errorf("verify guest agent on resume: %w", err)
 	}
