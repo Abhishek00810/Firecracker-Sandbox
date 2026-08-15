@@ -184,9 +184,17 @@ func evictKernel(language string) {
 // consistent cross-language contract we reset in-memory interpreter state on every pause
 // (the filesystem, installed packages, and re-injected env vars still persist).
 func resetRuntimes() {
+	totalStarted := time.Now()
+	log.Printf("runtime reset phase started phase=terminals")
+	phaseStarted := time.Now()
 	terminals.CloseAll()
+	log.Printf("runtime reset phase completed phase=terminals duration_ms=%d", time.Since(phaseStarted).Milliseconds())
 
+	log.Printf("runtime reset phase started phase=python_kernels stage=waiting_for_lock")
+	phaseStarted = time.Now()
 	kernelsMu.Lock()
+	log.Printf("runtime reset phase progress phase=python_kernels stage=lock_acquired wait_ms=%d", time.Since(phaseStarted).Milliseconds())
+	phaseStarted = time.Now()
 	for lang, kb := range kernels {
 		if kb != nil && kb.cmd != nil && kb.cmd.Process != nil {
 			kb.cmd.Process.Kill()
@@ -194,15 +202,25 @@ func resetRuntimes() {
 		delete(kernels, lang)
 	}
 	kernelsMu.Unlock()
+	log.Printf("runtime reset phase completed phase=python_kernels duration_ms=%d", time.Since(phaseStarted).Milliseconds())
 
+	log.Printf("runtime reset phase started phase=node_bridge stage=waiting_for_lock")
+	phaseStarted = time.Now()
 	nodeBridgeMu.Lock()
+	log.Printf("runtime reset phase progress phase=node_bridge stage=lock_acquired wait_ms=%d", time.Since(phaseStarted).Milliseconds())
+	phaseStarted = time.Now()
 	if nodeBridge != nil && nodeBridge.cmd != nil && nodeBridge.cmd.Process != nil {
 		nodeBridge.cmd.Process.Kill()
 	}
 	nodeBridge = nil
 	nodeBridgeMu.Unlock()
+	log.Printf("runtime reset phase completed phase=node_bridge duration_ms=%d", time.Since(phaseStarted).Milliseconds())
 
+	log.Printf("runtime reset phase started phase=shell")
+	phaseStarted = time.Now()
 	evictShell()
+	log.Printf("runtime reset phase completed phase=shell duration_ms=%d", time.Since(phaseStarted).Milliseconds())
+	log.Printf("runtime reset completed duration_ms=%d", time.Since(totalStarted).Milliseconds())
 }
 
 // ─── Node Bridge ──────────────────────────────────────────────────────────────

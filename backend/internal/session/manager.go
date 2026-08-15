@@ -927,7 +927,10 @@ func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 	// Reset all stateful runtimes so in-memory interpreter state is consistently cleared on
 	// pause across every language (a snapshot restore can also leave ZMQ Python kernels
 	// degraded). Then re-inject the session's env so config still persists across the pause.
+	resetStarted := time.Now()
+	slog.Info("guest runtime reset started", "session_id", sessionID, "vm_id", vm.ID)
 	if err := vsockClient.ResetRuntimesOnConn(conn); err != nil {
+		slog.Error("guest runtime reset failed", "session_id", sessionID, "vm_id", vm.ID, "duration_ms", time.Since(resetStarted).Milliseconds(), "err", err)
 		_ = conn.Close()
 		if cg != nil {
 			cg.Destroy()
@@ -937,6 +940,7 @@ func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 		}
 		return fmt.Errorf("verify guest agent on resume: %w", err)
 	}
+	slog.Info("guest runtime reset completed", "session_id", sessionID, "vm_id", vm.ID, "duration_ms", time.Since(resetStarted).Milliseconds())
 	msReset := time.Since(t0).Milliseconds()
 	if len(sess.Env) > 0 {
 		if err := vsockClient.SetEnvOnConn(conn, sess.Env); err != nil {
