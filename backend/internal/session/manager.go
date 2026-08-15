@@ -50,27 +50,32 @@ type CheckpointWriter interface {
 	Save(context.Context, checkpoint.Input) (string, error)
 }
 
+type CheckpointReader interface {
+	Restore(context.Context, string, string, checkpoint.RestorePaths) (checkpoint.RestoreResult, error)
+}
+
 type Manager struct {
-	store         *Store
-	onState       StateHook
-	onMeter       MeterHook
-	vmManager     *firecracker.FireCrackerManager
-	template      *firecracker.SnapshotTemplate
-	idleTimeout   time.Duration
-	maxLifetime   time.Duration
-	vmConfig      firecracker.VMConfig
-	sizePools     map[string]*firecracker.VMPool           // keyed by vmsize.Key — one pool per resource shape
-	sizeTemplates map[string]*firecracker.SnapshotTemplate // keyed by vmsize.Key — per-size baked device names (for pause/resume)
-	pauseDir      string                                   // disk-backed dir for per-session pause snapshots (NOT /dev/shm)
-	manifestPath  string                                   // recovery manifest of paused sessions
-	manifestMu    sync.Mutex                               // serializes concurrent pause manifest rewrites
-	createLocksMu sync.Mutex
-	createLocks   map[string]*createLock
-	meterMu       sync.Mutex
-	meterLast     map[string]time.Time
-	meterTotals   map[string]MeterSample
-	maxTerminals  int
-	checkpoints   CheckpointWriter
+	store            *Store
+	onState          StateHook
+	onMeter          MeterHook
+	vmManager        *firecracker.FireCrackerManager
+	template         *firecracker.SnapshotTemplate
+	idleTimeout      time.Duration
+	maxLifetime      time.Duration
+	vmConfig         firecracker.VMConfig
+	sizePools        map[string]*firecracker.VMPool           // keyed by vmsize.Key — one pool per resource shape
+	sizeTemplates    map[string]*firecracker.SnapshotTemplate // keyed by vmsize.Key — per-size baked device names (for pause/resume)
+	pauseDir         string                                   // disk-backed dir for per-session pause snapshots (NOT /dev/shm)
+	manifestPath     string                                   // recovery manifest of paused sessions
+	manifestMu       sync.Mutex                               // serializes concurrent pause manifest rewrites
+	createLocksMu    sync.Mutex
+	createLocks      map[string]*createLock
+	meterMu          sync.Mutex
+	meterLast        map[string]time.Time
+	meterTotals      map[string]MeterSample
+	maxTerminals     int
+	checkpoints      CheckpointWriter
+	checkpointReader CheckpointReader
 }
 
 type createLock struct {
@@ -136,6 +141,10 @@ func (m *Manager) SetMaxTerminalsPerSandbox(maxTerminals int) {
 
 func (m *Manager) SetCheckpointWriter(writer CheckpointWriter) {
 	m.checkpoints = writer
+}
+
+func (m *Manager) SetCheckpointReader(reader CheckpointReader) {
+	m.checkpointReader = reader
 }
 
 // meterTicker accrues RAW resource-time for every live session once a minute and hands each
@@ -841,6 +850,11 @@ func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 	if sess.State == StateActive {
 		return m.notifyState(sess, "active")
 	}
+	if !fileExists(sess.SnapPath) || !fileExists(sess.MemPath) || !fileExists(sess.WritableDiskPath) {
+		if err := m.hydrateCheckpoint(ctx, sess); err != nil {
+			return fmt.Errorf("restore durable checkpoint: %w", err)
+		}
+	}
 
 	t0 := time.Now()
 	rootfsPath := sess.RootfsPathAtPause
@@ -963,6 +977,50 @@ func (m *Manager) Resume(ctx context.Context, sessionID string) error {
 		"ms", time.Since(t0).Milliseconds(),
 		"restore_ms", msRestore, "preconnect_ms", msPreConnect,
 		"connect_ms", msConnect, "reset_ms", msReset, "setenv_ms", msSetEnv)
+	return nil
+}
+
+func (m *Manager) hydrateCheckpoint(ctx context.Context, sess *Session) error {
+	if m.checkpointReader == nil {
+		return fmt.Errorf("local checkpoint artifacts are missing and durable checkpoint reads are disabled")
+	}
+	pauseDir := filepath.Join(m.pauseDir, sess.ID)
+	paths := checkpoint.RestorePaths{
+		Snapshot:     filepath.Join(pauseDir, "snap"),
+		Memory:       filepath.Join(pauseDir, "mem"),
+		WritableDisk: filepath.Join(m.vmManager.WritableDiskRoot(), "writable-"+sess.ID+".ext4"),
+	}
+	result, err := m.checkpointReader.Restore(ctx, sess.ID, sess.CheckpointRef, paths)
+	if err != nil {
+		return err
+	}
+	cleanup := func() {
+		_ = os.Remove(paths.Snapshot)
+		_ = os.Remove(paths.Memory)
+		_ = os.Remove(paths.WritableDisk)
+	}
+	if (sess.VCPUs != 0 && result.Resources.VCPUs != sess.VCPUs) ||
+		(sess.MemoryMB != 0 && result.Resources.MemoryMB != sess.MemoryMB) ||
+		(sess.DiskGB != 0 && result.Resources.DiskGB != sess.DiskGB) {
+		cleanup()
+		return fmt.Errorf("checkpoint resource metadata does not match session")
+	}
+	if m.vmManager.FCUid > 0 {
+		for _, name := range []string{paths.Snapshot, paths.Memory, paths.WritableDisk} {
+			if err := os.Chown(name, m.vmManager.FCUid, m.vmManager.FCGid); err != nil {
+				cleanup()
+				return fmt.Errorf("set Firecracker ownership on %s: %w", name, err)
+			}
+		}
+	}
+	sess.SnapPath = paths.Snapshot
+	sess.MemPath = paths.Memory
+	sess.WritableDiskPath = paths.WritableDisk
+	sess.RootfsPathAtPause = result.Resume.RootfsPath
+	sess.VsockPathAtPause = result.Resume.VsockPath
+	sess.TapNameAtPause = result.Resume.TapName
+	sess.CheckpointRef = result.ManifestKey
+	m.persistManifest()
 	return nil
 }
 

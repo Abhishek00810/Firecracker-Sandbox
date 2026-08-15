@@ -311,7 +311,13 @@ func main() {
 			slog.Error("configure durable sandbox checkpoint writer", "err", err)
 			os.Exit(1)
 		}
+		reader, err := checkpoint.NewReader(store, env("SANDBOX_CHECKPOINT_PREFIX", "sandbox-checkpoints"))
+		if err != nil {
+			slog.Error("configure durable sandbox checkpoint reader", "err", err)
+			os.Exit(1)
+		}
 		sessionMgr.SetCheckpointWriter(writer)
+		sessionMgr.SetCheckpointReader(reader)
 		slog.Info("durable sandbox checkpoints enabled", "container", env("SANDBOX_CHECKPOINT_CONTAINER_NAME", env("BLOB_CONTAINER_NAME", "")))
 	} else {
 		slog.Warn("durable sandbox checkpoints disabled; paused state remains worker-local")

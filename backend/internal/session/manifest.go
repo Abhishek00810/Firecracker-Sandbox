@@ -13,9 +13,8 @@ import (
 // the manifest is the index that lets a fresh process find and resume them. When
 // configured, CheckpointRef also identifies the durable Blob generation.
 //
-// Scope (v1): this covers process restart / reboot, where the disk survives. It does NOT
-// still requires local files for resume; restoring missing files from CheckpointRef
-// is the separate read-flow phase. Records pointing at missing files are dropped.
+// Local artifacts are preferred. If they are missing but CheckpointRef is present, the
+// durable checkpoint reader hydrates them before Firecracker restore.
 
 type pausedRecord struct {
 	ID                string            `json:"id"`
@@ -120,9 +119,8 @@ func writeManifest(path string, paused []*Session) error {
 	return nil
 }
 
-// readManifest loads paused-session records. A missing file is not an error (no paused
-// sessions). Records whose snapshot/disk files no longer exist (e.g. NVMe wiped on a
-// stop-start) are dropped so we never try to resume a sandbox whose state is gone.
+// readManifest loads paused-session records. A missing file is not an error. Records with
+// missing local artifacts remain recoverable when they carry a durable CheckpointRef.
 func readManifest(path string) ([]*Session, error) {
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
@@ -137,8 +135,8 @@ func readManifest(path string) ([]*Session, error) {
 	}
 	sessions := make([]*Session, 0, len(records))
 	for _, r := range records {
-		if !fileExists(r.SnapPath) || !fileExists(r.MemPath) || !fileExists(r.WritableDiskPath) {
-			continue // state is gone (host/disk loss) — cannot resume; drop it
+		if (!fileExists(r.SnapPath) || !fileExists(r.MemPath) || !fileExists(r.WritableDiskPath)) && r.CheckpointRef == "" {
+			continue
 		}
 		sessions = append(sessions, r.toSession())
 	}
