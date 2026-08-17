@@ -1,559 +1,556 @@
-# API Reference
+# RenderOps API Reference
 
-Complete API documentation for the Firecracker Sandbox Engine.
+This document describes the API implemented by
+`backend/cmd/control-plane`. The development base URL is:
 
----
-
-## Base URL
-
-```
-http://localhost:8080
+```text
+https://dev-api.renderops.com
 ```
 
----
+Examples use `$RENDEROPS_API_URL`, `$RENDEROPS_API_KEY`, and `$SANDBOX_ID`.
 
-## Endpoints
+## Conventions
 
-### 1. Health Check
+### Authentication
 
-**Endpoint:** `GET /health`
+Every public management REST route except `GET /health` requires a bearer
+credential:
 
-**Description:** Check if the server is running and healthy.
+```http
+Authorization: Bearer ro_live_<api-key>
+```
 
-**Request:**
+The dashboard may instead send an opaque Better Auth session token. API keys
+are stored only as SHA-256 hashes and resolved with their owning profile. The
+server, not the request, selects execution policy and billing configuration.
+
+An API key may be rejected when it is missing, inactive, expired, unknown, or
+its profile has no available balance. Successful key lookups are cached by the
+control-plane process for 60 seconds.
+
+The terminal WebSocket upgrade uses its short-lived single-use attachment
+token instead. Preview traffic uses a signed preview token/cookie at the
+preview gateway. Private service routes use the credentials documented below.
+
+### Headers
+
+```http
+Content-Type: application/json
+Authorization: Bearer <credential>
+X-Request-ID: <optional caller-provided id>
+```
+
+The logging middleware returns an `X-Request-ID`. Structured responses also
+include `request_id` where the handler supports it.
+
+### Error bodies
+
+Newer handlers return:
+
+```json
+{
+  "status": "error",
+  "code": "no_capacity",
+  "message": "no healthy worker has sufficient capacity",
+  "request_id": "4e245aae-1694-4dd5-b944-7180bf480fe8"
+}
+```
+
+Some legacy session branches still return plain-text `http.Error` bodies.
+Clients must use the HTTP status as the primary error signal and should not
+depend on every error being JSON until the response envelope is unified.
+
+### Sandbox states
+
+The durable lifecycle may pass through:
+
+```text
+scheduling -> provisioning -> active -> paused -> resuming -> active
+                                             \-> destroying -> destroyed
+```
+
+Failed lifecycle operations may set `error`. Public operations only succeed
+when the current state permits the requested transition.
+
+## Health
+
+### `GET /health`
+
+Authentication is not required.
+
 ```bash
-curl http://localhost:8080/health
+curl "$RENDEROPS_API_URL/health"
 ```
 
-**Response:**
 ```json
 {
   "status": "ok",
-  "message": "Server is healthy and is rocking!!!"
+  "message": "control plane is healthy",
+  "role": "control-plane"
 }
 ```
 
-**Status Codes:**
-- `200 OK`: Server is healthy
+This proves that the HTTP process is responding. It is not a transitive check
+of PostgreSQL, the orchestrator, every worker, or template readiness.
 
----
+## Sandboxes
 
-### 2. Execute Code
+### `POST /session`
 
-**Endpoint:** `POST /execute`
+Creates a durable sandbox row, asks the orchestrator for a healthy compatible
+worker, reserves worker capacity, boots a Firecracker microVM, and returns only
+after the guest agent is ready.
 
-**Description:** Execute code in a secure, isolated Firecracker microVM.
-
-#### Request
-
-**Headers:**
+```bash
+curl -sS -X POST "$RENDEROPS_API_URL/session" \
+  -H "Authorization: Bearer $RENDEROPS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "dependency-check",
+    "size": "nano",
+    "metadata": {"project": "docs"},
+    "env": {"APP_ENV": "dev"},
+    "network": {"internet": true},
+    "idle_timeout_s": 120,
+    "max_lifetime_s": 3600
+  }'
 ```
-Content-Type: application/json
-```
 
-**Body:**
+Request fields:
+
+| Field | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `name` | string | no | Dashboard label; defaults to `sandbox` |
+| `metadata` | object | no | Caller-owned labels stored with the sandbox |
+| `env` | object of strings | no | Environment injected into guest executions |
+| `size` | string | no | `nano`, `small`, or `medium`; defaults to `nano` |
+| `resources` | object | no | Exact canonical shape; takes precedence over `size` |
+| `network.internet` | boolean | no | Enables guest egress; defaults to `true` |
+| `idle_timeout_s` | integer | no | Auto-pause interval; capped by policy/lifetime |
+| `max_lifetime_s` | integer | no | Maximum lifetime; capped by server policy |
+
+Canonical shapes:
+
+| Size | `vcpus` | `memory_mb` | `disk_gb` |
+| --- | ---: | ---: | ---: |
+| `nano` | 1 | 256 | 1 |
+| `small` | 2 | 512 | 10 |
+| `medium` | 2 | 1024 | 20 |
+
+An explicit request must match one row exactly:
+
 ```json
 {
-  "code": "string",      // Required: Code to execute
-  "language": "string"   // Required: Programming language
+  "resources": {
+    "vcpus": 2,
+    "memory_mb": 512,
+    "disk_gb": 10
+  }
 }
 ```
 
-**Supported Languages:**
-- `python` - Python 3.x
-- `nodejs` - Node.js (latest)
-- `bash` - Bash shell
-- `go` - Go compiler
+Success: `201 Created`
 
-#### Response
-
-**Success Response:**
 ```json
 {
-  "output": {
-    "output": "string",              // Combined stdout + stderr
-    "duration": 0.0,                 // Execution time in seconds (float)
-    "exit_code": 0,                  // Process exit code (0 = success)
-    "termination_reason": "success"  // Why execution stopped
-  },
   "status": "success",
-  "error": ""                        // Empty on success
-}
-```
-
-**Error Response:**
-```json
-{
-  "output": {
-    "output": "string",
-    "duration": 0.0,
-    "exit_code": 1,
-    "termination_reason": "runtime_error"
+  "request_id": "4e245aae-1694-4dd5-b944-7180bf480fe8",
+  "session": {
+    "session_id": "3ecb0221-faf1-4976-a8ae-6fd6262de59a",
+    "state": "active",
+    "billing_model": "payg",
+    "created_at": "2026-08-17T11:00:00Z",
+    "last_used": "2026-08-17T11:00:00Z",
+    "expires_at": "2026-08-17T11:02:00Z"
   },
-  "status": "error",
-  "error": "Execution failed with exit code 1"
-}
-```
-
-#### Termination Reasons
-
-| Reason | Description | Exit Code |
-|--------|-------------|-----------|
-| `success` | Code executed successfully | 0 |
-| `runtime_error` | Code crashed or threw error | Non-zero |
-| `timeout` | Exceeded 30-second limit | Varies |
-| `oom_kill` | Out of memory (>256MB) | 137 |
-
-#### Status Codes
-
-- `200 OK`: Execution completed (check `status` field for success/error)
-- `400 Bad Request`: Invalid JSON or missing required fields
-- `503 Service Unavailable`: Queue is full, retry later
-
----
-
-## Usage Examples
-
-### Python Examples
-
-#### 1. Hello World
-
-```bash
-curl -X POST http://localhost:8080/execute \
-  -H "Content-Type: application/json" \
-  -d '{
-    "code": "print(\"Hello, World!\")",
-    "language": "python"
-  }'
-```
-
-**Response:**
-```json
-{
-  "output": {
-    "output": "Hello, World!\n",
-    "duration": 0.082,
-    "exit_code": 0,
-    "termination_reason": "success"
+  "limits": {
+    "max_sessions": 100,
+    "active_sessions": 0,
+    "max_execution_ms": 30000,
+    "idle_timeout_ms": 120000
   },
-  "status": "success"
-}
-```
-
----
-
-#### 2. Multi-line Python
-
-```bash
-curl -X POST http://localhost:8080/execute \
-  -H "Content-Type: application/json" \
-  -d '{
-    "code": "import math\nfor i in range(5):\n    print(f\"Square of {i} = {i**2}\")",
-    "language": "python"
-  }'
-```
-
-**Response:**
-```json
-{
-  "output": {
-    "output": "Square of 0 = 0\nSquare of 1 = 1\nSquare of 2 = 4\nSquare of 3 = 9\nSquare of 4 = 16\n",
-    "duration": 0.095,
-    "exit_code": 0,
-    "termination_reason": "success"
-  },
-  "status": "success"
-}
-```
-
----
-
-#### 3. Error Handling
-
-```bash
-curl -X POST http://localhost:8080/execute \
-  -H "Content-Type: application/json" \
-  -d '{
-    "code": "print(1/0)",
-    "language": "python"
-  }'
-```
-
-**Response:**
-```json
-{
-  "output": {
-    "output": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\nZeroDivisionError: division by zero\n",
-    "duration": 0.078,
-    "exit_code": 1,
-    "termination_reason": "success"
-  },
-  "status": "error",
-  "error": "Execution failed with exit code 1"
-}
-```
-
----
-
-### Node.js Examples
-
-#### 1. Console Output
-
-```bash
-curl -X POST http://localhost:8080/execute \
-  -H "Content-Type: application/json" \
-  -d '{
-    "code": "console.log(\"Node.js says hello!\");\nconsole.log(Math.PI);",
-    "language": "nodejs"
-  }'
-```
-
-**Response:**
-```json
-{
-  "output": {
-    "output": "Node.js says hello!\n3.141592653589793\n",
-    "duration": 0.112,
-    "exit_code": 0,
-    "termination_reason": "success"
-  },
-  "status": "success"
-}
-```
-
----
-
-#### 2. Array Operations
-
-```bash
-curl -X POST http://localhost:8080/execute \
-  -H "Content-Type: application/json" \
-  -d '{
-    "code": "const arr = [1, 2, 3, 4, 5];\nconst doubled = arr.map(x => x * 2);\nconsole.log(doubled);",
-    "language": "nodejs"
-  }'
-```
-
-**Response:**
-```json
-{
-  "output": {
-    "output": "[ 2, 4, 6, 8, 10 ]\n",
-    "duration": 0.098,
-    "exit_code": 0,
-    "termination_reason": "success"
-  },
-  "status": "success"
-}
-```
-
----
-
-### Bash Examples
-
-#### 1. System Commands
-
-```bash
-curl -X POST http://localhost:8080/execute \
-  -H "Content-Type: application/json" \
-  -d '{
-    "code": "#!/bin/bash\necho \"Hostname: $(hostname)\"\necho \"Uptime: $(uptime)\"\nuname -a",
-    "language": "bash"
-  }'
-```
-
----
-
-#### 2. File Operations
-
-```bash
-curl -X POST http://localhost:8080/execute \
-  -H "Content-Type: application/json" \
-  -d '{
-    "code": "#!/bin/bash\necho \"Hello\" > /tmp/test.txt\ncat /tmp/test.txt\nls -lh /tmp/test.txt",
-    "language": "bash"
-  }'
-```
-
----
-
-### Go Examples
-
-#### 1. Hello World
-
-```bash
-curl -X POST http://localhost:8080/execute \
-  -H "Content-Type: application/json" \
-  -d '{
-    "code": "package main\nimport \"fmt\"\nfunc main() {\n    fmt.Println(\"Hello from Go!\")\n}",
-    "language": "go"
-  }'
-```
-
----
-
-## Error Scenarios
-
-### 1. Invalid JSON
-
-**Request:**
-```bash
-curl -X POST http://localhost:8080/execute \
-  -H "Content-Type: application/json" \
-  -d 'invalid json'
-```
-
-**Response:**
-```
-HTTP/1.1 400 Bad Request
-Invalid request
-```
-
----
-
-### 2. Missing Language Field
-
-**Request:**
-```bash
-curl -X POST http://localhost:8080/execute \
-  -H "Content-Type: application/json" \
-  -d '{
-    "code": "print(1+1)"
-  }'
-```
-
-**Response:**
-```json
-{
-  "output": {
-    "output": "",
-    "duration": 0,
-    "exit_code": 0,
-    "termination_reason": ""
-  },
-  "status": "error",
-  "error": "unsupported language: "
-}
-```
-
----
-
-### 3. Queue Full
-
-**Scenario:** More than 100 jobs in queue
-
-**Response:**
-```
-HTTP/1.1 503 Service Unavailable
-queue full, try again later
-```
-
-**Solution:** Retry the request after a few seconds.
-
----
-
-### 4. Timeout (>30 seconds)
-
-**Request:**
-```bash
-curl -X POST http://localhost:8080/execute \
-  -H "Content-Type: application/json" \
-  -d '{
-    "code": "import time\ntime.sleep(35)",
-    "language": "python"
-  }'
-```
-
-**Response:**
-```json
-{
-  "output": {
-    "output": "",
-    "duration": 30.001,
-    "exit_code": -1,
-    "termination_reason": "timeout"
-  },
-  "status": "error",
-  "error": "Execution timed out"
-}
-```
-
----
-
-### 5. Memory Limit Exceeded
-
-**Request:**
-```bash
-curl -X POST http://localhost:8080/execute \
-  -H "Content-Type: application/json" \
-  -d '{
-    "code": "data = [0] * (300 * 1024 * 1024)",
-    "language": "python"
-  }'
-```
-
-**Response:**
-```json
-{
-  "output": {
-    "output": "Killed\n",
-    "duration": 2.3,
-    "exit_code": 137,
-    "termination_reason": "oom_kill"
-  },
-  "status": "error",
-  "error": "Execution failed with exit code 137"
-}
-```
-
----
-
-## Rate Limiting
-
-**Current:** No rate limiting implemented
-
-**Future (Sprint 7):**
-- Per-IP rate limiting (e.g., 100 requests/minute)
-- Authenticated users get higher limits
-- 429 Too Many Requests status code
-
----
-
-## Best Practices
-
-### 1. Handle All Exit Codes
-
-Always check both `status` and `exit_code`:
-
-```javascript
-fetch('/execute', {
-  method: 'POST',
-  body: JSON.stringify({ code: userCode, language: 'python' })
-})
-.then(res => res.json())
-.then(data => {
-  if (data.status === "success" && data.output.exit_code === 0) {
-    console.log("Success:", data.output.output);
-  } else {
-    console.error("Failed:", data.error || data.output.output);
-  }
-});
-```
-
----
-
-### 2. Implement Retry Logic
-
-```python
-import requests
-import time
-
-def execute_code(code, language, max_retries=3):
-    for attempt in range(max_retries):
-        try:
-            response = requests.post(
-                'http://localhost:8080/execute',
-                json={'code': code, 'language': language},
-                timeout=35  # Slightly more than 30s execution timeout
-            )
-            
-            if response.status_code == 503:  # Queue full
-                time.sleep(2 ** attempt)  # Exponential backoff
-                continue
-                
-            return response.json()
-        except requests.RequestException as e:
-            print(f"Request failed: {e}")
-            time.sleep(1)
-    
-    raise Exception("Max retries exceeded")
-```
-
----
-
-### 3. Validate Input Client-Side
-
-```javascript
-function validateCode(code, language) {
-  const supportedLanguages = ['python', 'nodejs', 'bash', 'go'];
-  
-  if (!code || code.trim() === '') {
-    throw new Error('Code cannot be empty');
-  }
-  
-  if (!supportedLanguages.includes(language)) {
-    throw new Error(`Unsupported language: ${language}`);
-  }
-  
-  if (code.length > 100000) {  // 100KB limit
-    throw new Error('Code too large');
+  "tenant": {
+    "tenant_id": "<user-id>",
+    "billing_model": "payg"
   }
 }
 ```
 
----
+`limits.active_sessions` is currently a placeholder and is always `0`; do not
+use it for quota decisions.
 
-## Performance Tips
+Important failures:
 
-### Typical Response Times
+| Status | Code | Meaning |
+| ---: | --- | --- |
+| `400` | `invalid_resources` | The size or resource tuple is unsupported |
+| `403` | `sessions_not_allowed` | Current execution policy disables sessions |
+| `402` | n/a | Profile has insufficient balance |
+| `503` | `no_capacity` | No healthy worker can admit the sandbox |
+| `503` | `scheduler_busy` | Durable placement remained contended after retries |
+| `500` | `provision_failed` | Worker boot or lifecycle coordination failed |
 
-| Language | Simple Code | Complex Code | Notes |
-|----------|-------------|--------------|-------|
-| Python | 80-120ms | 500ms-5s | Import-heavy code slower |
-| Node.js | 100-150ms | 300ms-3s | Fast startup |
-| Bash | 50-80ms | Varies | System command dependent |
-| Go | 200-400ms | 1-10s | Compilation time included |
+### `GET /session`
 
-### Optimization Tips
+Lists non-destroyed sandboxes owned by the authenticated user.
 
-1. **Use VM pool** (already enabled) - Reduces cold start time
-2. **Batch requests** - Submit multiple executions concurrently
-3. **Cache results** - Identical code → identical output (deterministic)
-4. **Minimize code size** - Smaller payloads = faster network transfer
-
----
-
-## WebSocket Support (Future)
-
-**Planned for v0.2:**
-
-```javascript
-const ws = new WebSocket('ws://localhost:8080/execute-stream');
-
-ws.send(JSON.stringify({ code: 'print("Hello")', language: 'python' }));
-
-ws.onmessage = (event) => {
-  const data = JSON.parse(event.data);
-  console.log("Real-time output:", data.chunk);
-};
+```bash
+curl -sS "$RENDEROPS_API_URL/session" \
+  -H "Authorization: Bearer $RENDEROPS_API_KEY"
 ```
 
-This will enable streaming output for long-running executions.
-
----
-
-## Security Headers
-
-**Request Headers:**
+```json
+{
+  "sandboxes": [
+    {
+      "id": "3ecb0221-faf1-4976-a8ae-6fd6262de59a",
+      "name": "dependency-check",
+      "state": "active",
+      "billing_model": "payg",
+      "vcpus": 1,
+      "memory_mb": 256,
+      "disk_gb": 1,
+      "idle_timeout_ms": 120000,
+      "metadata": {"project": "docs"},
+      "created_at": "2026-08-17T11:00:00Z"
+    }
+  ]
+}
 ```
+
+### `GET /session/{sandboxID}`
+
+Returns lifecycle, limits, and aggregate execution statistics for an owned
+sandbox. Missing and foreign IDs both return `404`.
+
+```bash
+curl -sS "$RENDEROPS_API_URL/session/$SANDBOX_ID" \
+  -H "Authorization: Bearer $RENDEROPS_API_KEY"
+```
+
+```json
+{
+  "status": "success",
+  "request_id": "f4095325-ae50-43ae-a4ca-ff6431d5785a",
+  "session": {
+    "session_id": "3ecb0221-faf1-4976-a8ae-6fd6262de59a",
+    "state": "active",
+    "billing_model": "payg",
+    "created_at": "2026-08-17T11:00:00Z",
+    "last_used": "2026-08-17T11:01:00Z",
+    "expires_at": "2026-08-17T11:03:00Z"
+  },
+  "limits": {
+    "max_sessions": 100,
+    "active_sessions": 0,
+    "max_execution_ms": 30000,
+    "idle_timeout_ms": 120000
+  },
+  "stats": {
+    "run_count": 2,
+    "total_execution_ms": 138.4,
+    "last_exit_code": 0
+  },
+  "tenant": {
+    "tenant_id": "<user-id>",
+    "billing_model": "payg"
+  }
+}
+```
+
+### `POST /session/{sandboxID}/run`
+
+Executes source code through the guest agent. Supported language identifiers
+are `python`, `node`, and `bash`. Python and Node use persistent runtime bridges
+while the sandbox remains active; runtime process state is reset across a
+pause/resume boundary, but writable-disk changes persist.
+
+```bash
+curl -sS -X POST "$RENDEROPS_API_URL/session/$SANDBOX_ID/run" \
+  -H "Authorization: Bearer $RENDEROPS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "language": "python",
+    "code": "print(6 * 7)",
+    "timeout": 10
+  }'
+```
+
+```json
+{
+  "status": "success",
+  "request_id": "eb3d0130-2de1-4f86-8651-038b9a747dab",
+  "session_id": "3ecb0221-faf1-4976-a8ae-6fd6262de59a",
+  "result": {
+    "stdout": "42\n",
+    "stderr": "",
+    "exit_code": 0,
+    "termination_reason": "success",
+    "duration_ms": 54.1,
+    "guest_duration_ms": 17.8
+  },
+  "usage": {
+    "execution_time_ms": 17.8,
+    "queue_wait_ms": 0,
+    "timeout_limit_ms": 30000
+  },
+  "tenant": {
+    "tenant_id": "<user-id>",
+    "billing_model": "payg"
+  },
+  "session": {
+    "state": "active",
+    "last_used": "2026-08-17T11:01:00Z",
+    "expires_at": "2026-08-17T11:03:00Z",
+    "run_count": 1
+  }
+}
+```
+
+A completed process with a non-zero exit code still returns HTTP `200`, but
+the body has `status: "error"` and an `execution_failed` detail.
+
+### `POST /session/{sandboxID}/exec`
+
+Runs a shell command inside the persistent sandbox filesystem.
+
+```bash
+curl -sS -X POST "$RENDEROPS_API_URL/session/$SANDBOX_ID/exec" \
+  -H "Authorization: Bearer $RENDEROPS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"command":"cd /workspace && node --version","timeout":10}'
+```
+
+The response uses the same envelope as `/run`. A non-zero command exit uses
+`error.code: "exec_failed"`.
+
+### `POST /session/{sandboxID}/pause`
+
+Snapshots VM/device state, memory, and the writable disk, releases active CPU
+and memory admission, and keeps durable disk allocation for resume.
+
+```bash
+curl -sS -X POST "$RENDEROPS_API_URL/session/$SANDBOX_ID/pause" \
+  -H "Authorization: Bearer $RENDEROPS_API_KEY"
+```
+
+```json
+{
+  "status": "success",
+  "session_id": "3ecb0221-faf1-4976-a8ae-6fd6262de59a",
+  "state": "paused"
+}
+```
+
+When Blob checkpointing is configured, pause uploads immutable VM state and
+memory plus a chunked writable-disk generation before local artifacts may be
+removed. Unchanged writable chunks are reused across generations.
+
+### `POST /session/{sandboxID}/resume`
+
+Reserves capacity on the sandbox's assigned worker, restores the most recent
+checkpoint, reconnects guest communication, and returns the sandbox to
+`active`.
+
+```bash
+curl -sS -X POST "$RENDEROPS_API_URL/session/$SANDBOX_ID/resume" \
+  -H "Authorization: Bearer $RENDEROPS_API_KEY"
+```
+
+```json
+{
+  "status": "success",
+  "session_id": "3ecb0221-faf1-4976-a8ae-6fd6262de59a",
+  "state": "active"
+}
+```
+
+The current architecture resumes on the existing worker placement. Cross-host
+resume requires portable template/checkpoint compatibility and placement
+changes described in [PLAN.md](PLAN.md).
+
+### `DELETE /session/{sandboxID}`
+
+Destroys the microVM and writable disk, releases the placement and worker
+reservation, bills any final active runtime, and leaves the durable row in the
+`destroyed` state for history/audit purposes.
+
+```bash
+curl -i -X DELETE "$RENDEROPS_API_URL/session/$SANDBOX_ID" \
+  -H "Authorization: Bearer $RENDEROPS_API_KEY"
+```
+
+Success: `204 No Content`.
+
+## Interactive Terminals
+
+Terminal creation is a two-step protocol. First authenticate with the REST API
+and create a guest PTY. Then consume the returned single-use token when opening
+the WebSocket.
+
+### `POST /v1/sandboxes/{sandboxID}/terminals`
+
+```bash
+curl -sS -X POST \
+  "$RENDEROPS_API_URL/v1/sandboxes/$SANDBOX_ID/terminals" \
+  -H "Authorization: Bearer $RENDEROPS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"shell":"/bin/bash","columns":120,"rows":32}'
+```
+
+Only `/bin/bash` is currently supported. Columns must be `20..500`; rows must
+be `5..200`. Defaults are 120 x 32.
+
+Success: `201 Created`, `Cache-Control: no-store`
+
+```json
+{
+  "status": "success",
+  "request_id": "a782888f-d609-482c-9910-271f80f650aa",
+  "terminal": {
+    "terminal_id": "term_PF9lwt4Vsn2C7DCBtqu3kNQn",
+    "sandbox_id": "3ecb0221-faf1-4976-a8ae-6fd6262de59a",
+    "state": "ready",
+    "created_at": "2026-08-17T11:10:00Z",
+    "token_expires_at": "2026-08-17T11:11:00Z"
+  },
+  "websocket_path": "/v1/terminals/term_PF9lwt4Vsn2C7DCBtqu3kNQn",
+  "attachment_token": "<single-use-token>",
+  "expires_in": 59
+}
+```
+
+### `GET /v1/terminals/{terminalID}?token={attachmentToken}`
+
+Upgrade this URL to WebSocket. The attachment token is valid for 60 seconds
+and is consumed exactly once. It replaces normal bearer auth for this upgrade.
+The request origin must match `TERMINAL_ALLOWED_ORIGINS` when that allowlist is
+configured.
+
+Browser to server frames:
+
+| WebSocket frame | Payload | Meaning |
+| --- | --- | --- |
+| binary | raw bytes | PTY stdin |
+| text | `{"type":"resize","columns":120,"rows":32}` | Resize PTY |
+| text | `{"type":"close"}` | Close terminal |
+
+Server to browser frames:
+
+| WebSocket frame | Payload | Meaning |
+| --- | --- | --- |
+| text | `{"type":"ready"}` | Worker stream is attached |
+| binary | raw bytes | PTY stdout/stderr stream |
+| text | `{"type":"exit","exit_code":0}` | Shell exited |
+| text | `{"type":"error","message":"..."}` | Terminal failed |
+
+The control plane bridges this WebSocket to the assigned worker's internal
+gRPC terminal stream. Closing either side closes the guest PTY.
+
+## Port Previews
+
+### `POST /v1/sandboxes/{sandboxID}/ports/{port}/preview`
+
+Creates a signed private link to an HTTP service listening inside an active
+sandbox. The port must be `1..65535`.
+
+```bash
+curl -sS -X POST \
+  "$RENDEROPS_API_URL/v1/sandboxes/$SANDBOX_ID/ports/3000/preview" \
+  -H "Authorization: Bearer $RENDEROPS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"expires_in_seconds":3600}'
+```
+
+TTL must be between one second and 24 hours and defaults to one hour.
+
+```json
+{
+  "url": "https://3000-3ecb0221-faf1-4976-a8ae-6fd6262de59a.dev-sandbox.renderops.com/?_renderops_token=<signed-token>",
+  "expires_at": "2026-08-17T12:10:00Z"
+}
+```
+
+On first use, the preview gateway verifies the HMAC token, stores it in a
+secure HttpOnly cookie, and redirects to remove the query token. It resolves
+the current placement and proxies to the sandbox port through the private
+worker API. Missing, invalid, expired, or mismatched credentials return `404`
+to avoid revealing sandbox existence. Public/no-auth previews are not
+implemented.
+
+## Private Service API
+
+These routes are deployment contracts, not SDK endpoints. They must remain on
+the private network.
+
+### Orchestrator (`:8090`)
+
+Worker calls send `X-Orchestrator-Token: $WORKER_TOKEN`:
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| `PUT` | `/internal/workers/{workerID}` | Register/update endpoint and allocatable capacity |
+| `POST` | `/internal/workers/{workerID}/heartbeat` | Publish authoritative free/reserved capacity |
+| `POST` | `/internal/workers/{workerID}/draining` | Include/exclude worker from new placement |
+| `POST` | `/internal/workers/{workerID}/sandboxes/{sandboxID}/state` | Report lifecycle state |
+
+Control-plane calls send
+`X-Orchestrator-Token: $ORCHESTRATOR_TOKEN`:
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| `POST` | `/internal/placements` | Reserve a healthy worker placement |
+| `GET` | `/internal/placements/{sandboxID}` | Resolve worker ID and endpoint |
+| `DELETE` | `/internal/placements/{sandboxID}` | Release durable placement |
+| `POST` | `/internal/sandboxes` | Place and provision a sandbox |
+| `POST` | `/internal/sandboxes/{sandboxID}/pause` | Pause on assigned worker and update placement |
+| `POST` | `/internal/sandboxes/{sandboxID}/resume` | Reserve and resume on assigned worker |
+| `DELETE` | `/internal/sandboxes/{sandboxID}` | Destroy and release placement |
+
+### Worker (`:9876`)
+
+`GET /worker/health` is unauthenticated for infrastructure health probes. All
+other worker routes require `X-Worker-Token: $WORKER_TOKEN`.
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| `GET` | `/worker/capacity` | Current worker-authoritative capacity snapshot |
+| `POST` | `/worker/sandbox` | Atomically reserve capacity and boot a sandbox |
+| `POST` | `/worker/sandbox/{id}/run` | Execute source code |
+| `POST` | `/worker/sandbox/{id}/exec` | Execute a shell command |
+| `POST` | `/worker/sandbox/{id}/pause` | Snapshot and release active compute |
+| `POST` | `/worker/sandbox/{id}/resume` | Reserve compute and restore |
+| `DELETE` | `/worker/sandbox/{id}` | Destroy local state and release capacity |
+
+Terminal create/attach/close uses the internal worker gRPC service on the same
+private listener. Preview traffic uses the worker's sandbox-port proxy path.
+
+### Raw usage ingestion
+
+Workers send minute-bucketed, idempotent samples to the control plane:
+
+```http
+POST /internal/usage/meters
+Authorization: Bearer <WORKER_TOKEN>
 Content-Type: application/json
 ```
 
-**Response Headers:**
+```json
+{
+  "samples": [
+    {
+      "worker_id": "worker-1",
+      "sandbox_id": "3ecb0221-faf1-4976-a8ae-6fd6262de59a",
+      "bucket": "2026-08-17T11:10:00Z",
+      "vcpu_seconds": 60,
+      "ram_gb_seconds": 15,
+      "disk_gb_seconds": 60
+    }
+  ]
+}
 ```
-Content-Type: application/json
-X-Content-Type-Options: nosniff
-```
 
----
-
-## Support
-
-For issues or questions:
-- GitHub Issues: [Repository Issues](https://github.com/Abhishek00810/sandbox_env/issues)
-- Email: [Your Email]
-
----
-
-**Last Updated:** Sprint 8  
-**API Version:** v0.1
+Batches contain 1 to 1000 samples. The bucket must be an exact UTC minute
+boundary and values cannot be negative. Success is `204 No Content`. This
+endpoint records raw usage; pricing and balance deduction are separate control
+plane responsibilities.
