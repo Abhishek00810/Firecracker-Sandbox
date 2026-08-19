@@ -8,6 +8,7 @@ import (
 	"backend/internal/controlplane"
 	controlconfig "backend/internal/controlplane/config"
 	"backend/internal/handler"
+	"backend/internal/ideauth"
 	"backend/internal/metering"
 	"backend/internal/middleware"
 	"backend/internal/orchestrator"
@@ -95,12 +96,19 @@ func main() {
 		slog.Error("preview token initialization failed", "err", err)
 		os.Exit(1)
 	}
+	ideSigner, err := ideauth.NewSigner(ideauth.DeriveSigningSecret(cfg.WorkerToken))
+	if err != nil {
+		slog.Error("IDE token initialization failed", "err", err)
+		os.Exit(1)
+	}
+	ideWorkers := agent.NewIDEClient(cfg.WorkerToken)
 
 	publicMux := http.NewServeMux()
 	publicMux.HandleFunc("/session", handler.SessionHandler(svc, platformClient))
 	publicMux.HandleFunc("/session/", handler.SessionHandler(svc, platformClient))
 	publicMux.HandleFunc("POST /v1/sandboxes/{sandboxID}/terminals", handler.CreateTerminalHandler(svc, orchestratorClient, terminalWorkers, terminalManager))
 	publicMux.HandleFunc("POST /v1/sandboxes/{sandboxID}/ports/{port}/preview", handler.CreatePreviewHandler(svc, previewSigner, cfg.PreviewDomain))
+	publicMux.HandleFunc("POST /v1/sandboxes/{sandboxID}/ide/sessions", handler.CreateIDESessionHandler(svc, orchestratorClient, ideWorkers, ideSigner, cfg.PreviewDomain))
 
 	rootMux := http.NewServeMux()
 	rootMux.HandleFunc("/health", healthHandler)

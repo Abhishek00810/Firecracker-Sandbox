@@ -447,6 +447,34 @@ Server to browser frames:
 The control plane bridges this WebSocket to the assigned worker's internal
 gRPC terminal stream. Closing either side closes the guest PTY.
 
+## Browser IDE
+
+### `POST /v1/sandboxes/{sandboxID}/ide/sessions`
+
+Starts OpenVSCode Server inside an active sandbox and creates a browser IDE
+authorization handoff. The sandbox must belong to the authenticated user.
+
+```bash
+curl -sS -X POST \
+  "$RENDEROPS_API_URL/v1/sandboxes/$SANDBOX_ID/ide/sessions" \
+  -H "Authorization: Bearer $RENDEROPS_API_KEY"
+```
+
+Success: `201 Created`, `Cache-Control: no-store`
+
+```json
+{
+  "url": "https://3001-3ecb0221-faf1-4976-a8ae-6fd6262de59a.dev-sandbox.renderops.com/?ro_auth=<single-use-token>",
+  "expires_at": "2026-08-17T11:11:00Z"
+}
+```
+
+Open the returned URL within 60 seconds. The preview gateway consumes the
+single-use token, sets a host-only `__Host-renderops_ide` Secure, HttpOnly
+cookie, and redirects to the same URL without the token. The IDE cookie lasts
+one hour and is valid only for that sandbox hostname and port. It is stripped
+before proxying the request to the worker and OpenVSCode Server.
+
 ## Port Previews
 
 ### `POST /v1/sandboxes/{sandboxID}/ports/{port}/preview`

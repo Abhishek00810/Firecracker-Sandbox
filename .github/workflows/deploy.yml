@@ -53,6 +53,8 @@ jobs:
               - 'backend/cmd/preview-gateway/**'
               - 'backend/internal/controlplane/**'
               - 'backend/internal/handler/**'
+              - 'backend/internal/ide/**'
+              - 'backend/internal/ideauth/**'
               - 'backend/internal/orchestrator/**'
               - 'backend/internal/agent/**'
               - 'backend/internal/plane/**'
@@ -79,6 +81,7 @@ jobs:
             worker:
               - 'backend/cmd/worker/**'
               - 'backend/internal/executor/**'
+              - 'backend/internal/ide/**'
               - 'backend/internal/session/**'
               - 'backend/internal/metering/**'
               - 'backend/internal/worker/**'

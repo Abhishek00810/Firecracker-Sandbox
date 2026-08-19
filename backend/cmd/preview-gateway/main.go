@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"backend/internal/ideauth"
 	"backend/internal/middleware"
 	"backend/internal/orchestrator"
 	"backend/internal/preview"
@@ -34,6 +35,15 @@ func main() {
 	gateway, err := previewgateway.New(domain, signer, orchestrator.NewClient(orchestratorURL, orchestratorToken), workerToken)
 	if err != nil {
 		slog.Error("preview gateway initialization failed", "err", err)
+		os.Exit(1)
+	}
+	ideSigner, err := ideauth.NewSigner(ideauth.DeriveSigningSecret(workerToken))
+	if err != nil {
+		slog.Error("IDE signer initialization failed", "err", err)
+		os.Exit(1)
+	}
+	if err := gateway.EnableIDE(ideSigner, ideauth.NewMemoryNonceStore()); err != nil {
+		slog.Error("IDE gateway initialization failed", "err", err)
 		os.Exit(1)
 	}
 

@@ -19,6 +19,11 @@ const (
 	RouteSandboxIDE    = "/worker/sandbox/{sandboxID}/ide"
 )
 
+type IDEInstance struct {
+	Port  uint16 `json:"port"`
+	State string `json:"state"`
+}
+
 // SessionState is a sandbox lifecycle state as it crosses the wire.
 type SessionState string
 

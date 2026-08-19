@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"backend/internal/executor"
+	"backend/internal/plane"
 )
 
 const DefaultPort uint16 = 3001
@@ -29,10 +30,7 @@ type Config struct {
 	Port      uint16
 }
 
-type Instance struct {
-	Port  uint16 `json:"port"`
-	State string `json:"state"`
-}
+type Instance = plane.IDEInstance
 
 type Service struct {
 	runner CommandRunner

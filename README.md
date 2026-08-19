@@ -89,9 +89,9 @@ POST /session/{id}/resume
 DELETE /session/{id}
 ```
 
-Interactive terminals and signed port previews are also available. The full
-wire contract, examples, status codes, and WebSocket framing are documented in
-[API.md](API.md).
+Interactive terminals, authenticated browser IDE sessions, and signed port
+previews are also available. The full wire contract, examples, status codes,
+and WebSocket framing are documented in [API.md](API.md).
 
 ## Sandbox Sizes
 

@@ -60,6 +60,12 @@ func (c *Client) Destroy(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodDelete, plane.RouteSandboxPrefix+id, nil, nil)
 }
 
+func (c *Client) StartIDE(ctx context.Context, id string) (plane.IDEInstance, error) {
+	var out plane.IDEInstance
+	err := c.do(ctx, http.MethodPost, plane.RouteSandboxPrefix+id+"/ide", nil, &out)
+	return out, err
+}
+
 // Health reports whether the agent answers (used to wait for the tunnel).
 func (c *Client) Health(ctx context.Context) error {
 	return c.do(ctx, http.MethodGet, plane.RouteHealth, nil, nil)

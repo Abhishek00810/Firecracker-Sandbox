@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"backend/internal/ideauth"
 	"backend/internal/orchestrator"
 	"backend/internal/plane"
 	"backend/internal/preview"
@@ -19,7 +20,10 @@ import (
 	"github.com/google/uuid"
 )
 
-const cookieName = "__Host-renderops_preview"
+const (
+	previewCookieName = "__Host-renderops_preview"
+	ideCookieName     = "__Host-renderops_ide"
+)
 
 type PlacementResolver interface {
 	Placement(context.Context, string) (orchestrator.Placement, error)
@@ -30,6 +34,8 @@ type Gateway struct {
 	signer      *preview.Signer
 	placements  PlacementResolver
 	workerToken string
+	ideSigner   *ideauth.Signer
+	nonces      ideauth.NonceStore
 }
 
 func New(domain string, signer *preview.Signer, placements PlacementResolver, workerToken string) (*Gateway, error) {
@@ -38,6 +44,15 @@ func New(domain string, signer *preview.Signer, placements PlacementResolver, wo
 		return nil, fmt.Errorf("preview domain, signer, placement resolver, and worker token are required")
 	}
 	return &Gateway{domain: domain, signer: signer, placements: placements, workerToken: workerToken}, nil
+}
+
+func (g *Gateway) EnableIDE(signer *ideauth.Signer, nonces ideauth.NonceStore) error {
+	if signer == nil || nonces == nil {
+		return fmt.Errorf("IDE signer and nonce store are required")
+	}
+	g.ideSigner = signer
+	g.nonces = nonces
+	return nil
 }
 
 func (g *Gateway) Handler() http.Handler {
@@ -50,6 +65,20 @@ func (g *Gateway) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		writeNotFound(w)
 		return
 	}
+	if token := r.URL.Query().Get("ro_auth"); token != "" {
+		if g.ideSigner == nil {
+			writeNotFound(w)
+			return
+		}
+		sessionToken, claims, err := g.ideSigner.Redeem(r.Context(), token, sandboxID, port, g.nonces)
+		if err != nil {
+			writeNotFound(w)
+			return
+		}
+		setSessionCookie(w, ideCookieName, sessionToken, time.Unix(claims.ExpiresAt, 0))
+		redirectWithoutQueryToken(w, r, "ro_auth")
+		return
+	}
 
 	if token := r.URL.Query().Get("_renderops_token"); token != "" {
 		claims, err := g.signer.Verify(token, sandboxID, port)
@@ -58,27 +87,12 @@ func (g *Gateway) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		expiresAt := time.Unix(claims.ExpiresAt, 0)
-		http.SetCookie(w, &http.Cookie{
-			Name: cookieName, Value: token, Path: "/", Secure: true, HttpOnly: true,
-			SameSite: http.SameSiteLaxMode, Expires: expiresAt, MaxAge: max(1, int(time.Until(expiresAt).Seconds())),
-		})
-		clean := *r.URL
-		query := clean.Query()
-		query.Del("_renderops_token")
-		clean.RawQuery = query.Encode()
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Location", clean.RequestURI())
-		w.WriteHeader(http.StatusSeeOther)
+		setSessionCookie(w, previewCookieName, token, expiresAt)
+		redirectWithoutQueryToken(w, r, "_renderops_token")
 		return
 	}
 
-	cookie, err := r.Cookie(cookieName)
-	if err != nil {
-		writeNotFound(w)
-		return
-	}
-	if _, err := g.signer.Verify(cookie.Value, sandboxID, port); err != nil {
+	if !g.authorized(r, sandboxID, port) {
 		writeNotFound(w)
 		return
 	}
@@ -107,7 +121,7 @@ func (g *Gateway) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			request.Out.URL.Path = fmt.Sprintf("%s%s/ports/%d%s", plane.RouteSandboxPrefix, sandboxID, port, originalPath)
 			request.Out.URL.RawPath = ""
 			request.Out.Host = target.Host
-			stripCookie(request.Out, cookieName)
+			stripCookie(request.Out, previewCookieName, ideCookieName)
 			request.SetXForwarded()
 			request.Out.Header.Set(plane.AuthHeader, g.workerToken)
 			request.Out.Header.Set("X-Forwarded-Host", originalHost)
@@ -119,7 +133,7 @@ func (g *Gateway) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			response.Header.Del("Set-Cookie")
 			for _, value := range setCookies {
 				cookie, err := http.ParseSetCookie(value)
-				if err != nil || cookie.Name != cookieName {
+				if err != nil || (cookie.Name != previewCookieName && cookie.Name != ideCookieName) {
 					response.Header.Add("Set-Cookie", value)
 				}
 			}
@@ -133,11 +147,48 @@ func (g *Gateway) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	proxy.ServeHTTP(w, r)
 }
 
-func stripCookie(request *http.Request, reservedName string) {
+func (g *Gateway) authorized(r *http.Request, sandboxID string, port uint16) bool {
+	if cookie, err := r.Cookie(ideCookieName); err == nil && g.ideSigner != nil {
+		if _, err := g.ideSigner.VerifySession(cookie.Value, sandboxID, port); err == nil {
+			return true
+		}
+	}
+	if cookie, err := r.Cookie(previewCookieName); err == nil {
+		if _, err := g.signer.Verify(cookie.Value, sandboxID, port); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func setSessionCookie(w http.ResponseWriter, name, value string, expiresAt time.Time) {
+	http.SetCookie(w, &http.Cookie{
+		Name: name, Value: value, Path: "/", Secure: true, HttpOnly: true,
+		SameSite: http.SameSiteLaxMode, Expires: expiresAt,
+		MaxAge: max(1, int(time.Until(expiresAt).Seconds())),
+	})
+}
+
+func redirectWithoutQueryToken(w http.ResponseWriter, r *http.Request, name string) {
+	clean := *r.URL
+	query := clean.Query()
+	query.Del(name)
+	clean.RawQuery = query.Encode()
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Location", clean.RequestURI())
+	w.WriteHeader(http.StatusSeeOther)
+}
+
+func stripCookie(request *http.Request, reservedNames ...string) {
+	reserved := make(map[string]struct{}, len(reservedNames))
+	for _, name := range reservedNames {
+		reserved[name] = struct{}{}
+	}
 	cookies := request.Cookies()
 	request.Header.Del("Cookie")
 	for _, cookie := range cookies {
-		if cookie.Name != reservedName {
+		if _, blocked := reserved[cookie.Name]; !blocked {
 			request.AddCookie(cookie)
 		}
 	}
