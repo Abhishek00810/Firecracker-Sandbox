@@ -10,6 +10,28 @@
 #
 ARG ALPINE=alpine:3.20
 
+# OpenVSCode is pinned and checksum-verified so rebuilding a rootfs cannot
+# silently install a different editor release. The worker gateway provides
+# authentication; OpenVSCode itself remains reachable only inside the microVM.
+FROM ${ALPINE} AS openvscode
+ARG TARGETARCH
+ARG OPENVSCODE_VERSION=1.109.5
+ARG OPENVSCODE_SHA256_AMD64=b433bf4f0227321a7014d8460d10a8f958adc0f45aa79bd889e84e65e8f88363
+ARG OPENVSCODE_SHA256_ARM64=36d9c14036489b63de84ebace837fcacf7e60e669a0dc715802c5443684ea4dc
+RUN apk add --no-cache ca-certificates curl tar \
+ && case "${TARGETARCH}" in \
+      amd64) release_arch=x64; expected="${OPENVSCODE_SHA256_AMD64}" ;; \
+      arm64) release_arch=arm64; expected="${OPENVSCODE_SHA256_ARM64}" ;; \
+      *) echo "unsupported OpenVSCode architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+ && archive="openvscode-server-v${OPENVSCODE_VERSION}-linux-${release_arch}.tar.gz" \
+ && curl --fail --location --retry 3 --output "/tmp/${archive}" \
+      "https://github.com/gitpod-io/openvscode-server/releases/download/openvscode-server-v${OPENVSCODE_VERSION}/${archive}" \
+ && echo "${expected}  /tmp/${archive}" | sha256sum -c - \
+ && mkdir -p /opt/openvscode-server \
+ && tar -xzf "/tmp/${archive}" --strip-components=1 -C /opt/openvscode-server \
+ && rm -f "/tmp/${archive}"
+
 # ── guest-agent: built from this repo's source, no host Go needed ────────────
 FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS guestbuild
 ARG TARGETARCH
@@ -23,6 +45,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -trimpath -o /guest-a
 FROM ${ALPINE} AS rootfs
 RUN apk add --no-cache \
     bash busybox iproute2 util-linux ca-certificates curl git openssh-client \
+    gcompat libstdc++ \
     python3 py3-pip nodejs npm
 # Python kernel stack for stateful execution (kernel_bridge.py).
 RUN pip install --no-cache-dir --break-system-packages \
@@ -32,7 +55,11 @@ RUN pip install --no-cache-dir --break-system-packages \
 COPY guest-agent/kernel_bridge.py /usr/local/bin/kernel_bridge.py
 COPY guest-agent/node_bridge.js   /usr/local/bin/node_bridge.js
 COPY --from=guestbuild /guest-agent /usr/local/bin/guest-agent
-RUN chmod +x /usr/local/bin/guest-agent /usr/local/bin/kernel_bridge.py
+COPY --from=openvscode /opt/openvscode-server /opt/openvscode-server
+RUN rm /opt/openvscode-server/node \
+ && ln -s /usr/bin/node /opt/openvscode-server/node \
+ && chmod +x /usr/local/bin/guest-agent /usr/local/bin/kernel_bridge.py
+RUN /opt/openvscode-server/bin/openvscode-server --version
 # Guest identity + policy baked in (no per-VM runtime rootfs mount):
 #   - never prompt for git credentials inside a VM
 #   - pip installs into the system env (ephemeral single-use VMs) — dodge PEP 668

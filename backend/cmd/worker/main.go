@@ -7,6 +7,7 @@ import (
 	"backend/internal/cgroup"
 	"backend/internal/checkpoint"
 	"backend/internal/executor/firecracker"
+	"backend/internal/ide"
 	"backend/internal/metering"
 	"backend/internal/orchestrator"
 	"backend/internal/plane"
@@ -342,7 +343,19 @@ func main() {
 		slog.Warn("WORKER_TOKEN not set — worker API is UNAUTHENTICATED (dev only)")
 	}
 	workerServer := worker.NewServerWithAdmission(sessionMgr, token, admission)
-	srv := &http.Server{Addr: bind, Handler: workerServer.Handler()}
+	ideManager, err := ide.NewService(sessionMgr, ide.Config{
+		Binary:    env("IDE_BINARY", "/opt/openvscode-server/bin/openvscode-server"),
+		Workspace: env("IDE_WORKSPACE", "/workspace"),
+		Port:      uint16(envInt("IDE_PORT", int(ide.DefaultPort))),
+	})
+	if err != nil {
+		slog.Error("configure worker IDE service", "err", err)
+		os.Exit(1)
+	}
+	workerMux := http.NewServeMux()
+	workerMux.Handle(plane.RouteSandboxIDE, ide.NewWorkerHandler(ideManager, token))
+	workerMux.Handle("/", workerServer.Handler())
+	srv := &http.Server{Addr: bind, Handler: workerMux}
 	listener, err := net.Listen("tcp", bind)
 	if err != nil {
 		slog.Error("worker listen failed", "addr", bind, "err", err)

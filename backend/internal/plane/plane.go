@@ -16,6 +16,7 @@ const (
 	RouteCapacity      = "/worker/capacity"
 	RouteSandbox       = "/worker/sandbox"  // POST — create
 	RouteSandboxPrefix = "/worker/sandbox/" // {id}[/run|exec|pause|resume]; DELETE /{id}
+	RouteSandboxIDE    = "/worker/sandbox/{sandboxID}/ide"
 )
 
 // SessionState is a sandbox lifecycle state as it crosses the wire.
