@@ -126,7 +126,8 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	sess, err := s.svc.CreateWithID(r.Context(), req.SandboxID, req.UserID, req.BillingModel, req.Env,
+	sess, err := s.svc.CreateWithID(r.Context(), req.SandboxID, req.UserID, req.BillingModel, req.Image,
+		req.Env,
 		req.VCPUs, req.MemoryMB, req.DiskGB, req.Internet,
 		secs(req.IdleTimeoutS), secs(req.MaxLifetimeS))
 	if err != nil {
@@ -138,6 +139,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusCreated, plane.CreateResponse{
 		SandboxID: sess.ID, State: string(sess.State),
+		Image: sess.Image,
 		VCPUs: sess.VCPUs, MemoryMB: sess.MemoryMB, DiskGB: sess.DiskGB,
 	})
 }

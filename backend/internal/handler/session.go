@@ -8,6 +8,7 @@ import (
 	"backend/internal/orchestrator"
 	"backend/internal/plane"
 	"backend/internal/platform"
+	"backend/internal/sandboximage"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -65,6 +66,13 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 					return
 				}
 			}
+			image, err := sandboximage.Normalize(createReq.Image)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(APIError{Status: "error", Code: "invalid_image", Message: err.Error(), RequestID: requestID})
+				return
+			}
 
 			size, err := resolveSize(createReq)
 			if err != nil {
@@ -89,7 +97,7 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 			idleTimeout := resolveDuration(createReq.IdleTimeoutS, tc.SessionIdleTimeout, tc.SessionMaxLifetime)
 			maxLifetime := resolveDuration(createReq.MaxLifetimeS, tc.SessionMaxLifetime, tc.SessionMaxLifetime)
 
-			sess, err := mgr.Create(r.Context(), auth.TenantID, auth.Billing.Model, createReq.Env, size.VCPUs, size.MemoryMB, size.DiskGB, internet, idleTimeout, maxLifetime)
+			sess, err := mgr.Create(r.Context(), auth.TenantID, auth.Billing.Model, image, createReq.Env, size.VCPUs, size.MemoryMB, size.DiskGB, internet, idleTimeout, maxLifetime)
 			if err != nil {
 				slog.Error("failed to create session", "err", err)
 				status := http.StatusInternalServerError
@@ -136,7 +144,7 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 				sess.ID,
 				map[string]any{
 					"name": name, "vcpus": size.VCPUs, "memory_mb": size.MemoryMB,
-					"disk_gb": size.DiskGB, "billing_model": auth.Billing.Model,
+					"disk_gb": size.DiskGB, "image": image, "billing_model": auth.Billing.Model,
 				},
 			)
 
@@ -147,6 +155,7 @@ func SessionHandler(mgr plane.Service, usageLogger platform.UsageLogger) http.Ha
 				RequestID: requestID,
 				Session: &SessionDetail{
 					SessionID:    sess.ID,
+					Image:        sess.Image,
 					State:        "active",
 					BillingModel: sess.BillingModel,
 					CreatedAt:    sess.CreatedAt.Format(time.RFC3339),

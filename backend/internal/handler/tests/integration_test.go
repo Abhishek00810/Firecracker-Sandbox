@@ -509,7 +509,7 @@ func (f *fakeSessionService) OpenTerminal(context.Context, string, string, strin
 
 func (f *fakeSessionService) CloseTerminal(context.Context, string, string) error { return nil }
 
-func (f *fakeSessionService) Create(ctx context.Context, userID, billingModel string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*plane.SessionInfo, error) {
+func (f *fakeSessionService) Create(ctx context.Context, userID, billingModel, image string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*plane.SessionInfo, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.createErr != nil {
@@ -521,6 +521,7 @@ func (f *fakeSessionService) Create(ctx context.Context, userID, billingModel st
 		ID:           id,
 		UserID:       userID,
 		BillingModel: billingModel,
+		Image:        image,
 		IdleTimeout:  idleTimeout,
 		MaxLifetime:  maxLifetime,
 		CreatedAt:    time.Now().UTC(),

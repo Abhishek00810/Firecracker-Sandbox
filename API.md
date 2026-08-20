@@ -107,6 +107,7 @@ curl -sS -X POST "$RENDEROPS_API_URL/session" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "dependency-check",
+    "image": "alpine",
     "size": "nano",
     "metadata": {"project": "docs"},
     "env": {"APP_ENV": "dev"},
@@ -121,6 +122,7 @@ Request fields:
 | Field | Type | Required | Meaning |
 | --- | --- | --- | --- |
 | `name` | string | no | Dashboard label; defaults to `sandbox` |
+| `image` | string | no | Immutable boot image identifier; defaults to `alpine` |
 | `metadata` | object | no | Caller-owned labels stored with the sandbox |
 | `env` | object of strings | no | Environment injected into guest executions |
 | `size` | string | no | `nano`, `small`, or `medium`; defaults to `nano` |
@@ -128,6 +130,11 @@ Request fields:
 | `network.internet` | boolean | no | Enables guest egress; defaults to `true` |
 | `idle_timeout_s` | integer | no | Auto-pause interval; capped by policy/lifetime |
 | `max_lifetime_s` | integer | no | Maximum lifetime; capped by server policy |
+
+Image availability is worker capability-aware. A sandbox is scheduled only to
+a healthy worker that advertises the requested image. The current published
+platform image is `alpine`; additional image identifiers become usable after
+their rootfs/template releases are published and loaded by workers.
 
 Canonical shapes:
 

@@ -35,16 +35,17 @@ func (d fixedDialer) DialContext(ctx context.Context, _ int, _ string) (net.Conn
 	return (&net.Dialer{}).DialContext(ctx, "tcp", d.address)
 }
 
-func (f *fakeSessionService) Create(context.Context, string, string, map[string]string, int, int, int, bool, time.Duration, time.Duration) (*session.Session, error) {
+func (f *fakeSessionService) Create(context.Context, string, string, string, map[string]string, int, int, int, bool, time.Duration, time.Duration) (*session.Session, error) {
 	panic("worker must use CreateWithID")
 }
 
-func (f *fakeSessionService) CreateWithID(_ context.Context, sandboxID, userID, billingModel string, _ map[string]string, vcpus, memoryMB, diskGB int, internet bool, _, _ time.Duration) (*session.Session, error) {
+func (f *fakeSessionService) CreateWithID(_ context.Context, sandboxID, userID, billingModel, image string, _ map[string]string, vcpus, memoryMB, diskGB int, internet bool, _, _ time.Duration) (*session.Session, error) {
 	f.createdID = sandboxID
 	f.session = &session.Session{
 		ID:           sandboxID,
 		UserID:       userID,
 		BillingModel: billingModel,
+		Image:        image,
 		VCPUs:        vcpus,
 		MemoryMB:     memoryMB,
 		DiskGB:       diskGB,

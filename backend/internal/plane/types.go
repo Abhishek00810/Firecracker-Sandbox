@@ -13,6 +13,7 @@ var ErrNoCapacity = errors.New("worker has insufficient capacity")
 type SessionInfo struct {
 	ID               string
 	UserID           string
+	Image            string
 	BillingModel     string
 	VCPUs            int
 	MemoryMB         int
@@ -34,6 +35,7 @@ type SessionInfo struct {
 type CreateRequest struct {
 	SandboxID    string            `json:"sandbox_id"`
 	UserID       string            `json:"user_id"`
+	Image        string            `json:"image"`
 	BillingModel string            `json:"billing_model"`
 	Env          map[string]string `json:"env,omitempty"`
 	VCPUs        int               `json:"vcpus"`
@@ -48,6 +50,7 @@ type CreateRequest struct {
 type CreateResponse struct {
 	SandboxID string `json:"sandbox_id"`
 	State     string `json:"state"`
+	Image     string `json:"image"`
 	VCPUs     int    `json:"vcpus"`
 	MemoryMB  int    `json:"memory_mb"`
 	DiskGB    int    `json:"disk_gb"`

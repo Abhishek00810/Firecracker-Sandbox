@@ -160,8 +160,37 @@ func TestRegisterWorkerNormalizesRegistration(t *testing.T) {
 	if store.registration.Pool != "default" {
 		t.Fatalf("unexpected pool %q", store.registration.Pool)
 	}
+	if len(store.registration.SupportedImages) != 1 || store.registration.SupportedImages[0] != "alpine" {
+		t.Fatalf("unexpected supported images %#v", store.registration.SupportedImages)
+	}
 	if !store.registeredAt.Equal(now) {
 		t.Fatalf("unexpected registration time %s", store.registeredAt)
+	}
+}
+
+func TestRegisterWorkerNormalizesAndDeduplicatesImages(t *testing.T) {
+	store := &fakeStore{}
+	svc := NewService(store, 30*time.Second)
+	err := svc.RegisterWorker(context.Background(), WorkerRegistration{
+		ID:                  "worker-1",
+		Endpoint:            "http://worker-1.internal:9876",
+		AllocatableVCPUs:    8,
+		AllocatableMemoryMB: 16384,
+		AllocatableDiskGB:   100,
+		MaxSandboxes:        100,
+		SupportedImages:     []string{" Alpine ", "ubuntu", "alpine"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"alpine", "ubuntu"}
+	if len(store.registration.SupportedImages) != len(want) {
+		t.Fatalf("supported images = %#v, want %#v", store.registration.SupportedImages, want)
+	}
+	for i := range want {
+		if store.registration.SupportedImages[i] != want[i] {
+			t.Fatalf("supported images = %#v, want %#v", store.registration.SupportedImages, want)
+		}
 	}
 }
 

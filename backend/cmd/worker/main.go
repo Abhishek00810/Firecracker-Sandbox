@@ -12,6 +12,7 @@ import (
 	"backend/internal/orchestrator"
 	"backend/internal/plane"
 	workerv1 "backend/internal/rpc/worker/v1"
+	"backend/internal/sandboximage"
 	"backend/internal/session"
 	"backend/internal/template"
 	"backend/internal/vmsize"
@@ -24,6 +25,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -66,7 +68,7 @@ func envFloat(key string, def float64) float64 {
 	return def
 }
 
-func startOrchestratorRegistration(ctx context.Context, maxSessions int, physicalVCPUs int, capacity func() plane.Capacity) {
+func startOrchestratorRegistration(ctx context.Context, maxSessions int, physicalVCPUs int, supportedImages []string, capacity func() plane.Capacity) {
 	baseURL := os.Getenv("ORCHESTRATOR_URL")
 	if baseURL == "" {
 		slog.Warn("ORCHESTRATOR_URL not set; worker registration and heartbeat are disabled")
@@ -81,6 +83,7 @@ func startOrchestratorRegistration(ctx context.Context, maxSessions int, physica
 		AllocatableMemoryMB: envInt("WORKER_ALLOCATABLE_MEMORY_MB", 0),
 		AllocatableDiskGB:   currentCapacity.AllocatableDiskGB,
 		MaxSandboxes:        maxSessions,
+		SupportedImages:     supportedImages,
 	}
 	if registration.ID == "" ||
 		registration.Endpoint == "" ||
@@ -193,29 +196,48 @@ func main() {
 	// Templates: download a prebuilt release from object storage (TEMPLATE_SOURCE=
 	// prebuilt — restore-only) or build them locally at startup (default). Fail closed
 	// on resolution failure — production must not silently cold-boot.
-	sizeTemplates, err := resolveTemplates(context.Background(), cfg, vmManager, baseCfg)
+	resolvedTemplates, err := resolveTemplates(context.Background(), cfg, vmManager, baseCfg)
 	if err != nil {
 		slog.Error("template resolution failed", "err", err)
 		os.Exit(1)
 	}
-	defaultTemplate := sizeTemplates[vmsize.Default().Key()]
+	// Pools and registration are derived from the boot catalog so worker
+	// capabilities cannot drift from the images the worker can actually start.
+	imageConfigs := map[string]firecracker.VMConfig{
+		sandboximage.Default: baseCfg,
+	}
+	defaultTemplate := resolvedTemplates[vmsize.Default().Key()]
+	sizeTemplates := make(map[string]*firecracker.SnapshotTemplate, len(imageConfigs)*len(resolvedTemplates))
+	for image := range imageConfigs {
+		for sizeKey, tmpl := range resolvedTemplates {
+			sizeTemplates[sandboximage.PoolKey(image, sizeKey)] = tmpl
+		}
+	}
 
 	// One session pool per size (vmsize.Sizes is the single source of truth). cgroup
 	// limits are derived from the size, matching the monolith.
-	sizePools := make(map[string]*firecracker.VMPool, len(vmsize.Sizes))
-	for _, sz := range vmsize.Sizes {
-		szCfg := baseCfg
-		szCfg.VCPUCount = sz.VCPUs
-		szCfg.MemSizeMiB = sz.MemoryMB
-		szCfg.DiskGB = sz.DiskGB
-		szCgroup := cgroup.Config{
-			CPUQuotaUS:  sz.CgroupCPUQuotaUS(),
-			CPUPeriodUS: vmsize.CgroupCPUPeriodUS,
-			MemMaxBytes: sz.CgroupMemMaxBytes(),
+	sizePools := make(map[string]*firecracker.VMPool, len(imageConfigs)*len(vmsize.Sizes))
+	for image, imageCfg := range imageConfigs {
+		for _, sz := range vmsize.Sizes {
+			szCfg := imageCfg
+			szCfg.VCPUCount = sz.VCPUs
+			szCfg.MemSizeMiB = sz.MemoryMB
+			szCfg.DiskGB = sz.DiskGB
+			szCgroup := cgroup.Config{
+				CPUQuotaUS:  sz.CgroupCPUQuotaUS(),
+				CPUPeriodUS: vmsize.CgroupCPUPeriodUS,
+				MemMaxBytes: sz.CgroupMemMaxBytes(),
+			}
+			key := sandboximage.PoolKey(image, sz.Key())
+			sizePools[key] = firecracker.NewVMPoolWithSnapshot(0, slotCount, szCfg, vmManager, szCgroup, sizeTemplates[key], false, false)
 		}
-		sizePools[sz.Key()] = firecracker.NewVMPoolWithSnapshot(0, slotCount, szCfg, vmManager, szCgroup, sizeTemplates[sz.Key()], false, false)
 	}
-	slog.Info("worker execution engine initialized", "sizes", len(sizePools), "template_source", env("TEMPLATE_SOURCE", "build"))
+	supportedImages := make([]string, 0, len(imageConfigs))
+	for image := range imageConfigs {
+		supportedImages = append(supportedImages, image)
+	}
+	sort.Strings(supportedImages)
+	slog.Info("worker execution engine initialized", "pools", len(sizePools), "images", supportedImages, "template_source", env("TEMPLATE_SOURCE", "build"))
 
 	admission := worker.NewAdmission(
 		h.Capacity.PhysicalVCPUs,
@@ -389,7 +411,7 @@ func main() {
 	}()
 
 	registrationCtx, stopRegistration := context.WithCancel(context.Background())
-	startOrchestratorRegistration(registrationCtx, maxSessions, h.Capacity.PhysicalVCPUs, admission.Capacity)
+	startOrchestratorRegistration(registrationCtx, maxSessions, h.Capacity.PhysicalVCPUs, supportedImages, admission.Capacity)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)

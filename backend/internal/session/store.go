@@ -20,6 +20,7 @@ const (
 type Session struct {
 	ID               string
 	UserID           string // owning tenant — used to sync state + timeline events to the DB
+	Image            string // immutable template image id used to boot this sandbox
 	VM               *firecracker.MicroVM
 	Cgroup           *cgroup.Cgroup
 	BillingModel     string

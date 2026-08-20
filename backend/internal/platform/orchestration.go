@@ -46,9 +46,9 @@ func (c *Client) RegisterWorker(ctx context.Context, worker orchestrator.WorkerR
 		INSERT INTO worker_hosts (
 			id, endpoint, pool, status, draining,
 			allocatable_vcpus, allocatable_memory_mb, allocatable_disk_gb,
-			max_sandboxes, last_heartbeat_at, updated_at
+			max_sandboxes, supported_images, last_heartbeat_at, updated_at
 		)
-		VALUES ($1,$2,$3,'active',false,$4,$5,$6,$7,$8,now())
+		VALUES ($1,$2,$3,'active',false,$4,$5,$6,$7,$8,$9,now())
 		ON CONFLICT (id) DO UPDATE SET
 			endpoint=EXCLUDED.endpoint,
 			pool=EXCLUDED.pool,
@@ -58,6 +58,7 @@ func (c *Client) RegisterWorker(ctx context.Context, worker orchestrator.WorkerR
 			allocatable_memory_mb=EXCLUDED.allocatable_memory_mb,
 			allocatable_disk_gb=EXCLUDED.allocatable_disk_gb,
 			max_sandboxes=EXCLUDED.max_sandboxes,
+			supported_images=EXCLUDED.supported_images,
 			last_heartbeat_at=EXCLUDED.last_heartbeat_at,
 			updated_at=now()`,
 		worker.ID,
@@ -67,6 +68,7 @@ func (c *Client) RegisterWorker(ctx context.Context, worker orchestrator.WorkerR
 		worker.AllocatableMemoryMB,
 		worker.AllocatableDiskGB,
 		worker.MaxSandboxes,
+		worker.SupportedImages,
 		heartbeatAt,
 	)
 	if err != nil {
@@ -145,13 +147,14 @@ func (c *Client) ReservePlacement(
 	var existingWorkerID *string
 	var currentState string
 	var vcpus, memoryMB, diskGB int
+	var image string
 	if err := tx.QueryRow(ctx, `
-		SELECT host_id, vcpus, memory_mb, disk_gb, state
+		SELECT host_id, vcpus, memory_mb, disk_gb, COALESCE(image,'alpine'), state
 		FROM sandboxes
 		WHERE id=$1::uuid
 		FOR UPDATE`,
 		sandboxID,
-	).Scan(&existingWorkerID, &vcpus, &memoryMB, &diskGB, &currentState); err != nil {
+	).Scan(&existingWorkerID, &vcpus, &memoryMB, &diskGB, &image, &currentState); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return orchestrator.Placement{}, orchestrator.ErrSandboxNotFound
 		}
@@ -207,10 +210,11 @@ func (c *Client) ReservePlacement(
 			  AND FLOOR(allocatable_vcpus*$6) >= $3
 			  AND FLOOR(allocatable_memory_mb*$7) >= $4
 			  AND allocatable_disk_gb >= $5
+			  AND $8 = ANY(supported_images)
 			  AND max_sandboxes >= 1
-			  AND NOT (id = ANY($8::text[]))
+			  AND NOT (id = ANY($9::text[]))
 			ORDER BY random()
-			LIMIT $9
+			LIMIT $10
 		)
 		SELECT id, endpoint
 		FROM sampled
@@ -223,6 +227,7 @@ func (c *Client) ReservePlacement(
 		diskGB,
 		policy.CPUOvercommitRatio,
 		policy.MemoryOvercommitRatio,
+		image,
 		request.ExcludedWorkerIDs,
 		bestOfKSampleSize,
 	).Scan(&placement.WorkerID, &placement.Endpoint)

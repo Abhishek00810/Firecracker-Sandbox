@@ -14,6 +14,7 @@ import (
 	"backend/internal/checkpoint"
 	"backend/internal/executor"
 	"backend/internal/executor/firecracker"
+	"backend/internal/sandboximage"
 	"backend/internal/terminal"
 	"backend/internal/vmsize"
 
@@ -348,16 +349,20 @@ func (m *Manager) persistManifest() {
 
 // Create boots a VM and binds it to a new session. env vars are injected into
 // the persistent shell so commands like git can access GITHUB_TOKEN etc.
-func (m *Manager) Create(ctx context.Context, userID, billingModel string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*Session, error) {
-	return m.CreateWithID(ctx, uuid.NewString(), userID, billingModel, env, vcpus, memoryMB, diskGB, internet, idleTimeout, maxLifetime)
+func (m *Manager) Create(ctx context.Context, userID, billingModel, image string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*Session, error) {
+	return m.CreateWithID(ctx, uuid.NewString(), userID, billingModel, image, env, vcpus, memoryMB, diskGB, internet, idleTimeout, maxLifetime)
 }
 
 // CreateWithID creates a session under the control-plane-assigned UUID. Calls
 // for the same UUID are serialized and idempotent, so a retry cannot boot a
 // second VM or consume a second capacity reservation.
-func (m *Manager) CreateWithID(ctx context.Context, sandboxID, userID, billingModel string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*Session, error) {
+func (m *Manager) CreateWithID(ctx context.Context, sandboxID, userID, billingModel, image string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*Session, error) {
 	if _, err := uuid.Parse(sandboxID); err != nil {
 		return nil, fmt.Errorf("invalid sandbox id %q: %w", sandboxID, err)
+	}
+	image, err := sandboximage.Normalize(image)
+	if err != nil {
+		return nil, err
 	}
 	unlock := m.lockCreate(sandboxID)
 	defer unlock()
@@ -365,6 +370,7 @@ func (m *Manager) CreateWithID(ctx context.Context, sandboxID, userID, billingMo
 	if existing, ok := m.store.Get(sandboxID); ok {
 		if existing.UserID != userID ||
 			existing.BillingModel != billingModel ||
+			existing.Image != image ||
 			existing.VCPUs != vcpus ||
 			existing.MemoryMB != memoryMB ||
 			existing.DiskGB != diskGB ||
@@ -376,9 +382,9 @@ func (m *Manager) CreateWithID(ctx context.Context, sandboxID, userID, billingMo
 
 	t0 := time.Now()
 
-	pool := m.sizePools[vmsize.Key(vcpus, memoryMB, diskGB)]
+	pool := m.sizePools[sandboximage.PoolKey(image, vmsize.Key(vcpus, memoryMB, diskGB))]
 	if pool == nil {
-		return nil, fmt.Errorf("no VM pool for size %dvcpu/%dMB/%dGB", vcpus, memoryMB, diskGB)
+		return nil, fmt.Errorf("no VM pool for image %q and size %dvcpu/%dMB/%dGB", image, vcpus, memoryMB, diskGB)
 	}
 
 	pvm, warm, err := pool.Acquire(ctx)
@@ -397,6 +403,7 @@ func (m *Manager) CreateWithID(ctx context.Context, sandboxID, userID, billingMo
 	sess := &Session{
 		ID:           sandboxID,
 		UserID:       userID,
+		Image:        image,
 		VM:           pvm.VM,
 		Cgroup:       pvm.Cgroup,
 		PooledVM:     pvm,
@@ -749,7 +756,7 @@ func (m *Manager) pause(ctx context.Context, sessionID string, idleCheckAt time.
 	// those. Each size has its own template with its own baked device names, so use the
 	// session's OWN size template (not the default). Persisted in the manifest for recovery.
 	vmID := sess.VM.ID
-	tmpl := m.sizeTemplates[vmsize.Key(sess.VCPUs, sess.MemoryMB, sess.DiskGB)]
+	tmpl := m.sizeTemplates[sandboximage.PoolKey(sess.Image, vmsize.Key(sess.VCPUs, sess.MemoryMB, sess.DiskGB))]
 	if tmpl == nil {
 		tmpl = m.template
 	}

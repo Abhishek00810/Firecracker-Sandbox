@@ -30,10 +30,10 @@ func TestSandboxInsertQueriesCastIdleTimeoutConsistently(t *testing.T) {
 		"insert": insertSandboxQuery,
 		"upsert": upsertSandboxQuery,
 	} {
-		if count := strings.Count(query, "$11::integer"); count != 2 {
+		if count := strings.Count(query, "$12::integer"); count != 2 {
 			t.Errorf("%s query has %d explicit idle-timeout casts, want 2", name, count)
 		}
-		if strings.Contains(query, "$11::bigint") {
+		if strings.Contains(query, "$12::bigint") {
 			t.Errorf("%s query casts the integer column parameter to bigint", name)
 		}
 	}

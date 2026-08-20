@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"backend/internal/plane"
+	"backend/internal/sandboximage"
 )
 
 var (
@@ -33,17 +34,19 @@ const (
 )
 
 type WorkerRegistration struct {
-	ID                  string `json:"id"`
-	Endpoint            string `json:"endpoint"`
-	Pool                string `json:"pool"`
-	AllocatableVCPUs    int    `json:"allocatable_vcpus"`
-	AllocatableMemoryMB int    `json:"allocatable_memory_mb"`
-	AllocatableDiskGB   int    `json:"allocatable_disk_gb"`
-	MaxSandboxes        int    `json:"max_sandboxes"`
+	ID                  string   `json:"id"`
+	Endpoint            string   `json:"endpoint"`
+	Pool                string   `json:"pool"`
+	AllocatableVCPUs    int      `json:"allocatable_vcpus"`
+	AllocatableMemoryMB int      `json:"allocatable_memory_mb"`
+	AllocatableDiskGB   int      `json:"allocatable_disk_gb"`
+	MaxSandboxes        int      `json:"max_sandboxes"`
+	SupportedImages     []string `json:"supported_images"`
 }
 
 type PlacementRequest struct {
 	Pool              string   `json:"pool"`
+	Image             string   `json:"image"`
 	ExcludedWorkerIDs []string `json:"-"`
 }
 
@@ -136,6 +139,22 @@ func (s *Service) RegisterWorker(ctx context.Context, registration WorkerRegistr
 	if registration.Pool == "" {
 		registration.Pool = "default"
 	}
+	if len(registration.SupportedImages) == 0 {
+		registration.SupportedImages = []string{sandboximage.Default}
+	}
+	seenImages := make(map[string]struct{}, len(registration.SupportedImages))
+	normalizedImages := make([]string, 0, len(registration.SupportedImages))
+	for _, value := range registration.SupportedImages {
+		image, err := sandboximage.Normalize(value)
+		if err != nil {
+			return err
+		}
+		if _, exists := seenImages[image]; !exists {
+			seenImages[image] = struct{}{}
+			normalizedImages = append(normalizedImages, image)
+		}
+	}
+	registration.SupportedImages = normalizedImages
 	if !workerIDPattern.MatchString(registration.ID) {
 		return fmt.Errorf("invalid worker id %q", registration.ID)
 	}
@@ -176,6 +195,11 @@ func (s *Service) Place(ctx context.Context, sandboxID string, request Placement
 	if request.Pool == "" {
 		request.Pool = "default"
 	}
+	image, err := sandboximage.Normalize(request.Image)
+	if err != nil {
+		return Placement{}, err
+	}
+	request.Image = image
 	healthyAfter := s.now().UTC().Add(-s.heartbeatTTL)
 	for attempt := 0; attempt < maxPlacementAttempts; attempt++ {
 		placement, err := s.store.ReservePlacement(ctx, sandboxID, request, s.placementPolicy, healthyAfter)
@@ -246,6 +270,11 @@ func (s *Service) Provision(ctx context.Context, request ProvisionRequest) (Plac
 	if sandboxID == "" {
 		return Placement{}, errors.New("sandbox id is required")
 	}
+	image, err := sandboximage.Normalize(request.Image)
+	if err != nil {
+		return Placement{}, err
+	}
+	request.Image = image
 
 	var placement Placement
 	var response plane.CreateResponse
@@ -253,7 +282,7 @@ func (s *Service) Provision(ctx context.Context, request ProvisionRequest) (Plac
 	for {
 		var err error
 		placement, err = s.Place(ctx, sandboxID, PlacementRequest{
-			Pool: request.Pool, ExcludedWorkerIDs: excludedWorkerIDs,
+			Pool: request.Pool, Image: image, ExcludedWorkerIDs: excludedWorkerIDs,
 		})
 		if err != nil {
 			if !errors.Is(err, ErrSandboxNotFound) {

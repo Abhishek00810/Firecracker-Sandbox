@@ -9,8 +9,8 @@ import (
 )
 
 type Service interface {
-	Create(ctx context.Context, userID, billingModel string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*Session, error)
-	CreateWithID(ctx context.Context, sandboxID, userID, billingModel string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*Session, error)
+	Create(ctx context.Context, userID, billingModel, image string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*Session, error)
+	CreateWithID(ctx context.Context, sandboxID, userID, billingModel, image string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*Session, error)
 	Execute(ctx context.Context, sessionID, code, language string, timeoutSec int) (executor.ExecutionResult, error)
 	Exec(ctx context.Context, sessionID, command string, timeoutSec int) (executor.ExecutionResult, error)
 	OpenTerminal(ctx context.Context, sessionID, terminalID, shell string, columns, rows uint16) error

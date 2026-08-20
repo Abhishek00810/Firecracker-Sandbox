@@ -17,6 +17,7 @@ type Sandbox struct {
 	ID            string         `json:"id"`
 	UserID        string         `json:"user_id"`
 	APIKeyID      string         `json:"api_key_id,omitempty"`
+	Image         string         `json:"image"`
 	Name          string         `json:"name"`
 	State         string         `json:"state"`
 	BillingModel  string         `json:"billing_model"`
@@ -33,6 +34,7 @@ type SandboxListItem struct {
 	Name          string         `json:"name"`
 	State         string         `json:"state"`
 	BillingModel  string         `json:"billing_model"`
+	Image         string         `json:"image"`
 	VCPUs         int            `json:"vcpus"`
 	MemoryMB      int            `json:"memory_mb"`
 	DiskGB        int            `json:"disk_gb"`
@@ -41,17 +43,17 @@ type SandboxListItem struct {
 	Created       string         `json:"created_at,omitempty"`
 }
 
-const upsertSandboxQuery = `INSERT INTO sandboxes (id,user_id,api_key_id,name,state,billing_model,vcpus,memory_mb,disk_gb,internet,idle_timeout_ms,expires_at,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::integer,now()+(($11::integer)*interval '1 millisecond'),$12) ON CONFLICT (id) DO UPDATE SET user_id=EXCLUDED.user_id,api_key_id=EXCLUDED.api_key_id,name=EXCLUDED.name,state=EXCLUDED.state,billing_model=EXCLUDED.billing_model,vcpus=EXCLUDED.vcpus,memory_mb=EXCLUDED.memory_mb,disk_gb=EXCLUDED.disk_gb,internet=EXCLUDED.internet,idle_timeout_ms=EXCLUDED.idle_timeout_ms,expires_at=EXCLUDED.expires_at,metadata=EXCLUDED.metadata,updated_at=now()`
+const upsertSandboxQuery = `INSERT INTO sandboxes (id,user_id,api_key_id,name,state,billing_model,image,vcpus,memory_mb,disk_gb,internet,idle_timeout_ms,expires_at,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::integer,now()+(($12::integer)*interval '1 millisecond'),$13) ON CONFLICT (id) DO UPDATE SET user_id=EXCLUDED.user_id,api_key_id=EXCLUDED.api_key_id,name=EXCLUDED.name,state=EXCLUDED.state,billing_model=EXCLUDED.billing_model,image=EXCLUDED.image,vcpus=EXCLUDED.vcpus,memory_mb=EXCLUDED.memory_mb,disk_gb=EXCLUDED.disk_gb,internet=EXCLUDED.internet,idle_timeout_ms=EXCLUDED.idle_timeout_ms,expires_at=EXCLUDED.expires_at,metadata=EXCLUDED.metadata,updated_at=now()`
 
 const insertSandboxQuery = `
 		INSERT INTO sandboxes (
-			id,user_id,api_key_id,name,state,billing_model,
+			id,user_id,api_key_id,name,state,billing_model,image,
 			vcpus,memory_mb,disk_gb,internet,idle_timeout_ms,expires_at,metadata
 		)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::integer,now()+(($11::integer)*interval '1 millisecond'),$12)`
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::integer,now()+(($12::integer)*interval '1 millisecond'),$13)`
 
 func (c *Client) ListSandboxes(ctx context.Context, userID string) ([]SandboxListItem, error) {
-	rows, err := c.pool.Query(ctx, `SELECT id::text,name,state,billing_model,vcpus,memory_mb,disk_gb,idle_timeout_ms,COALESCE(metadata,'{}'::jsonb),created_at FROM sandboxes WHERE user_id=$1 AND state<>'destroyed' ORDER BY created_at DESC`, userID)
+	rows, err := c.pool.Query(ctx, `SELECT id::text,name,state,billing_model,COALESCE(image,'alpine'),vcpus,memory_mb,disk_gb,idle_timeout_ms,COALESCE(metadata,'{}'::jsonb),created_at FROM sandboxes WHERE user_id=$1 AND state<>'destroyed' ORDER BY created_at DESC`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list sandboxes: %w", err)
 	}
@@ -61,7 +63,7 @@ func (c *Client) ListSandboxes(ctx context.Context, userID string) ([]SandboxLis
 		var item SandboxListItem
 		var metadata []byte
 		var created time.Time
-		if err := rows.Scan(&item.ID, &item.Name, &item.State, &item.BillingModel, &item.VCPUs, &item.MemoryMB, &item.DiskGB, &item.IdleTimeoutMs, &metadata, &created); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.State, &item.BillingModel, &item.Image, &item.VCPUs, &item.MemoryMB, &item.DiskGB, &item.IdleTimeoutMs, &metadata, &created); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal(metadata, &item.Metadata)
@@ -77,7 +79,7 @@ func (c *Client) UpsertSandbox(ctx context.Context, sb Sandbox) {
 	if sb.APIKeyID != "" {
 		apiKeyID = sb.APIKeyID
 	}
-	_, err := c.pool.Exec(ctx, upsertSandboxQuery, sb.ID, sb.UserID, apiKeyID, sb.Name, sb.State, sb.BillingModel, sb.VCPUs, sb.MemoryMB, sb.DiskGB, sb.Internet, sb.IdleTimeoutMs, metadata)
+	_, err := c.pool.Exec(ctx, upsertSandboxQuery, sb.ID, sb.UserID, apiKeyID, sb.Name, sb.State, sb.BillingModel, sb.Image, sb.VCPUs, sb.MemoryMB, sb.DiskGB, sb.Internet, sb.IdleTimeoutMs, metadata)
 	if err != nil {
 		slog.Warn("sandbox upsert failed", "err", err)
 	}
@@ -134,6 +136,7 @@ func (c *Client) InsertSandbox(ctx context.Context, sb Sandbox) error {
 		sb.Name,
 		sb.State,
 		sb.BillingModel,
+		sb.Image,
 		sb.VCPUs,
 		sb.MemoryMB,
 		sb.DiskGB,
@@ -272,6 +275,7 @@ type SandboxRef struct {
 	State         string    `json:"state"`
 	UserID        string    `json:"user_id"`
 	BillingModel  string    `json:"billing_model"`
+	Image         string    `json:"image"`
 	VCPUs         int       `json:"vcpus"`
 	MemoryMB      int       `json:"memory_mb"`
 	DiskGB        int       `json:"disk_gb"`
@@ -285,8 +289,8 @@ type SandboxRef struct {
 // (the id::text comparison also makes malformed ids a miss, not an error).
 func (c *Client) GetSandbox(ctx context.Context, id string) (SandboxRef, bool, error) {
 	var ref SandboxRef
-	err := c.pool.QueryRow(ctx, `SELECT id::text,state,user_id::text,COALESCE(billing_model,'payg'),COALESCE(vcpus,0),COALESCE(memory_mb,0),COALESCE(disk_gb,0),COALESCE(internet,true),idle_timeout_ms,created_at,COALESCE(last_used_at,created_at) FROM sandboxes WHERE id::text=$1`, id).
-		Scan(&ref.ID, &ref.State, &ref.UserID, &ref.BillingModel, &ref.VCPUs, &ref.MemoryMB, &ref.DiskGB, &ref.Internet, &ref.IdleTimeoutMs, &ref.Created, &ref.LastUsed)
+	err := c.pool.QueryRow(ctx, `SELECT id::text,state,user_id::text,COALESCE(billing_model,'payg'),COALESCE(image,'alpine'),COALESCE(vcpus,0),COALESCE(memory_mb,0),COALESCE(disk_gb,0),COALESCE(internet,true),idle_timeout_ms,created_at,COALESCE(last_used_at,created_at) FROM sandboxes WHERE id::text=$1`, id).
+		Scan(&ref.ID, &ref.State, &ref.UserID, &ref.BillingModel, &ref.Image, &ref.VCPUs, &ref.MemoryMB, &ref.DiskGB, &ref.Internet, &ref.IdleTimeoutMs, &ref.Created, &ref.LastUsed)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return SandboxRef{}, false, nil
@@ -297,7 +301,7 @@ func (c *Client) GetSandbox(ctx context.Context, id string) (SandboxRef, bool, e
 }
 
 func (c *Client) ListSandboxesByState(ctx context.Context, states []string) ([]SandboxRef, error) {
-	rows, err := c.pool.Query(ctx, `SELECT id::text,state,user_id::text,COALESCE(billing_model,'payg'),COALESCE(vcpus,0),COALESCE(memory_mb,0),COALESCE(disk_gb,0),COALESCE(internet,true),idle_timeout_ms,created_at,COALESCE(last_used_at,created_at) FROM sandboxes WHERE state=ANY($1)`, states)
+	rows, err := c.pool.Query(ctx, `SELECT id::text,state,user_id::text,COALESCE(billing_model,'payg'),COALESCE(image,'alpine'),COALESCE(vcpus,0),COALESCE(memory_mb,0),COALESCE(disk_gb,0),COALESCE(internet,true),idle_timeout_ms,created_at,COALESCE(last_used_at,created_at) FROM sandboxes WHERE state=ANY($1)`, states)
 	if err != nil {
 		return nil, fmt.Errorf("list sandboxes by state: %w", err)
 	}
@@ -305,7 +309,7 @@ func (c *Client) ListSandboxesByState(ctx context.Context, states []string) ([]S
 	refs := make([]SandboxRef, 0)
 	for rows.Next() {
 		var ref SandboxRef
-		if err := rows.Scan(&ref.ID, &ref.State, &ref.UserID, &ref.BillingModel, &ref.VCPUs, &ref.MemoryMB, &ref.DiskGB, &ref.Internet, &ref.IdleTimeoutMs, &ref.Created, &ref.LastUsed); err != nil {
+		if err := rows.Scan(&ref.ID, &ref.State, &ref.UserID, &ref.BillingModel, &ref.Image, &ref.VCPUs, &ref.MemoryMB, &ref.DiskGB, &ref.Internet, &ref.IdleTimeoutMs, &ref.Created, &ref.LastUsed); err != nil {
 			return nil, err
 		}
 		refs = append(refs, ref)

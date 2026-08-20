@@ -15,6 +15,7 @@ import (
 	"backend/internal/orchestrator"
 	"backend/internal/plane"
 	"backend/internal/platform"
+	"backend/internal/sandboximage"
 
 	"github.com/google/uuid"
 )
@@ -33,11 +34,16 @@ func NewService(db *platform.Client, orchestrationClient *orchestrator.Client, w
 
 // Create writes the scheduling row first, then asks the orchestrator to reserve
 // a healthy worker and boot this exact UUID. The worker never writes Postgres.
-func (s *Service) Create(ctx context.Context, userID, billingModel string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*plane.SessionInfo, error) {
+func (s *Service) Create(ctx context.Context, userID, billingModel, image string, env map[string]string, vcpus, memoryMB, diskGB int, internet bool, idleTimeout, maxLifetime time.Duration) (*plane.SessionInfo, error) {
+	image, err := sandboximage.Normalize(image)
+	if err != nil {
+		return nil, err
+	}
 	sandboxID := uuid.NewString()
 	if err := s.db.InsertSandbox(ctx, platform.Sandbox{
 		ID:            sandboxID,
 		UserID:        userID,
+		Image:         image,
 		Name:          "sandbox",
 		State:         "scheduling",
 		BillingModel:  billingModel,
@@ -50,10 +56,11 @@ func (s *Service) Create(ctx context.Context, userID, billingModel string, env m
 		return nil, fmt.Errorf("create sandbox scheduling row: %w", err)
 	}
 
-	_, err := s.orchestrator.Provision(ctx, orchestrator.ProvisionRequest{
+	_, err = s.orchestrator.Provision(ctx, orchestrator.ProvisionRequest{
 		CreateRequest: plane.CreateRequest{
 			SandboxID:    sandboxID,
 			UserID:       userID,
+			Image:        image,
 			BillingModel: billingModel,
 			Env:          env,
 			VCPUs:        vcpus,
@@ -72,6 +79,7 @@ func (s *Service) Create(ctx context.Context, userID, billingModel string, env m
 	return &plane.SessionInfo{
 		ID:           sandboxID,
 		UserID:       userID,
+		Image:        image,
 		BillingModel: billingModel,
 		Env:          env,
 		VCPUs:        vcpus,
@@ -160,6 +168,7 @@ func (s *Service) GetSession(ctx context.Context, id string) (*plane.SessionInfo
 	return &plane.SessionInfo{
 		ID:           ref.ID,
 		UserID:       ref.UserID,
+		Image:        ref.Image,
 		BillingModel: ref.BillingModel,
 		VCPUs:        ref.VCPUs,
 		MemoryMB:     ref.MemoryMB,
