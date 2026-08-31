@@ -1,15 +1,23 @@
 package orchestrator
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
 
 	"backend/internal/plane"
+
+	"github.com/google/uuid"
 )
 
-const AuthHeader = "X-Orchestrator-Token"
+const (
+	AuthHeader      = "X-Orchestrator-Token"
+	RequestIDHeader = "X-Request-ID"
+)
+
+type requestIDContextKey struct{}
 
 type HTTPServer struct {
 	service      *Service
@@ -39,7 +47,24 @@ func (s *HTTPServer) Handler() http.Handler {
 	mux.HandleFunc("POST /internal/sandboxes/{sandboxID}/pause", s.authed(s.controlToken, s.pause))
 	mux.HandleFunc("POST /internal/sandboxes/{sandboxID}/resume", s.authed(s.controlToken, s.resume))
 	mux.HandleFunc("DELETE /internal/sandboxes/{sandboxID}", s.authed(s.controlToken, s.destroy))
-	return mux
+	return withRequestID(mux)
+}
+
+func withRequestID(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestID := strings.TrimSpace(r.Header.Get(RequestIDHeader))
+		if requestID == "" || len(requestID) > 128 {
+			requestID = uuid.NewString()
+		}
+		w.Header().Set(RequestIDHeader, requestID)
+		ctx := context.WithValue(r.Context(), requestIDContextKey{}, requestID)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func requestIDFromContext(ctx context.Context) string {
+	requestID, _ := ctx.Value(requestIDContextKey{}).(string)
+	return requestID
 }
 
 func (s *HTTPServer) authed(token string, next http.HandlerFunc) http.HandlerFunc {

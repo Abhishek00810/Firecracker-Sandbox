@@ -22,6 +22,25 @@ func TestHTTPServerRequiresToken(t *testing.T) {
 	}
 }
 
+func TestHTTPServerAssignsAndPreservesRequestID(t *testing.T) {
+	server := NewHTTPServer(NewService(&fakeStore{}, time.Minute), "control-secret", "worker-secret")
+
+	generatedRequest := httptest.NewRequest(http.MethodGet, "/health", nil)
+	generatedResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(generatedResponse, generatedRequest)
+	if generatedResponse.Header().Get(RequestIDHeader) == "" {
+		t.Fatal("expected generated request id")
+	}
+
+	forwardedRequest := httptest.NewRequest(http.MethodGet, "/health", nil)
+	forwardedRequest.Header.Set(RequestIDHeader, "request-123")
+	forwardedResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(forwardedResponse, forwardedRequest)
+	if got := forwardedResponse.Header().Get(RequestIDHeader); got != "request-123" {
+		t.Fatalf("request id=%q want request-123", got)
+	}
+}
+
 func TestHTTPServerRegistersWorker(t *testing.T) {
 	store := &fakeStore{}
 	service := NewService(store, time.Minute)

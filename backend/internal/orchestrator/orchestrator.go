@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"net/url"
 	"regexp"
@@ -167,7 +168,20 @@ func (s *Service) RegisterWorker(ctx context.Context, registration WorkerRegistr
 		registration.MaxSandboxes <= 0 {
 		return errors.New("worker allocatable resources and max_sandboxes must be positive")
 	}
-	return s.store.RegisterWorker(ctx, registration, s.now().UTC())
+	err := s.store.RegisterWorker(ctx, registration, s.now().UTC())
+	if err != nil {
+		logOrchestrator(ctx, slog.LevelWarn, "worker registration failed",
+			"worker_id", registration.ID, "err", err)
+		return err
+	}
+	logOrchestrator(ctx, slog.LevelInfo, "worker registered",
+		"worker_id", registration.ID,
+		"pool", registration.Pool,
+		"allocatable_vcpus", registration.AllocatableVCPUs,
+		"allocatable_memory_mb", registration.AllocatableMemoryMB,
+		"allocatable_disk_gb", registration.AllocatableDiskGB,
+		"max_sandboxes", registration.MaxSandboxes)
+	return nil
 }
 
 func (s *Service) Heartbeat(ctx context.Context, workerID string, capacity plane.Capacity) error {
@@ -175,7 +189,12 @@ func (s *Service) Heartbeat(ctx context.Context, workerID string, capacity plane
 	if !workerIDPattern.MatchString(workerID) {
 		return fmt.Errorf("invalid worker id %q", workerID)
 	}
-	return s.store.RecordHeartbeat(ctx, workerID, capacity, s.now().UTC())
+	err := s.store.RecordHeartbeat(ctx, workerID, capacity, s.now().UTC())
+	if err != nil {
+		logOrchestrator(ctx, slog.LevelWarn, "worker heartbeat failed",
+			"worker_id", workerID, "err", err)
+	}
+	return err
 }
 
 func (s *Service) SetWorkerDraining(ctx context.Context, workerID string, draining bool) error {
@@ -183,10 +202,19 @@ func (s *Service) SetWorkerDraining(ctx context.Context, workerID string, draini
 	if !workerIDPattern.MatchString(workerID) {
 		return fmt.Errorf("invalid worker id %q", workerID)
 	}
-	return s.store.SetWorkerDraining(ctx, workerID, draining)
+	err := s.store.SetWorkerDraining(ctx, workerID, draining)
+	if err != nil {
+		logOrchestrator(ctx, slog.LevelWarn, "worker draining update failed",
+			"worker_id", workerID, "draining", draining, "err", err)
+		return err
+	}
+	logOrchestrator(ctx, slog.LevelInfo, "worker draining updated",
+		"worker_id", workerID, "draining", draining)
+	return nil
 }
 
 func (s *Service) Place(ctx context.Context, sandboxID string, request PlacementRequest) (Placement, error) {
+	startedAt := time.Now()
 	sandboxID = strings.TrimSpace(sandboxID)
 	request.Pool = strings.TrimSpace(request.Pool)
 	if sandboxID == "" {
@@ -204,9 +232,29 @@ func (s *Service) Place(ctx context.Context, sandboxID string, request Placement
 	for attempt := 0; attempt < maxPlacementAttempts; attempt++ {
 		placement, err := s.store.ReservePlacement(ctx, sandboxID, request, s.placementPolicy, healthyAfter)
 		if !errors.Is(err, ErrPlacementBusy) {
+			if err != nil {
+				logOrchestrator(ctx, slog.LevelWarn, "placement failed",
+					"sandbox_id", sandboxID,
+					"pool", request.Pool,
+					"image", request.Image,
+					"attempts", attempt+1,
+					"duration_ms", time.Since(startedAt).Milliseconds(),
+					"err", err)
+			} else {
+				logOrchestrator(ctx, slog.LevelInfo, "placement reserved",
+					"sandbox_id", sandboxID,
+					"worker_id", placement.WorkerID,
+					"state", placement.State,
+					"attempts", attempt+1,
+					"duration_ms", time.Since(startedAt).Milliseconds())
+			}
 			return placement, err
 		}
 		if attempt == maxPlacementAttempts-1 {
+			logOrchestrator(ctx, slog.LevelWarn, "placement contended",
+				"sandbox_id", sandboxID,
+				"attempts", maxPlacementAttempts,
+				"duration_ms", time.Since(startedAt).Milliseconds())
 			return Placement{}, ErrPlacementBusy
 		}
 		if err := s.waitForRetry(ctx, contentionWait(attempt)); err != nil {
@@ -262,7 +310,26 @@ func (s *Service) Release(ctx context.Context, sandboxID string) error {
 
 // Provision reserves capacity before booting and finalizes the sandbox only
 // after the worker confirms that its guest agent is ready.
-func (s *Service) Provision(ctx context.Context, request ProvisionRequest) (Placement, error) {
+func (s *Service) Provision(ctx context.Context, request ProvisionRequest) (result Placement, resultErr error) {
+	startedAt := time.Now()
+	selectedWorkerID := ""
+	defer func() {
+		attributes := []any{
+			"sandbox_id", strings.TrimSpace(request.SandboxID),
+			"worker_id", selectedWorkerID,
+			"duration_ms", time.Since(startedAt).Milliseconds(),
+		}
+		if resultErr != nil {
+			attributes = append(attributes, "err", resultErr)
+			logOrchestrator(ctx, slog.LevelError, "sandbox provision failed", attributes...)
+			return
+		}
+		logOrchestrator(ctx, slog.LevelInfo, "sandbox provision completed", attributes...)
+	}()
+	logOrchestrator(ctx, slog.LevelInfo, "sandbox provision started",
+		"sandbox_id", strings.TrimSpace(request.SandboxID),
+		"pool", strings.TrimSpace(request.Pool),
+		"image", request.Image)
 	if s.workerClient == nil {
 		return Placement{}, errors.New("worker client is not configured")
 	}
@@ -292,13 +359,19 @@ func (s *Service) Provision(ctx context.Context, request ProvisionRequest) (Plac
 			}
 			return Placement{}, err
 		}
+		selectedWorkerID = placement.WorkerID
 		if placement.State == "active" {
 			return placement, nil
 		}
 
+		workerStartedAt := time.Now()
 		response, err = s.workerClient(placement.Endpoint).Create(ctx, request.CreateRequest)
 		if !errors.Is(err, plane.ErrNoCapacity) {
 			if err == nil {
+				logOrchestrator(ctx, slog.LevelInfo, "worker sandbox create completed",
+					"sandbox_id", sandboxID,
+					"worker_id", placement.WorkerID,
+					"duration_ms", time.Since(workerStartedAt).Milliseconds())
 				break
 			}
 			// A timeout may happen after the worker completed the boot. Destroy by
@@ -316,6 +389,10 @@ func (s *Service) Provision(ctx context.Context, request ProvisionRequest) (Plac
 			return Placement{}, fmt.Errorf("provision sandbox on worker: %w", err)
 		}
 
+		logOrchestrator(ctx, slog.LevelWarn, "worker rejected sandbox capacity",
+			"sandbox_id", sandboxID,
+			"worker_id", placement.WorkerID,
+			"duration_ms", time.Since(workerStartedAt).Milliseconds())
 		excludedWorkerIDs = append(excludedWorkerIDs, placement.WorkerID)
 		if releaseErr := s.store.ReleasePlacement(ctx, sandboxID, "scheduling"); releaseErr != nil {
 			return Placement{}, errors.Join(err, fmt.Errorf("release rejected placement: %w", releaseErr))
@@ -336,7 +413,14 @@ func (s *Service) Provision(ctx context.Context, request ProvisionRequest) (Plac
 	return placement, nil
 }
 
-func (s *Service) Pause(ctx context.Context, sandboxID string) error {
+func (s *Service) Pause(ctx context.Context, sandboxID string) (resultErr error) {
+	startedAt := time.Now()
+	workerID := ""
+	logOrchestrator(ctx, slog.LevelInfo, "sandbox lifecycle started",
+		"operation", "pause", "sandbox_id", strings.TrimSpace(sandboxID))
+	defer func() {
+		logLifecycleResult(ctx, "pause", sandboxID, workerID, startedAt, resultErr)
+	}()
 	if s.workerClient == nil {
 		return errors.New("worker client is not configured")
 	}
@@ -347,13 +431,21 @@ func (s *Service) Pause(ctx context.Context, sandboxID string) error {
 	if !ok {
 		return ErrSandboxNotFound
 	}
+	workerID = placement.WorkerID
 	if err := s.workerClient(placement.Endpoint).Pause(ctx, sandboxID); err != nil {
 		return err
 	}
 	return s.store.PausePlacement(ctx, sandboxID, placement.WorkerID)
 }
 
-func (s *Service) Resume(ctx context.Context, sandboxID string) error {
+func (s *Service) Resume(ctx context.Context, sandboxID string) (resultErr error) {
+	startedAt := time.Now()
+	workerID := ""
+	logOrchestrator(ctx, slog.LevelInfo, "sandbox lifecycle started",
+		"operation", "resume", "sandbox_id", strings.TrimSpace(sandboxID))
+	defer func() {
+		logLifecycleResult(ctx, "resume", sandboxID, workerID, startedAt, resultErr)
+	}()
 	if s.workerClient == nil {
 		return errors.New("worker client is not configured")
 	}
@@ -364,6 +456,7 @@ func (s *Service) Resume(ctx context.Context, sandboxID string) error {
 	if !ok {
 		return ErrSandboxNotFound
 	}
+	workerID = placement.WorkerID
 
 	healthyAfter := s.now().UTC().Add(-s.heartbeatTTL)
 	if err := s.store.ReserveResume(
@@ -406,7 +499,14 @@ func (s *Service) Resume(ctx context.Context, sandboxID string) error {
 	)
 }
 
-func (s *Service) Destroy(ctx context.Context, sandboxID string) error {
+func (s *Service) Destroy(ctx context.Context, sandboxID string) (resultErr error) {
+	startedAt := time.Now()
+	workerID := ""
+	logOrchestrator(ctx, slog.LevelInfo, "sandbox lifecycle started",
+		"operation", "destroy", "sandbox_id", strings.TrimSpace(sandboxID))
+	defer func() {
+		logLifecycleResult(ctx, "destroy", sandboxID, workerID, startedAt, resultErr)
+	}()
 	if s.workerClient == nil {
 		return errors.New("worker client is not configured")
 	}
@@ -417,6 +517,7 @@ func (s *Service) Destroy(ctx context.Context, sandboxID string) error {
 	if !ok {
 		return s.store.ReleasePlacement(ctx, sandboxID, "destroyed")
 	}
+	workerID = placement.WorkerID
 	// A paused sandbox has no compute reservation. Keep that state until the
 	// final release so the store knows to release only its retained disk.
 	if placement.State != "paused" {
@@ -448,18 +549,56 @@ func (s *Service) ReportWorkerState(ctx context.Context, workerID, sandboxID, st
 		return errors.New("sandbox id is required")
 	}
 
+	var err error
 	switch state {
 	case "destroyed":
-		return s.store.ReleaseWorkerPlacement(ctx, sandboxID, workerID, "destroyed")
+		err = s.store.ReleaseWorkerPlacement(ctx, sandboxID, workerID, "destroyed")
 	case "paused":
-		return s.store.PausePlacement(ctx, sandboxID, workerID)
+		err = s.store.PausePlacement(ctx, sandboxID, workerID)
 	case "active":
 		// A paused sandbox cannot become active until Resume has atomically
 		// reacquired compute capacity and moved it to resuming.
-		return s.store.UpdatePlacementState(ctx, sandboxID, workerID, []string{"resuming", "provisioning"}, "active")
+		err = s.store.UpdatePlacementState(ctx, sandboxID, workerID, []string{"resuming", "provisioning"}, "active")
 	default:
 		return fmt.Errorf("invalid worker sandbox state %q", state)
 	}
+	if err != nil {
+		logOrchestrator(ctx, slog.LevelWarn, "worker sandbox state update failed",
+			"worker_id", workerID, "sandbox_id", sandboxID, "state", state, "err", err)
+		return err
+	}
+	logOrchestrator(ctx, slog.LevelInfo, "worker sandbox state updated",
+		"worker_id", workerID, "sandbox_id", sandboxID, "state", state)
+	return nil
+}
+
+func logLifecycleResult(
+	ctx context.Context,
+	operation string,
+	sandboxID string,
+	workerID string,
+	startedAt time.Time,
+	err error,
+) {
+	attributes := []any{
+		"operation", operation,
+		"sandbox_id", strings.TrimSpace(sandboxID),
+		"worker_id", workerID,
+		"duration_ms", time.Since(startedAt).Milliseconds(),
+	}
+	if err != nil {
+		attributes = append(attributes, "err", err)
+		logOrchestrator(ctx, slog.LevelError, "sandbox lifecycle failed", attributes...)
+		return
+	}
+	logOrchestrator(ctx, slog.LevelInfo, "sandbox lifecycle completed", attributes...)
+}
+
+func logOrchestrator(ctx context.Context, level slog.Level, message string, attributes ...any) {
+	if requestID := requestIDFromContext(ctx); requestID != "" {
+		attributes = append(attributes, "request_id", requestID)
+	}
+	slog.Log(ctx, level, message, attributes...)
 }
 
 func validateEndpoint(endpoint string) error {
